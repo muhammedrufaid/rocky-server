@@ -93,8 +93,21 @@ const fetchOffPlanProperties = async () => {
     };
 };
 
+/**
+ * Fetches all properties and returns only those with offPlan === "No" (ready properties)
+ */
+const fetchReadyProperties = async () => {
+    const { properties } = await fetchAndTransformProperties();
+    const readyProperties = properties.filter((p) => p.offPlan === 'No');
+    return {
+        properties: readyProperties,
+        total: readyProperties.length
+    };
+};
+
 module.exports = {
     fetchAndTransformProperties,
     fetchOffPlanProperties,
+    fetchReadyProperties,
     transformProperty
 };

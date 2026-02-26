@@ -30,7 +30,23 @@ const getAllOffPlanProperties = async (req, res) => {
     }
 };
 
+/**
+ * GET /properties/ready - Fetches and returns only ready properties (offPlan === "No")
+ */
+const getAllReadyProperties = async (req, res) => {
+    try {
+        const { properties, total } = await propertyService.fetchReadyProperties();
+        res.status(200).json({ properties, total });
+    } catch (error) {
+        console.error('getAllReadyProperties error:', error);
+        res.status(500).json({
+            message: error.message || 'Failed to fetch ready properties'
+        });
+    }
+};
+
 module.exports = {
     getAllProperties,
-    getAllOffPlanProperties
+    getAllOffPlanProperties,
+    getAllReadyProperties
 };
