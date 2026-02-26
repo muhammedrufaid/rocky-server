@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const connectDB = require('../config/db');
 const authRoutes = require('./routes/authRoutes');
+const frontendRoutes = require('./routes/frontendRoutes');
 
 const app = express();
 // Port 5000 is often used by AirPlay on macOS - use 5001 as fallback
@@ -25,6 +26,7 @@ app.use(express.urlencoded({ extended: true }));
 
 // Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/frontend', frontendRoutes);
 
 // Health check
 app.get('/', (req, res) => {
