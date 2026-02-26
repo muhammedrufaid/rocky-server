@@ -1,27 +1,36 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const dotenv = require('dotenv');
 const connectDB = require('../config/db');
 const authRoutes = require('./routes/authRoutes');
 
-dotenv.config();
 const app = express();
+// Port 5000 is often used by AirPlay on macOS - use 5001 as fallback
+const PORT = process.env.PORT || 5001;
 
-// connect MongoDB
-connectDB();
+// Connect to MongoDB
+connectDB(); ''
 
-// CORS - allow requests from frontend (e.g. localhost:3000)
-app.use(cors());
-
-// body parser
+// Middleware - CORS must allow your frontend origin
+app.use(
+  cors({
+    origin: true, // Allow request origin (or use '*' for all)
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
+  })
+);
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// routes
+// Routes
 app.use('/api/auth', authRoutes);
 
+// Health check
 app.get('/', (req, res) => {
-  res.send('API is running');
+  res.json({ message: 'Rocky RealEstate API is running' });
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});

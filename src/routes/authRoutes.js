@@ -1,16 +1,19 @@
 const express = require('express');
-const { signup, login } = require('../controllers/authController');
-const authMiddleware = require('../middleware/authMiddleware');
-
 const router = express.Router();
+const {
+  signup,
+  login,
+  getAllUsers,
+} = require('../controllers/authController');
+const { protect } = require('../middleware/authMiddleware');
 
-// public
+// 1. Signup - POST /api/auth/signup
 router.post('/signup', signup);
+
+// 2. Login - POST /api/auth/login
 router.post('/login', login);
 
-// example protected route to test middleware
-router.get('/me', authMiddleware, (req, res) => {
-  res.json({ user: req.user });
-});
+// 3. Get all users - GET /api/auth/users (protected)
+router.get('/users', protect, getAllUsers);
 
 module.exports = router;
