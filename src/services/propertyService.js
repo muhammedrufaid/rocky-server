@@ -111,10 +111,34 @@ const fetchReadyProperties = async (opts = {}) => {
     return { properties: items, total, pagination };
 };
 
+/**
+ * Fetches all properties and returns only those with propertyPurpose === "Buy"
+ * Supports pagination via { page, limit }
+ */
+const fetchBuyProperties = async (opts = {}) => {
+    const { properties } = await fetchAndTransformProperties();
+    const buyProperties = properties.filter((p) => (p.propertyPurpose || '').trim() === 'Buy');
+    const { items, total, pagination } = paginate(buyProperties, opts.page, opts.limit);
+    return { properties: items, total, pagination };
+};
+
+/**
+ * Fetches all properties and returns only those with propertyPurpose === "Rent"
+ * Supports pagination via { page, limit }
+ */
+const fetchRentProperties = async (opts = {}) => {
+    const { properties } = await fetchAndTransformProperties();
+    const rentProperties = properties.filter((p) => (p.propertyPurpose || '').trim() === 'Rent');
+    const { items, total, pagination } = paginate(rentProperties, opts.page, opts.limit);
+    return { properties: items, total, pagination };
+};
+
 module.exports = {
     fetchAndTransformProperties,
     fetchAllProperties,
     fetchOffPlanProperties,
     fetchReadyProperties,
+    fetchBuyProperties,
+    fetchRentProperties,
     transformProperty
 };

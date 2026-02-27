@@ -52,8 +52,44 @@ const getAllReadyProperties = async (req, res) => {
     }
 };
 
+/**
+ * GET /properties/buy - Fetches and returns only Buy properties (propertyPurpose === "Buy")
+ * Query params: page (default: 1), limit (default: 10)
+ */
+const getBuyProperties = async (req, res) => {
+    try {
+        const { page, limit } = parsePaginationParams(req);
+        const { properties, total, pagination } = await propertyService.fetchBuyProperties({ page, limit });
+        res.status(200).json({ properties, total, pagination });
+    } catch (error) {
+        console.error('getBuyProperties error:', error);
+        res.status(500).json({
+            message: error.message || 'Failed to fetch buy properties'
+        });
+    }
+};
+
+/**
+ * GET /properties/rent - Fetches and returns only Rent properties (propertyPurpose === "Rent")
+ * Query params: page (default: 1), limit (default: 10)
+ */
+const getRentProperties = async (req, res) => {
+    try {
+        const { page, limit } = parsePaginationParams(req);
+        const { properties, total, pagination } = await propertyService.fetchRentProperties({ page, limit });
+        res.status(200).json({ properties, total, pagination });
+    } catch (error) {
+        console.error('getRentProperties error:', error);
+        res.status(500).json({
+            message: error.message || 'Failed to fetch rent properties'
+        });
+    }
+};
+
 module.exports = {
     getAllProperties,
     getAllOffPlanProperties,
-    getAllReadyProperties
+    getAllReadyProperties,
+    getBuyProperties,
+    getRentProperties
 };
