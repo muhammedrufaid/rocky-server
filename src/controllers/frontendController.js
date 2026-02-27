@@ -1,12 +1,15 @@
 const propertyService = require('../services/propertyService');
+const { parsePaginationParams } = require('../utils/paginationUtils');
 
 /**
  * GET /properties - Fetches and returns all properties from Salesforce feed
+ * Query params: page (default: 1), limit (default: 10)
  */
 const getAllProperties = async (req, res) => {
     try {
-        const { properties, total } = await propertyService.fetchAndTransformProperties();
-        res.status(200).json({ properties, total });
+        const { page, limit } = parsePaginationParams(req);
+        const { properties, total, pagination } = await propertyService.fetchAllProperties({ page, limit });
+        res.status(200).json({ properties, total, pagination });
     } catch (error) {
         console.error('getAllProperties error:', error);
         res.status(500).json({
@@ -17,11 +20,13 @@ const getAllProperties = async (req, res) => {
 
 /**
  * GET /properties/off-plan - Fetches and returns only off-plan properties (offPlan === "Yes")
+ * Query params: page (default: 1), limit (default: 10)
  */
 const getAllOffPlanProperties = async (req, res) => {
     try {
-        const { properties, total } = await propertyService.fetchOffPlanProperties();
-        res.status(200).json({ properties, total });
+        const { page, limit } = parsePaginationParams(req);
+        const { properties, total, pagination } = await propertyService.fetchOffPlanProperties({ page, limit });
+        res.status(200).json({ properties, total, pagination });
     } catch (error) {
         console.error('getAllOffPlanProperties error:', error);
         res.status(500).json({
@@ -32,11 +37,13 @@ const getAllOffPlanProperties = async (req, res) => {
 
 /**
  * GET /properties/ready - Fetches and returns only ready properties (offPlan === "No")
+ * Query params: page (default: 1), limit (default: 10)
  */
 const getAllReadyProperties = async (req, res) => {
     try {
-        const { properties, total } = await propertyService.fetchReadyProperties();
-        res.status(200).json({ properties, total });
+        const { page, limit } = parsePaginationParams(req);
+        const { properties, total, pagination } = await propertyService.fetchReadyProperties({ page, limit });
+        res.status(200).json({ properties, total, pagination });
     } catch (error) {
         console.error('getAllReadyProperties error:', error);
         res.status(500).json({

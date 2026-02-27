@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { XMLParser } = require('fast-xml-parser');
 const { extractText, toArray, deduplicate } = require('../utils/xmlUtils');
+const { paginate } = require('../utils/paginationUtils');
 
 /**
  * Transforms a raw XML Property node to a clean JSON property object
@@ -75,38 +76,44 @@ const fetchAndTransformProperties = async () => {
     const rawProperties = toArray(propertiesRoot.Property);
     const properties = rawProperties.map(transformProperty).filter(Boolean);
 
-    return {
-        properties,
-        total: properties.length
-    };
+    return { properties };
+};
+
+/**
+ * Fetches all properties with optional pagination
+ * @param {object} opts - { page, limit } for pagination
+ */
+const fetchAllProperties = async (opts = {}) => {
+    const { properties } = await fetchAndTransformProperties();
+    const { items, total, pagination } = paginate(properties, opts.page, opts.limit);
+    return { properties: items, total, pagination };
 };
 
 /**
  * Fetches all properties and returns only those with offPlan === "Yes"
+ * Supports pagination via { page, limit }
  */
-const fetchOffPlanProperties = async () => {
+const fetchOffPlanProperties = async (opts = {}) => {
     const { properties } = await fetchAndTransformProperties();
     const offPlanProperties = properties.filter((p) => p.offPlan === 'Yes');
-    return {
-        properties: offPlanProperties,
-        total: offPlanProperties.length
-    };
+    const { items, total, pagination } = paginate(offPlanProperties, opts.page, opts.limit);
+    return { properties: items, total, pagination };
 };
 
 /**
  * Fetches all properties and returns only those with offPlan === "No" (ready properties)
+ * Supports pagination via { page, limit }
  */
-const fetchReadyProperties = async () => {
+const fetchReadyProperties = async (opts = {}) => {
     const { properties } = await fetchAndTransformProperties();
     const readyProperties = properties.filter((p) => p.offPlan === 'No');
-    return {
-        properties: readyProperties,
-        total: readyProperties.length
-    };
+    const { items, total, pagination } = paginate(readyProperties, opts.page, opts.limit);
+    return { properties: items, total, pagination };
 };
 
 module.exports = {
     fetchAndTransformProperties,
+    fetchAllProperties,
     fetchOffPlanProperties,
     fetchReadyProperties,
     transformProperty
