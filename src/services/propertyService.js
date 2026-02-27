@@ -133,6 +133,18 @@ const fetchRentProperties = async (opts = {}) => {
     return { properties: items, total, pagination };
 };
 
+/**
+ * Fetches all properties and returns unique propertyType values
+ * @returns {Promise<string[]>} Sorted array of unique property types
+ */
+const fetchUniquePropertyTypes = async () => {
+    const { properties } = await fetchAndTransformProperties();
+    const types = properties
+        .map((p) => (p.propertyType || '').trim())
+        .filter(Boolean);
+    return [...new Set(types)].sort();
+};
+
 module.exports = {
     fetchAndTransformProperties,
     fetchAllProperties,
@@ -140,5 +152,6 @@ module.exports = {
     fetchReadyProperties,
     fetchBuyProperties,
     fetchRentProperties,
+    fetchUniquePropertyTypes,
     transformProperty
 };

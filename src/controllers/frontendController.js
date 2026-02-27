@@ -86,10 +86,26 @@ const getRentProperties = async (req, res) => {
     }
 };
 
+/**
+ * GET /properties/types - Returns unique propertyType values from all property data
+ */
+const getUniquePropertyTypes = async (req, res) => {
+    try {
+        const propertyTypes = await propertyService.fetchUniquePropertyTypes();
+        res.status(200).json(propertyTypes);
+    } catch (error) {
+        console.error('getUniquePropertyTypes error:', error);
+        res.status(500).json({
+            message: error.message || 'Failed to fetch property types'
+        });
+    }
+};
+
 module.exports = {
     getAllProperties,
     getAllOffPlanProperties,
     getAllReadyProperties,
     getBuyProperties,
-    getRentProperties
+    getRentProperties,
+    getUniquePropertyTypes
 };
