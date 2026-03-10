@@ -134,6 +134,18 @@ const fetchRentProperties = async (opts = {}) => {
 };
 
 /**
+ * Fetches a single property by propertyRefNo
+ * Works for both Buy and Rent properties
+ * @param {string} propertyRefNo - The property reference number (e.g. "RO-S-02800")
+ * @returns {Promise<object|null>} The full property object or null if not found
+ */
+const fetchPropertyByRefNo = async (propertyRefNo) => {
+    if (!propertyRefNo || typeof propertyRefNo !== 'string') return null;
+    const { properties } = await fetchAndTransformProperties();
+    return properties.find((p) => (p.propertyRefNo || '').trim() === propertyRefNo.trim()) || null;
+};
+
+/**
  * Fetches all properties and returns unique propertyType values
  * @returns {Promise<string[]>} Sorted array of unique property types
  */
@@ -152,6 +164,7 @@ module.exports = {
     fetchReadyProperties,
     fetchBuyProperties,
     fetchRentProperties,
+    fetchPropertyByRefNo,
     fetchUniquePropertyTypes,
     transformProperty
 };

@@ -87,6 +87,28 @@ const getRentProperties = async (req, res) => {
 };
 
 /**
+ * GET /properties/:propertyRefNo - Fetches and returns a single property by reference number
+ * Works for both Buy and Rent properties
+ */
+const getPropertyByRefNo = async (req, res) => {
+    try {
+        const { propertyRefNo } = req.params;
+        const property = await propertyService.fetchPropertyByRefNo(propertyRefNo);
+        if (!property) {
+            return res.status(404).json({
+                message: `Property with reference number "${propertyRefNo}" not found`
+            });
+        }
+        res.status(200).json(property);
+    } catch (error) {
+        console.error('getPropertyByRefNo error:', error);
+        res.status(500).json({
+            message: error.message || 'Failed to fetch property'
+        });
+    }
+};
+
+/**
  * GET /properties/types - Returns unique propertyType values from all property data
  */
 const getUniquePropertyTypes = async (req, res) => {
@@ -107,5 +129,6 @@ module.exports = {
     getAllReadyProperties,
     getBuyProperties,
     getRentProperties,
+    getPropertyByRefNo,
     getUniquePropertyTypes
 };
