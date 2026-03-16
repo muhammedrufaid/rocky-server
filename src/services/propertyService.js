@@ -146,6 +146,67 @@ const fetchPropertyByRefNo = async (propertyRefNo) => {
 };
 
 /**
+ * Search fields used for matching
+ */
+const SEARCH_FIELDS = [
+    'propertyTitle',
+    'city',
+    'locality',
+    'subLocality',
+    'towerName',
+    'propertyType',
+    'propertyRefNo'
+];
+
+/**
+ * Checks if a property matches the search query (case-insensitive) on any search field
+ */
+const propertyMatchesQuery = (property, query) => {
+    const q = query.toLowerCase().trim();
+    if (!q) return false;
+
+    return SEARCH_FIELDS.some((field) => {
+        const value = (property[field] || '').toString().toLowerCase();
+        return value.includes(q);
+    });
+};
+
+/**
+ * Picks minimal fields for search suggestions
+ */
+const toSuggestionShape = (property) => ({
+    propertyRefNo: property.propertyRefNo,
+    towerName: property.towerName,
+    propertyPurpose: property.propertyPurpose,
+    propertyType: property.propertyType,
+    locality: property.locality,
+    subLocality: property.subLocality
+});
+
+/**
+ * Searches properties and returns limited suggestions for autocomplete
+ * @param {object} opts - { q: search query, limit (default: 10) }
+ * @returns {Promise<{ suggestions: object[] }>}
+ */
+const fetchSearchSuggestions = async (opts = {}) => {
+    const limit = Math.min(Math.max(parseInt(opts.limit, 10) || 10, 1), 20);
+    const query = (opts.q || '').trim();
+
+    const { properties } = await fetchAndTransformProperties();
+
+    if (!query) {
+        return { suggestions: [] };
+    }
+
+    const suggestions = properties
+        .filter((p) => propertyMatchesQuery(p, query))
+        .slice(0, limit)
+        .map(toSuggestionShape);
+
+    return { suggestions };
+};
+
+/**
  * Fetches all properties and returns unique propertyType values
  * @returns {Promise<string[]>} Sorted array of unique property types
  */
@@ -165,6 +226,7 @@ module.exports = {
     fetchBuyProperties,
     fetchRentProperties,
     fetchPropertyByRefNo,
+    fetchSearchSuggestions,
     fetchUniquePropertyTypes,
     transformProperty
 };

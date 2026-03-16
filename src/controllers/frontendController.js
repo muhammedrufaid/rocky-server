@@ -1,6 +1,8 @@
 const propertyService = require('../services/propertyService');
 const { parsePaginationParams } = require('../utils/paginationUtils');
 
+const DEFAULT_SEARCH_LIMIT = 10;
+
 /**
  * GET /properties - Fetches and returns all properties from Salesforce feed
  * Query params: page (default: 1), limit (default: 10)
@@ -109,6 +111,29 @@ const getPropertyByRefNo = async (req, res) => {
 };
 
 /**
+ * GET /properties/search - Returns search suggestions for autocomplete
+ * Query params: q (required), limit (optional, default: 10, max: 20)
+ * Returns: { suggestions: [{ propertyRefNo, towerName, propertyPurpose, propertyType, locality, subLocality }] }
+ */
+const searchProperties = async (req, res) => {
+    try {
+        const q = (req.query.q || '').trim();
+        const limit = Math.min(
+            parseInt(req.query.limit, 10) || DEFAULT_SEARCH_LIMIT,
+            20
+        );
+
+        const { suggestions } = await propertyService.fetchSearchSuggestions({ q, limit });
+        res.status(200).json({ suggestions });
+    } catch (error) {
+        console.error('searchProperties error:', error);
+        res.status(500).json({
+            message: error.message || 'Failed to search properties'
+        });
+    }
+};
+
+/**
  * GET /properties/types - Returns unique propertyType values from all property data
  */
 const getUniquePropertyTypes = async (req, res) => {
@@ -130,5 +155,6 @@ module.exports = {
     getBuyProperties,
     getRentProperties,
     getPropertyByRefNo,
+    searchProperties,
     getUniquePropertyTypes
 };
