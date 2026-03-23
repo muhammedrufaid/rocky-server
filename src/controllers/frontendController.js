@@ -134,6 +134,35 @@ const searchProperties = async (req, res) => {
 };
 
 /**
+ * GET /properties/search-by-area - Returns search suggestions for area autocomplete
+ * Query params: q (required), limit (optional, default: 10, max: 20)
+ * Returns: { suggestions: [{ type, label, full }] }
+ */
+const searchPropertiesByArea = async (req, res) => {
+    try {
+        const q = (req.query.q || '').trim();
+        if (!q) {
+            return res.status(400).json({
+                message: 'Query parameter "q" is required'
+            });
+        }
+
+        const limit = Math.min(
+            parseInt(req.query.limit, 10) || DEFAULT_SEARCH_LIMIT,
+            20
+        );
+
+        const { suggestions } = await propertyService.fetchSearchByAreaSuggestions({ q, limit });
+        res.status(200).json({ suggestions });
+    } catch (error) {
+        console.error('searchPropertiesByArea error:', error);
+        res.status(500).json({
+            message: error.message || 'Failed to search properties by area'
+        });
+    }
+};
+
+/**
  * GET /properties/types - Returns unique propertyType values from all property data
  */
 const getUniquePropertyTypes = async (req, res) => {
@@ -148,6 +177,8 @@ const getUniquePropertyTypes = async (req, res) => {
     }
 };
 
+// create a new controller function to get search-by-area
+
 module.exports = {
     getAllProperties,
     getAllOffPlanProperties,
@@ -156,5 +187,6 @@ module.exports = {
     getRentProperties,
     getPropertyByRefNo,
     searchProperties,
+    searchPropertiesByArea,
     getUniquePropertyTypes
 };

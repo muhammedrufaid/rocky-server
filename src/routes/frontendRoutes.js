@@ -8,11 +8,13 @@ const {
     getRentProperties,
     getPropertyByRefNo,
     searchProperties,
+    searchPropertiesByArea,
     getUniquePropertyTypes,
 } = require('../controllers/frontendController');
 
 router.get('/properties', getAllProperties);
 router.get('/properties/search', searchProperties);
+router.get('/properties/search-by-area', searchPropertiesByArea);
 router.get('/properties/types', getUniquePropertyTypes);
 router.get('/properties/off-plan', getAllOffPlanProperties);
 router.get('/properties/ready', getAllReadyProperties);

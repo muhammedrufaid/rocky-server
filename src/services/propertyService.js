@@ -206,6 +206,91 @@ const fetchSearchSuggestions = async (opts = {}) => {
     return { suggestions };
 };
 
+const AREA_SUGGESTION_TYPE = {
+    CITY: 'city',
+    AREA: 'area',
+    SUBAREA: 'subarea',
+    TOWER: 'tower'
+};
+
+const toComparableText = (value) => (value || '').toString().trim().toLowerCase();
+
+const getMatchPriority = (value, query) => {
+    const normalizedValue = toComparableText(value);
+    if (!normalizedValue || !query) return Number.POSITIVE_INFINITY;
+    if (normalizedValue === query) return 0;
+    if (normalizedValue.startsWith(query)) return 1;
+    if (normalizedValue.includes(query)) return 2;
+    return Number.POSITIVE_INFINITY;
+};
+
+const addUniqueSuggestion = (collection, seen, type, label, full) => {
+    const normalizedLabel = toComparableText(label);
+    if (!normalizedLabel) return;
+
+    const key = `${type}:${normalizedLabel}`;
+    if (seen.has(key)) return;
+
+    seen.add(key);
+    collection.push({
+        type,
+        label: label.trim(),
+        full: (full || label).trim()
+    });
+};
+
+/**
+ * Returns autocomplete suggestions from city/area/subarea/tower fields.
+ * @param {object} opts - { q: search query, limit (default: 10) }
+ * @returns {Promise<{ suggestions: { type: string, label: string, full: string }[] }>}
+ */
+const fetchSearchByAreaSuggestions = async (opts = {}) => {
+    const limit = Math.min(Math.max(parseInt(opts.limit, 10) || 10, 1), 20);
+    const query = toComparableText(opts.q);
+
+    if (!query) {
+        return { suggestions: [] };
+    }
+
+    const { properties } = await fetchAndTransformProperties();
+    const seen = new Set();
+    const suggestions = [];
+
+    properties.forEach((property) => {
+        const city = (property.city || '').trim();
+        const locality = (property.locality || '').trim();
+        const subLocality = (property.subLocality || '').trim();
+        const towerName = (property.towerName || '').trim();
+
+        if (getMatchPriority(city, query) !== Number.POSITIVE_INFINITY) {
+            addUniqueSuggestion(suggestions, seen, AREA_SUGGESTION_TYPE.CITY, city, city);
+        }
+
+        if (getMatchPriority(locality, query) !== Number.POSITIVE_INFINITY) {
+            const full = city ? `${locality}, ${city}` : locality;
+            addUniqueSuggestion(suggestions, seen, AREA_SUGGESTION_TYPE.AREA, locality, full);
+        }
+
+        if (getMatchPriority(subLocality, query) !== Number.POSITIVE_INFINITY) {
+            const full = locality ? `${subLocality} (${locality})` : subLocality;
+            addUniqueSuggestion(suggestions, seen, AREA_SUGGESTION_TYPE.SUBAREA, subLocality, full);
+        }
+
+        if (getMatchPriority(towerName, query) !== Number.POSITIVE_INFINITY) {
+            const full = subLocality ? `${towerName} (${subLocality})` : towerName;
+            addUniqueSuggestion(suggestions, seen, AREA_SUGGESTION_TYPE.TOWER, towerName, full);
+        }
+    });
+
+    suggestions.sort((a, b) => {
+        const priorityDiff = getMatchPriority(a.label, query) - getMatchPriority(b.label, query);
+        if (priorityDiff !== 0) return priorityDiff;
+        return a.label.localeCompare(b.label);
+    });
+
+    return { suggestions: suggestions.slice(0, limit) };
+};
+
 /**
  * Fetches all properties and returns unique propertyType values
  * @returns {Promise<string[]>} Sorted array of unique property types
@@ -227,6 +312,7 @@ module.exports = {
     fetchRentProperties,
     fetchPropertyByRefNo,
     fetchSearchSuggestions,
+    fetchSearchByAreaSuggestions,
     fetchUniquePropertyTypes,
     transformProperty
 };
