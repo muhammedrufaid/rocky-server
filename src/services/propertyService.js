@@ -208,20 +208,48 @@ const fetchSearchSuggestions = async (opts = {}) => {
 
 const AREA_SUGGESTION_TYPE = {
     CITY: 'city',
-    AREA: 'area',
-    SUBAREA: 'subarea',
+    LOCALITY: 'locality',
+    SUB_LOCALITY: 'subLocality',
     TOWER: 'tower'
 };
 
 const toComparableText = (value) => (value || '').toString().trim().toLowerCase();
 
-const getMatchPriority = (value, query) => {
+const getMatchPriority = (value, query, opts = {}) => {
+    const { allowContains = true } = opts;
     const normalizedValue = toComparableText(value);
     if (!normalizedValue || !query) return Number.POSITIVE_INFINITY;
     if (normalizedValue === query) return 0;
     if (normalizedValue.startsWith(query)) return 1;
-    if (normalizedValue.includes(query)) return 2;
+    if (allowContains && normalizedValue.includes(query)) return 2;
     return Number.POSITIVE_INFINITY;
+};
+
+const getTypePriorityMap = ({ isShortQuery, isExactCityQuery }) => {
+    if (isShortQuery) {
+        return {
+            [AREA_SUGGESTION_TYPE.CITY]: 0,
+            [AREA_SUGGESTION_TYPE.LOCALITY]: 1,
+            [AREA_SUGGESTION_TYPE.SUB_LOCALITY]: 2,
+            [AREA_SUGGESTION_TYPE.TOWER]: 3
+        };
+    }
+
+    if (isExactCityQuery) {
+        return {
+            [AREA_SUGGESTION_TYPE.CITY]: 0,
+            [AREA_SUGGESTION_TYPE.LOCALITY]: 1,
+            [AREA_SUGGESTION_TYPE.SUB_LOCALITY]: 2,
+            [AREA_SUGGESTION_TYPE.TOWER]: 3
+        };
+    }
+
+    return {
+        [AREA_SUGGESTION_TYPE.LOCALITY]: 0,
+        [AREA_SUGGESTION_TYPE.SUB_LOCALITY]: 1,
+        [AREA_SUGGESTION_TYPE.TOWER]: 2,
+        [AREA_SUGGESTION_TYPE.CITY]: 3
+    };
 };
 
 const addUniqueSuggestion = (collection, seen, type, label, full) => {
@@ -255,6 +283,11 @@ const fetchSearchByAreaSuggestions = async (opts = {}) => {
     const { properties } = await fetchAndTransformProperties();
     const seen = new Set();
     const suggestions = [];
+    const queryLength = query.length;
+    const isShortQuery = queryLength <= 2;
+    const isExactCityQuery = properties.some((property) => toComparableText(property.city) === query);
+    const typePriorityMap = getTypePriorityMap({ isShortQuery, isExactCityQuery });
+    const allowContains = !isShortQuery;
 
     properties.forEach((property) => {
         const city = (property.city || '').trim();
@@ -262,29 +295,33 @@ const fetchSearchByAreaSuggestions = async (opts = {}) => {
         const subLocality = (property.subLocality || '').trim();
         const towerName = (property.towerName || '').trim();
 
-        if (getMatchPriority(city, query) !== Number.POSITIVE_INFINITY) {
+        if (getMatchPriority(city, query, { allowContains }) !== Number.POSITIVE_INFINITY) {
             addUniqueSuggestion(suggestions, seen, AREA_SUGGESTION_TYPE.CITY, city, city);
         }
 
-        if (getMatchPriority(locality, query) !== Number.POSITIVE_INFINITY) {
+        if (getMatchPriority(locality, query, { allowContains }) !== Number.POSITIVE_INFINITY) {
             const full = city ? `${locality}, ${city}` : locality;
-            addUniqueSuggestion(suggestions, seen, AREA_SUGGESTION_TYPE.AREA, locality, full);
+            addUniqueSuggestion(suggestions, seen, AREA_SUGGESTION_TYPE.LOCALITY, locality, full);
         }
 
-        if (getMatchPriority(subLocality, query) !== Number.POSITIVE_INFINITY) {
+        if (getMatchPriority(subLocality, query, { allowContains }) !== Number.POSITIVE_INFINITY) {
             const full = locality ? `${subLocality} (${locality})` : subLocality;
-            addUniqueSuggestion(suggestions, seen, AREA_SUGGESTION_TYPE.SUBAREA, subLocality, full);
+            addUniqueSuggestion(suggestions, seen, AREA_SUGGESTION_TYPE.SUB_LOCALITY, subLocality, full);
         }
 
-        if (getMatchPriority(towerName, query) !== Number.POSITIVE_INFINITY) {
+        if (getMatchPriority(towerName, query, { allowContains }) !== Number.POSITIVE_INFINITY) {
             const full = subLocality ? `${towerName} (${subLocality})` : towerName;
             addUniqueSuggestion(suggestions, seen, AREA_SUGGESTION_TYPE.TOWER, towerName, full);
         }
     });
 
     suggestions.sort((a, b) => {
-        const priorityDiff = getMatchPriority(a.label, query) - getMatchPriority(b.label, query);
+        const typePriorityDiff = (typePriorityMap[a.type] ?? 99) - (typePriorityMap[b.type] ?? 99);
+        if (typePriorityDiff !== 0) return typePriorityDiff;
+
+        const priorityDiff = getMatchPriority(a.label, query, { allowContains }) - getMatchPriority(b.label, query, { allowContains });
         if (priorityDiff !== 0) return priorityDiff;
+
         return a.label.localeCompare(b.label);
     });
 

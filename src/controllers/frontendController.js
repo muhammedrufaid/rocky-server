@@ -136,7 +136,7 @@ const searchProperties = async (req, res) => {
 /**
  * GET /properties/search-by-area - Returns search suggestions for area autocomplete
  * Query params: q (required), limit (optional, default: 10, max: 20)
- * Returns: { suggestions: [{ type, label, full }] }
+ * Returns: { suggestions: [{ type: city|locality|subLocality|tower, label, full }] }
  */
 const searchPropertiesByArea = async (req, res) => {
     try {
