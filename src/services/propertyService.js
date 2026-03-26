@@ -340,6 +340,27 @@ const fetchUniquePropertyTypes = async () => {
     return [...new Set(types)].sort();
 };
 
+/**
+ * Fetches all properties and returns unique propertyType values
+ * while preserving their first-seen order in the feed.
+ * @returns {Promise<string[]>} Array of unique property types (stable order)
+ */
+const fetchUniquePropertyTypesInOrder = async () => {
+    const { properties } = await fetchAndTransformProperties();
+    const seen = new Set();
+    const uniqueTypes = [];
+
+    properties.forEach((p) => {
+        const type = (p.propertyType || '').trim();
+        if (!type) return;
+        if (seen.has(type)) return;
+        seen.add(type);
+        uniqueTypes.push(type);
+    });
+
+    return uniqueTypes;
+};
+
 module.exports = {
     fetchAndTransformProperties,
     fetchAllProperties,
@@ -351,5 +372,6 @@ module.exports = {
     fetchSearchSuggestions,
     fetchSearchByAreaSuggestions,
     fetchUniquePropertyTypes,
+    fetchUniquePropertyTypesInOrder,
     transformProperty
 };

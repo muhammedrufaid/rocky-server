@@ -10,12 +10,14 @@ const {
     searchProperties,
     searchPropertiesByArea,
     getUniquePropertyTypes,
+    getUniquePropertyTypesByCategory,
 } = require('../controllers/frontendController');
 
 router.get('/properties', getAllProperties);
 router.get('/properties/search', searchProperties);
 router.get('/properties/search-by-area', searchPropertiesByArea);
 router.get('/properties/types', getUniquePropertyTypes);
+router.get('/properties/types-by-category', getUniquePropertyTypesByCategory);
 router.get('/properties/off-plan', getAllOffPlanProperties);
 router.get('/properties/ready', getAllReadyProperties);
 router.get('/properties/buy', getBuyProperties);

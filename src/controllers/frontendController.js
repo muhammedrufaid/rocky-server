@@ -3,6 +3,14 @@ const { parsePaginationParams } = require('../utils/paginationUtils');
 
 const DEFAULT_SEARCH_LIMIT = 10;
 
+const RESIDENTIAL_PROPERTY_TYPES = new Set([
+    'Apartment',
+    'Penthouse',
+    'Residential Land',
+    'Townhouse',
+    'Villa'
+]);
+
 /**
  * GET /properties - Fetches and returns all properties from Salesforce feed
  * Query params: page (default: 1), limit (default: 10)
@@ -177,7 +185,29 @@ const getUniquePropertyTypes = async (req, res) => {
     }
 };
 
-// create a new controller function to get search-by-area
+/**
+ * GET /properties/types-by-category - Returns unique propertyType values with category
+ * Category rules:
+ * - Residential: Apartment, Penthouse, Residential Land, Townhouse, Villa
+ * - Commercial: everything else (including unknown/new)
+ * Output preserves original order of property types.
+ */
+const getUniquePropertyTypesByCategory = async (req, res) => {
+    try {
+        const propertyTypes = await propertyService.fetchUniquePropertyTypesInOrder();
+        const typesWithCategory = propertyTypes.map((type) => ({
+            type,
+            category: RESIDENTIAL_PROPERTY_TYPES.has(type) ? 'Residential' : 'Commercial'
+        }));
+
+        res.status(200).json(typesWithCategory);
+    } catch (error) {
+        console.error('getUniquePropertyTypesByCategory error:', error);
+        res.status(500).json({
+            message: error.message || 'Failed to fetch property types by category'
+        });
+    }
+};
 
 module.exports = {
     getAllProperties,
@@ -188,5 +218,6 @@ module.exports = {
     getPropertyByRefNo,
     searchProperties,
     searchPropertiesByArea,
-    getUniquePropertyTypes
+    getUniquePropertyTypes,
+    getUniquePropertyTypesByCategory
 };
