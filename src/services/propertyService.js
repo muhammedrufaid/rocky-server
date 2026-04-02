@@ -127,9 +127,39 @@ const fetchBuyProperties = async (opts = {}) => {
  * Supports pagination via { page, limit }
  */
 const fetchRentProperties = async (opts = {}) => {
+    const { page, limit, search = '', filters = {} } = opts;
+
+    const qLower = normalizeToLower(search);
+
+    // Normalize filter values once to avoid repeated parsing work while scanning the dataset.
+    const nf = {
+        propertyType: normalizeStringList(filters.propertyType),
+        city: normalizeStringList(filters.city),
+        locality: normalizeStringList(filters.locality),
+        subLocality: normalizeStringList(filters.subLocality),
+        towerName: normalizeStringList(filters.towerName),
+        furnished: normalizeStringList(filters.furnished),
+        offPlan: normalizeStringList(filters.offPlan),
+        propertyStatus: normalizeStringList(filters.propertyStatus),
+        bedrooms: parseOptionalNumber(filters.bedrooms),
+        bathrooms: parseOptionalNumber(filters.bathrooms),
+        priceMin: parseOptionalNumber(filters.priceMin),
+        priceMax: parseOptionalNumber(filters.priceMax),
+        propertySizeMin: parseOptionalNumber(filters.propertySizeMin),
+        propertySizeMax: parseOptionalNumber(filters.propertySizeMax)
+    };
+
     const { properties } = await fetchAndTransformProperties();
-    const rentProperties = properties.filter((p) => (p.propertyPurpose || '').trim() === 'Rent');
-    const { items, total, pagination } = paginate(rentProperties, opts.page, opts.limit);
+
+    // Conceptual flow: search across FULL dataset -> apply filters (including Rent) -> paginate LAST.
+    // Implemented as a single pass with short-circuiting for performance.
+    const matched = properties.filter((p) => {
+        if (qLower && !propertyMatchesQueryWithLower(p, qLower)) return false;
+        if ((p.propertyPurpose || '').trim() !== 'Rent') return false;
+        return propertyMatchesNormalizedFilters(p, nf);
+    });
+
+    const { items, total, pagination } = paginate(matched, page, limit);
     return { properties: items, total, pagination };
 };
 
@@ -169,6 +199,79 @@ const propertyMatchesQuery = (property, query) => {
         const value = (property[field] || '').toString().toLowerCase();
         return value.includes(q);
     });
+};
+
+/**
+ * Same matching logic as `propertyMatchesQuery`, but avoids re-normalizing the query per property.
+ * @param {object} property
+ * @param {string} qLower - normalized (trimmed, lowercased) query
+ */
+const propertyMatchesQueryWithLower = (property, qLower) => {
+    return SEARCH_FIELDS.some((field) => {
+        const value = (property[field] || '').toString().toLowerCase();
+        return value.includes(qLower);
+    });
+};
+
+const normalizeToLower = (value) => (value === undefined || value === null ? '' : value.toString()).trim().toLowerCase();
+
+const normalizeStringList = (value) => {
+    if (value === undefined || value === null) return null;
+    const parts = Array.isArray(value) ? value : String(value).split(',');
+    const normalized = parts.map((v) => normalizeToLower(v)).filter(Boolean);
+    return normalized.length ? normalized : null;
+};
+
+const parseOptionalNumber = (value) => {
+    if (value === undefined || value === null) return null;
+    const s = value.toString().replace(/,/g, '').trim();
+    if (!s) return null;
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : null;
+};
+
+const propertyMatchesNormalizedFilters = (property, nf) => {
+    if (nf.propertyType && !nf.propertyType.includes(normalizeToLower(property.propertyType))) return false;
+    if (nf.city && !nf.city.includes(normalizeToLower(property.city))) return false;
+    if (nf.locality && !nf.locality.includes(normalizeToLower(property.locality))) return false;
+    if (nf.subLocality && !nf.subLocality.includes(normalizeToLower(property.subLocality))) return false;
+    if (nf.towerName && !nf.towerName.includes(normalizeToLower(property.towerName))) return false;
+
+    if (nf.furnished && !nf.furnished.includes(normalizeToLower(property.furnished))) return false;
+    if (nf.offPlan && !nf.offPlan.includes(normalizeToLower(property.offPlan))) return false;
+    if (nf.propertyStatus && !nf.propertyStatus.includes(normalizeToLower(property.propertyStatus))) return false;
+
+    if (nf.bedrooms !== null) {
+        const bedrooms = parseOptionalNumber(property.bedrooms);
+        if (bedrooms === null || bedrooms !== nf.bedrooms) return false;
+    }
+
+    if (nf.bathrooms !== null) {
+        const bathrooms = parseOptionalNumber(property.bathrooms);
+        if (bathrooms === null || bathrooms !== nf.bathrooms) return false;
+    }
+
+    if (nf.priceMin !== null || nf.priceMax !== null) {
+        const price = parseOptionalNumber(property.price);
+        if (nf.priceMin !== null) {
+            if (price === null || price < nf.priceMin) return false;
+        }
+        if (nf.priceMax !== null) {
+            if (price === null || price > nf.priceMax) return false;
+        }
+    }
+
+    if (nf.propertySizeMin !== null || nf.propertySizeMax !== null) {
+        const size = parseOptionalNumber(property.propertySize);
+        if (nf.propertySizeMin !== null) {
+            if (size === null || size < nf.propertySizeMin) return false;
+        }
+        if (nf.propertySizeMax !== null) {
+            if (size === null || size > nf.propertySizeMax) return false;
+        }
+    }
+
+    return true;
 };
 
 /**

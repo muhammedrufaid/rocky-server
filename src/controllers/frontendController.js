@@ -86,7 +86,57 @@ const getBuyProperties = async (req, res) => {
 const getRentProperties = async (req, res) => {
     try {
         const { page, limit } = parsePaginationParams(req);
-        const { properties, total, pagination } = await propertyService.fetchRentProperties({ page, limit });
+        const search = (req.query.search || '').toString().trim();
+
+        let filters = {};
+        if (req.query.filters !== undefined) {
+            try {
+                if (typeof req.query.filters === 'string') {
+                    filters = JSON.parse(req.query.filters);
+                } else if (typeof req.query.filters === 'object' && req.query.filters !== null) {
+                    filters = req.query.filters;
+                } else {
+                    filters = {};
+                }
+            } catch (err) {
+                return res.status(400).json({
+                    message: 'Invalid "filters" JSON payload'
+                });
+            }
+        }
+
+        // Support either a JSON `filters` payload or flat query params.
+        // If both are provided, the JSON `filters` wins.
+        const filterQueryKeys = [
+            'propertyType',
+            'city',
+            'locality',
+            'subLocality',
+            'towerName',
+            'bedrooms',
+            'bathrooms',
+            'furnished',
+            'offPlan',
+            'propertyStatus',
+            'priceMin',
+            'priceMax',
+            'propertySizeMin',
+            'propertySizeMax'
+        ];
+
+        const directFilters = {};
+        filterQueryKeys.forEach((key) => {
+            if (req.query[key] !== undefined) directFilters[key] = req.query[key];
+        });
+
+        const mergedFilters = { ...directFilters, ...filters };
+
+        const { properties, total, pagination } = await propertyService.fetchRentProperties({
+            page,
+            limit,
+            search,
+            filters: mergedFilters
+        });
         res.status(200).json({ properties, total, pagination });
     } catch (error) {
         console.error('getRentProperties error:', error);
