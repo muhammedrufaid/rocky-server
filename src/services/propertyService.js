@@ -84,8 +84,35 @@ const fetchAndTransformProperties = async () => {
  * @param {object} opts - { page, limit } for pagination
  */
 const fetchAllProperties = async (opts = {}) => {
+    const { page, limit, search = '', filters = {} } = opts;
+
+    const qLower = normalizeToLower(search);
+
+    const nf = {
+        propertyType: normalizeStringList(filters.propertyType),
+        city: normalizeStringList(filters.city),
+        locality: normalizeStringList(filters.locality),
+        subLocality: normalizeStringList(filters.subLocality),
+        towerName: normalizeStringList(filters.towerName),
+        furnished: normalizeStringList(filters.furnished),
+        offPlan: normalizeStringList(filters.offPlan),
+        propertyStatus: normalizeStringList(filters.propertyStatus),
+        bedrooms: parseOptionalNumber(filters.bedrooms),
+        bathrooms: parseOptionalNumber(filters.bathrooms),
+        priceMin: parseOptionalNumber(filters.priceMin),
+        priceMax: parseOptionalNumber(filters.priceMax),
+        propertySizeMin: parseOptionalNumber(filters.propertySizeMin),
+        propertySizeMax: parseOptionalNumber(filters.propertySizeMax)
+    };
+
     const { properties } = await fetchAndTransformProperties();
-    const { items, total, pagination } = paginate(properties, opts.page, opts.limit);
+
+    const matched = properties.filter((p) => {
+        if (qLower && !propertyMatchesQueryWithLower(p, qLower)) return false;
+        return propertyMatchesNormalizedFilters(p, nf);
+    });
+
+    const { items, total, pagination } = paginate(matched, page, limit);
     return { properties: items, total, pagination };
 };
 
@@ -94,9 +121,36 @@ const fetchAllProperties = async (opts = {}) => {
  * Supports pagination via { page, limit }
  */
 const fetchOffPlanProperties = async (opts = {}) => {
+    const { page, limit, search = '', filters = {} } = opts;
+
+    const qLower = normalizeToLower(search);
+
+    const nf = {
+        propertyType: normalizeStringList(filters.propertyType),
+        city: normalizeStringList(filters.city),
+        locality: normalizeStringList(filters.locality),
+        subLocality: normalizeStringList(filters.subLocality),
+        towerName: normalizeStringList(filters.towerName),
+        furnished: normalizeStringList(filters.furnished),
+        offPlan: normalizeStringList(filters.offPlan),
+        propertyStatus: normalizeStringList(filters.propertyStatus),
+        bedrooms: parseOptionalNumber(filters.bedrooms),
+        bathrooms: parseOptionalNumber(filters.bathrooms),
+        priceMin: parseOptionalNumber(filters.priceMin),
+        priceMax: parseOptionalNumber(filters.priceMax),
+        propertySizeMin: parseOptionalNumber(filters.propertySizeMin),
+        propertySizeMax: parseOptionalNumber(filters.propertySizeMax)
+    };
+
     const { properties } = await fetchAndTransformProperties();
-    const offPlanProperties = properties.filter((p) => p.offPlan === 'Yes');
-    const { items, total, pagination } = paginate(offPlanProperties, opts.page, opts.limit);
+
+    const matched = properties.filter((p) => {
+        if (qLower && !propertyMatchesQueryWithLower(p, qLower)) return false;
+        if (p.offPlan !== 'Yes') return false;
+        return propertyMatchesNormalizedFilters(p, nf);
+    });
+
+    const { items, total, pagination } = paginate(matched, page, limit);
     return { properties: items, total, pagination };
 };
 
@@ -105,9 +159,36 @@ const fetchOffPlanProperties = async (opts = {}) => {
  * Supports pagination via { page, limit }
  */
 const fetchReadyProperties = async (opts = {}) => {
+    const { page, limit, search = '', filters = {} } = opts;
+
+    const qLower = normalizeToLower(search);
+
+    const nf = {
+        propertyType: normalizeStringList(filters.propertyType),
+        city: normalizeStringList(filters.city),
+        locality: normalizeStringList(filters.locality),
+        subLocality: normalizeStringList(filters.subLocality),
+        towerName: normalizeStringList(filters.towerName),
+        furnished: normalizeStringList(filters.furnished),
+        offPlan: normalizeStringList(filters.offPlan),
+        propertyStatus: normalizeStringList(filters.propertyStatus),
+        bedrooms: parseOptionalNumber(filters.bedrooms),
+        bathrooms: parseOptionalNumber(filters.bathrooms),
+        priceMin: parseOptionalNumber(filters.priceMin),
+        priceMax: parseOptionalNumber(filters.priceMax),
+        propertySizeMin: parseOptionalNumber(filters.propertySizeMin),
+        propertySizeMax: parseOptionalNumber(filters.propertySizeMax)
+    };
+
     const { properties } = await fetchAndTransformProperties();
-    const readyProperties = properties.filter((p) => p.offPlan === 'No');
-    const { items, total, pagination } = paginate(readyProperties, opts.page, opts.limit);
+
+    const matched = properties.filter((p) => {
+        if (qLower && !propertyMatchesQueryWithLower(p, qLower)) return false;
+        if (p.offPlan !== 'No') return false;
+        return propertyMatchesNormalizedFilters(p, nf);
+    });
+
+    const { items, total, pagination } = paginate(matched, page, limit);
     return { properties: items, total, pagination };
 };
 
@@ -116,9 +197,36 @@ const fetchReadyProperties = async (opts = {}) => {
  * Supports pagination via { page, limit }
  */
 const fetchBuyProperties = async (opts = {}) => {
+    const { page, limit, search = '', filters = {} } = opts;
+
+    const qLower = normalizeToLower(search);
+
+    const nf = {
+        propertyType: normalizeStringList(filters.propertyType),
+        city: normalizeStringList(filters.city),
+        locality: normalizeStringList(filters.locality),
+        subLocality: normalizeStringList(filters.subLocality),
+        towerName: normalizeStringList(filters.towerName),
+        furnished: normalizeStringList(filters.furnished),
+        offPlan: normalizeStringList(filters.offPlan),
+        propertyStatus: normalizeStringList(filters.propertyStatus),
+        bedrooms: parseOptionalNumber(filters.bedrooms),
+        bathrooms: parseOptionalNumber(filters.bathrooms),
+        priceMin: parseOptionalNumber(filters.priceMin),
+        priceMax: parseOptionalNumber(filters.priceMax),
+        propertySizeMin: parseOptionalNumber(filters.propertySizeMin),
+        propertySizeMax: parseOptionalNumber(filters.propertySizeMax)
+    };
+
     const { properties } = await fetchAndTransformProperties();
-    const buyProperties = properties.filter((p) => (p.propertyPurpose || '').trim() === 'Buy');
-    const { items, total, pagination } = paginate(buyProperties, opts.page, opts.limit);
+
+    const matched = properties.filter((p) => {
+        if (qLower && !propertyMatchesQueryWithLower(p, qLower)) return false;
+        if ((p.propertyPurpose || '').trim() !== 'Buy') return false;
+        return propertyMatchesNormalizedFilters(p, nf);
+    });
+
+    const { items, total, pagination } = paginate(matched, page, limit);
     return { properties: items, total, pagination };
 };
 

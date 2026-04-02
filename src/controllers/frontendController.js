@@ -18,7 +18,55 @@ const RESIDENTIAL_PROPERTY_TYPES = new Set([
 const getAllProperties = async (req, res) => {
     try {
         const { page, limit } = parsePaginationParams(req);
-        const { properties, total, pagination } = await propertyService.fetchAllProperties({ page, limit });
+        const search = (req.query.search || '').toString().trim();
+
+        let filters = {};
+        if (req.query.filters !== undefined) {
+            try {
+                if (typeof req.query.filters === 'string') {
+                    filters = JSON.parse(req.query.filters);
+                } else if (typeof req.query.filters === 'object' && req.query.filters !== null) {
+                    filters = req.query.filters;
+                } else {
+                    filters = {};
+                }
+            } catch (err) {
+                return res.status(400).json({
+                    message: 'Invalid "filters" JSON payload'
+                });
+            }
+        }
+
+        const filterQueryKeys = [
+            'propertyType',
+            'city',
+            'locality',
+            'subLocality',
+            'towerName',
+            'bedrooms',
+            'bathrooms',
+            'furnished',
+            'offPlan',
+            'propertyStatus',
+            'priceMin',
+            'priceMax',
+            'propertySizeMin',
+            'propertySizeMax'
+        ];
+
+        const directFilters = {};
+        filterQueryKeys.forEach((key) => {
+            if (req.query[key] !== undefined) directFilters[key] = req.query[key];
+        });
+
+        const mergedFilters = { ...directFilters, ...filters };
+
+        const { properties, total, pagination } = await propertyService.fetchAllProperties({
+            page,
+            limit,
+            search,
+            filters: mergedFilters
+        });
         res.status(200).json({ properties, total, pagination });
     } catch (error) {
         console.error('getAllProperties error:', error);
@@ -35,7 +83,55 @@ const getAllProperties = async (req, res) => {
 const getAllOffPlanProperties = async (req, res) => {
     try {
         const { page, limit } = parsePaginationParams(req);
-        const { properties, total, pagination } = await propertyService.fetchOffPlanProperties({ page, limit });
+        const search = (req.query.search || '').toString().trim();
+
+        let filters = {};
+        if (req.query.filters !== undefined) {
+            try {
+                if (typeof req.query.filters === 'string') {
+                    filters = JSON.parse(req.query.filters);
+                } else if (typeof req.query.filters === 'object' && req.query.filters !== null) {
+                    filters = req.query.filters;
+                } else {
+                    filters = {};
+                }
+            } catch (err) {
+                return res.status(400).json({
+                    message: 'Invalid "filters" JSON payload'
+                });
+            }
+        }
+
+        const filterQueryKeys = [
+            'propertyType',
+            'city',
+            'locality',
+            'subLocality',
+            'towerName',
+            'bedrooms',
+            'bathrooms',
+            'furnished',
+            'offPlan',
+            'propertyStatus',
+            'priceMin',
+            'priceMax',
+            'propertySizeMin',
+            'propertySizeMax'
+        ];
+
+        const directFilters = {};
+        filterQueryKeys.forEach((key) => {
+            if (req.query[key] !== undefined) directFilters[key] = req.query[key];
+        });
+
+        const mergedFilters = { ...directFilters, ...filters };
+
+        const { properties, total, pagination } = await propertyService.fetchOffPlanProperties({
+            page,
+            limit,
+            search,
+            filters: mergedFilters
+        });
         res.status(200).json({ properties, total, pagination });
     } catch (error) {
         console.error('getAllOffPlanProperties error:', error);
@@ -52,7 +148,55 @@ const getAllOffPlanProperties = async (req, res) => {
 const getAllReadyProperties = async (req, res) => {
     try {
         const { page, limit } = parsePaginationParams(req);
-        const { properties, total, pagination } = await propertyService.fetchReadyProperties({ page, limit });
+        const search = (req.query.search || '').toString().trim();
+
+        let filters = {};
+        if (req.query.filters !== undefined) {
+            try {
+                if (typeof req.query.filters === 'string') {
+                    filters = JSON.parse(req.query.filters);
+                } else if (typeof req.query.filters === 'object' && req.query.filters !== null) {
+                    filters = req.query.filters;
+                } else {
+                    filters = {};
+                }
+            } catch (err) {
+                return res.status(400).json({
+                    message: 'Invalid "filters" JSON payload'
+                });
+            }
+        }
+
+        const filterQueryKeys = [
+            'propertyType',
+            'city',
+            'locality',
+            'subLocality',
+            'towerName',
+            'bedrooms',
+            'bathrooms',
+            'furnished',
+            'offPlan',
+            'propertyStatus',
+            'priceMin',
+            'priceMax',
+            'propertySizeMin',
+            'propertySizeMax'
+        ];
+
+        const directFilters = {};
+        filterQueryKeys.forEach((key) => {
+            if (req.query[key] !== undefined) directFilters[key] = req.query[key];
+        });
+
+        const mergedFilters = { ...directFilters, ...filters };
+
+        const { properties, total, pagination } = await propertyService.fetchReadyProperties({
+            page,
+            limit,
+            search,
+            filters: mergedFilters
+        });
         res.status(200).json({ properties, total, pagination });
     } catch (error) {
         console.error('getAllReadyProperties error:', error);
@@ -69,7 +213,55 @@ const getAllReadyProperties = async (req, res) => {
 const getBuyProperties = async (req, res) => {
     try {
         const { page, limit } = parsePaginationParams(req);
-        const { properties, total, pagination } = await propertyService.fetchBuyProperties({ page, limit });
+        const search = (req.query.search || '').toString().trim();
+
+        let filters = {};
+        if (req.query.filters !== undefined) {
+            try {
+                if (typeof req.query.filters === 'string') {
+                    filters = JSON.parse(req.query.filters);
+                } else if (typeof req.query.filters === 'object' && req.query.filters !== null) {
+                    filters = req.query.filters;
+                } else {
+                    filters = {};
+                }
+            } catch (err) {
+                return res.status(400).json({
+                    message: 'Invalid "filters" JSON payload'
+                });
+            }
+        }
+
+        const filterQueryKeys = [
+            'propertyType',
+            'city',
+            'locality',
+            'subLocality',
+            'towerName',
+            'bedrooms',
+            'bathrooms',
+            'furnished',
+            'offPlan',
+            'propertyStatus',
+            'priceMin',
+            'priceMax',
+            'propertySizeMin',
+            'propertySizeMax'
+        ];
+
+        const directFilters = {};
+        filterQueryKeys.forEach((key) => {
+            if (req.query[key] !== undefined) directFilters[key] = req.query[key];
+        });
+
+        const mergedFilters = { ...directFilters, ...filters };
+
+        const { properties, total, pagination } = await propertyService.fetchBuyProperties({
+            page,
+            limit,
+            search,
+            filters: mergedFilters
+        });
         res.status(200).json({ properties, total, pagination });
     } catch (error) {
         console.error('getBuyProperties error:', error);
