@@ -402,6 +402,25 @@ const toSuggestionShape = (property) => ({
 const fetchSearchSuggestions = async (opts = {}) => {
     const limit = Math.min(Math.max(parseInt(opts.limit, 10) || 10, 1), 20);
     const query = (opts.q || '').trim();
+    const qLower = normalizeToLower(query);
+    const filters = opts.filters || {};
+
+    const nf = {
+        propertyType: normalizeStringList(filters.propertyType),
+        city: normalizeStringList(filters.city),
+        locality: normalizeStringList(filters.locality),
+        subLocality: normalizeStringList(filters.subLocality),
+        towerName: normalizeStringList(filters.towerName),
+        furnished: normalizeStringList(filters.furnished),
+        offPlan: normalizeStringList(filters.offPlan),
+        propertyStatus: normalizeStringList(filters.propertyStatus),
+        bedrooms: parseOptionalNumber(filters.bedrooms),
+        bathrooms: parseOptionalNumber(filters.bathrooms),
+        priceMin: parseOptionalNumber(filters.priceMin),
+        priceMax: parseOptionalNumber(filters.priceMax),
+        propertySizeMin: parseOptionalNumber(filters.propertySizeMin),
+        propertySizeMax: parseOptionalNumber(filters.propertySizeMax)
+    };
 
     const { properties } = await fetchAndTransformProperties();
 
@@ -410,7 +429,9 @@ const fetchSearchSuggestions = async (opts = {}) => {
     }
 
     const suggestions = properties
-        .filter((p) => propertyMatchesQuery(p, query))
+        // Search first (conceptually), then apply filters, then limit.
+        .filter((p) => propertyMatchesQueryWithLower(p, qLower))
+        .filter((p) => propertyMatchesNormalizedFilters(p, nf))
         .slice(0, limit)
         .map(toSuggestionShape);
 
@@ -463,6 +484,39 @@ const getTypePriorityMap = ({ isShortQuery, isExactCityQuery }) => {
     };
 };
 
+/**
+ * Location display for sub-locality suggestions:
+ * subLocality (locality, city) if both; else subLocality (locality); else subLocality (city); else subLocality.
+ */
+const formatSubLocalityFull = (subLocality, locality, city) => {
+    const sub = (subLocality || '').trim();
+    const loc = (locality || '').trim();
+    const c = (city || '').trim();
+    if (!sub) return '';
+    if (loc && c) return `${sub} (${loc}, ${c})`;
+    if (loc) return `${sub} (${loc})`;
+    if (c) return `${sub} (${c})`;
+    return sub;
+};
+
+/** Locality row: locality (city), or locality if no city. */
+const formatLocalityFull = (locality, city) => {
+    const loc = (locality || '').trim();
+    const c = (city || '').trim();
+    if (!loc) return '';
+    if (c) return `${loc} (${c})`;
+    return loc;
+};
+
+/** Tower row: tower (subLocality, locality, city) with empty parts omitted. */
+const formatTowerFull = (towerName, subLocality, locality, city) => {
+    const tower = (towerName || '').trim();
+    const parts = [subLocality, locality, city].map((p) => (p || '').trim()).filter(Boolean);
+    if (!tower) return '';
+    if (!parts.length) return tower;
+    return `${tower} (${parts.join(', ')})`;
+};
+
 const addUniqueSuggestion = (collection, seen, type, label, full) => {
     const normalizedLabel = toComparableText(label);
     if (!normalizedLabel) return;
@@ -486,6 +540,24 @@ const addUniqueSuggestion = (collection, seen, type, label, full) => {
 const fetchSearchByAreaSuggestions = async (opts = {}) => {
     const limit = Math.min(Math.max(parseInt(opts.limit, 10) || 10, 1), 20);
     const query = toComparableText(opts.q);
+    const filters = opts.filters || {};
+
+    const nf = {
+        propertyType: normalizeStringList(filters.propertyType),
+        city: normalizeStringList(filters.city),
+        locality: normalizeStringList(filters.locality),
+        subLocality: normalizeStringList(filters.subLocality),
+        towerName: normalizeStringList(filters.towerName),
+        furnished: normalizeStringList(filters.furnished),
+        offPlan: normalizeStringList(filters.offPlan),
+        propertyStatus: normalizeStringList(filters.propertyStatus),
+        bedrooms: parseOptionalNumber(filters.bedrooms),
+        bathrooms: parseOptionalNumber(filters.bathrooms),
+        priceMin: parseOptionalNumber(filters.priceMin),
+        priceMax: parseOptionalNumber(filters.priceMax),
+        propertySizeMin: parseOptionalNumber(filters.propertySizeMin),
+        propertySizeMax: parseOptionalNumber(filters.propertySizeMax)
+    };
 
     if (!query) {
         return { suggestions: [] };
@@ -506,22 +578,37 @@ const fetchSearchByAreaSuggestions = async (opts = {}) => {
         const subLocality = (property.subLocality || '').trim();
         const towerName = (property.towerName || '').trim();
 
-        if (getMatchPriority(city, query, { allowContains }) !== Number.POSITIVE_INFINITY) {
+        // "Search" first (any area field match), then apply filters.
+        const cityPriority = getMatchPriority(city, query, { allowContains });
+        const localityPriority = getMatchPriority(locality, query, { allowContains });
+        const subLocalityPriority = getMatchPriority(subLocality, query, { allowContains });
+        const towerPriority = getMatchPriority(towerName, query, { allowContains });
+
+        const hasAnyMatch =
+            cityPriority !== Number.POSITIVE_INFINITY ||
+            localityPriority !== Number.POSITIVE_INFINITY ||
+            subLocalityPriority !== Number.POSITIVE_INFINITY ||
+            towerPriority !== Number.POSITIVE_INFINITY;
+
+        if (!hasAnyMatch) return;
+        if (!propertyMatchesNormalizedFilters(property, nf)) return;
+
+        if (cityPriority !== Number.POSITIVE_INFINITY) {
             addUniqueSuggestion(suggestions, seen, AREA_SUGGESTION_TYPE.CITY, city, city);
         }
 
-        if (getMatchPriority(locality, query, { allowContains }) !== Number.POSITIVE_INFINITY) {
-            const full = city ? `${locality}, ${city}` : locality;
+        if (localityPriority !== Number.POSITIVE_INFINITY) {
+            const full = formatLocalityFull(locality, city);
             addUniqueSuggestion(suggestions, seen, AREA_SUGGESTION_TYPE.LOCALITY, locality, full);
         }
 
-        if (getMatchPriority(subLocality, query, { allowContains }) !== Number.POSITIVE_INFINITY) {
-            const full = locality ? `${subLocality} (${locality})` : subLocality;
+        if (subLocalityPriority !== Number.POSITIVE_INFINITY) {
+            const full = formatSubLocalityFull(subLocality, locality, city);
             addUniqueSuggestion(suggestions, seen, AREA_SUGGESTION_TYPE.SUB_LOCALITY, subLocality, full);
         }
 
-        if (getMatchPriority(towerName, query, { allowContains }) !== Number.POSITIVE_INFINITY) {
-            const full = subLocality ? `${towerName} (${subLocality})` : towerName;
+        if (towerPriority !== Number.POSITIVE_INFINITY) {
+            const full = formatTowerFull(towerName, subLocality, locality, city);
             addUniqueSuggestion(suggestions, seen, AREA_SUGGESTION_TYPE.TOWER, towerName, full);
         }
     });
