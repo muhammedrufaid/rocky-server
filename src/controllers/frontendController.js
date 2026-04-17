@@ -5,10 +5,10 @@ const DEFAULT_SEARCH_LIMIT = 10;
 
 const RESIDENTIAL_PROPERTY_TYPES = new Set([
     'Apartment',
-    'Penthouse',
+    'Pent House',
     'Residential Land',
     'Townhouse',
-    'Villa'
+    'Villa',
 ]);
 
 /**
