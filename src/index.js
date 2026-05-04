@@ -4,13 +4,14 @@ const cors = require('cors');
 const connectDB = require('../config/db');
 const authRoutes = require('./routes/authRoutes');
 const frontendRoutes = require('./routes/frontendRoutes');
+const salesforceRoutes = require('./routes/salesforceRoutes');
 
 const app = express();
 // Port 5000 is often used by AirPlay on macOS - use 5001 as fallback
 const PORT = process.env.PORT || 5001;
 
 // Connect to MongoDB
-connectDB(); ''
+connectDB();
 
 // Middleware - CORS must allow your frontend origin
 app.use(
@@ -21,12 +22,20 @@ app.use(
     credentials: true,
   })
 );
+// Allow posting raw XML (content-type: application/xml or text/xml)
+app.use(
+  express.text({
+    type: ['application/xml', 'text/xml', 'application/xhtml+xml', 'text/plain'],
+    limit: '50mb',
+  })
+);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/frontend', frontendRoutes);
+app.use('/api/salesforce', salesforceRoutes);
 
 // Health check
 app.get('/', (req, res) => {
