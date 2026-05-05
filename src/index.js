@@ -5,13 +5,11 @@ const connectDB = require('../config/db');
 const authRoutes = require('./routes/authRoutes');
 const frontendRoutes = require('./routes/frontendRoutes');
 const salesforceRoutes = require('./routes/salesforceRoutes');
+const { startSalesforceMigrateScheduler } = require('./jobs/salesforceMigrateScheduler');
 
 const app = express();
 // Port 5000 is often used by AirPlay on macOS - use 5001 as fallback
 const PORT = process.env.PORT || 5001;
-
-// Connect to MongoDB
-connectDB();
 
 // Middleware - CORS must allow your frontend origin
 app.use(
@@ -42,6 +40,16 @@ app.get('/', (req, res) => {
   res.json({ message: 'Rocky RealEstate API is running' });
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+const bootstrap = async () => {
+  await connectDB();
+  startSalesforceMigrateScheduler();
+
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+};
+
+bootstrap().catch((err) => {
+  console.error('Failed to start server', err);
+  process.exit(1);
 });

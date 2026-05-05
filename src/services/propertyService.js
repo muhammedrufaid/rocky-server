@@ -44,10 +44,18 @@ const transformProperty = (prop) => {
     };
 };
 
+const XML_PARSER_OPTIONS = {
+    ignoreAttributes: false,
+    trimValues: true,
+    parseTagValue: false,
+    parseAttributeValue: false
+};
+
 /**
- * Fetches properties from Salesforce XML feed and returns transformed JSON
+ * Downloads raw XML from BASE_URL_SALESFORCE (for migrate jobs / hashing).
+ * @returns {Promise<{ xmlText: string, etag: string|null, lastModified: string|null }>}
  */
-const fetchAndTransformProperties = async () => {
+const fetchSalesforceXml = async () => {
     const baseUrl = process.env.BASE_URL_SALESFORCE;
     if (!baseUrl) {
         throw new Error('BASE_URL_SALESFORCE is not configured in .env');
@@ -59,24 +67,42 @@ const fetchAndTransformProperties = async () => {
     }
 
     const xmlText = await response.text();
-    const parser = new XMLParser({
-        ignoreAttributes: false,
-        trimValues: true,
-        parseTagValue: false,
-        parseAttributeValue: false
-    });
+    const etag = response.headers.get('etag');
+    const lastModified = response.headers.get('last-modified');
 
+    return {
+        xmlText,
+        etag: etag || null,
+        lastModified: lastModified || null
+    };
+};
+
+/**
+ * Parses Salesforce Properties XML into transformed property objects.
+ * @param {string} xmlText
+ * @returns {{ properties: object[] }}
+ */
+const parseXmlToProperties = (xmlText) => {
+    const parser = new XMLParser(XML_PARSER_OPTIONS);
     const parsed = parser.parse(xmlText);
     const propertiesRoot = parsed?.Properties;
 
     if (!propertiesRoot) {
-        return { properties: [], total: 0 };
+        return { properties: [] };
     }
 
     const rawProperties = toArray(propertiesRoot.Property);
     const properties = rawProperties.map(transformProperty).filter(Boolean);
 
     return { properties };
+};
+
+/**
+ * Fetches properties from Salesforce XML feed and returns transformed JSON
+ */
+const fetchAndTransformProperties = async () => {
+    const { xmlText } = await fetchSalesforceXml();
+    return parseXmlToProperties(xmlText);
 };
 
 /**
@@ -660,6 +686,8 @@ const fetchUniquePropertyTypesInOrder = async () => {
 };
 
 module.exports = {
+    fetchSalesforceXml,
+    parseXmlToProperties,
     fetchAndTransformProperties,
     fetchAllProperties,
     fetchOffPlanProperties,
