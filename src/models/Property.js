@@ -2,11 +2,9 @@ const mongoose = require('mongoose');
 
 const propertySchema = new mongoose.Schema(
   {
-    source: { type: String, default: 'salesforce', index: true },
-    sourceId: { type: String, required: true },
+    propertyRefNo: { type: String, required: true, index: true },
 
     // Common fields we use in the app (keeps queries fast/typed)
-    propertyRefNo: { type: String, index: true },
     permitNumber: String,
     propertyStatus: String,
     propertyPurpose: String,
@@ -33,14 +31,11 @@ const propertySchema = new mongoose.Schema(
     features: [String],
     portals: [String],
     images: [String],
-
-    // Full normalized record (future-proof if XML adds fields)
-    data: { type: mongoose.Schema.Types.Mixed, default: {} },
   },
-  { timestamps: true }
+  { timestamps: false, versionKey: false }
 );
 
-propertySchema.index({ source: 1, sourceId: 1 }, { unique: true });
+propertySchema.index({ propertyRefNo: 1 }, { unique: true });
 
 module.exports = mongoose.model('Property', propertySchema);
 

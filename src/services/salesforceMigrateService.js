@@ -15,24 +15,21 @@ const log = (msg, extra) => {
 
 /**
  * @param {object[]} properties
- * @param {string} [source]
  */
-const buildBulkUpserts = ({ properties, source = 'salesforce' }) => {
+const buildBulkUpserts = ({ properties }) => {
   const ops = [];
 
   properties.forEach((p) => {
     if (!p) return;
-    const sourceId = (p.propertyRefNo || '').trim();
-    if (!sourceId) return;
+    const propertyRefNo = (p.propertyRefNo || p.sourceId || '').trim();
+    if (!propertyRefNo) return;
 
     ops.push({
       updateOne: {
-        filter: { source, sourceId },
+        filter: { propertyRefNo },
         update: {
           $set: {
-            source,
-            sourceId,
-            propertyRefNo: p.propertyRefNo || null,
+            propertyRefNo,
             permitNumber: p.permitNumber || null,
             propertyStatus: p.propertyStatus || null,
             propertyPurpose: p.propertyPurpose || null,
@@ -58,7 +55,15 @@ const buildBulkUpserts = ({ properties, source = 'salesforce' }) => {
             features: Array.isArray(p.features) ? p.features : [],
             portals: Array.isArray(p.portals) ? p.portals : [],
             images: Array.isArray(p.images) ? p.images : [],
-            data: p,
+          },
+          // Cleanup legacy duplicated fields from earlier schema/migrations.
+          $unset: {
+            source: '',
+            data: '',
+            sourceId: '',
+            __v: '',
+            createdAt: '',
+            updatedAt: '',
           },
         },
         upsert: true,
