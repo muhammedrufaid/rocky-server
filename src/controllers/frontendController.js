@@ -1,4 +1,4 @@
-const propertyService = require('../services/propertyService');
+const propertyService = require('../services/propertyDbService');
 const { parsePaginationParams } = require('../utils/paginationUtils');
 
 const DEFAULT_SEARCH_LIMIT = 10;
