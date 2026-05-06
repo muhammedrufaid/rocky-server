@@ -5,6 +5,7 @@ const connectDB = require('../config/db');
 const authRoutes = require('./routes/authRoutes');
 const frontendRoutes = require('./routes/frontendRoutes');
 const salesforceRoutes = require('./routes/salesforceRoutes');
+const contactRoutes = require('./routes/contactRoutes');
 const { startSalesforceMigrateScheduler } = require('./jobs/salesforceMigrateScheduler');
 
 const app = express();
@@ -34,6 +35,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use('/api/auth', authRoutes);
 app.use('/api/frontend', frontendRoutes);
 app.use('/api/salesforce', salesforceRoutes);
+app.use('/api/contact', contactRoutes);
 
 // Health check
 app.get('/', (req, res) => {
