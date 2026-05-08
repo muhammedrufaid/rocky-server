@@ -1,20 +1,19 @@
 const mongoose = require('mongoose');
-const Sales = require('../models/sales');
+const Sell = require('../models/sell');
 
-// 1. Create sales inquiry - POST /api/sales
-const createSales = async (req, res) => {
+// 1. Create sell inquiry - POST /api/sell
+const createSell = async (req, res) => {
   try {
     const { fullName, phone, email, propertyType, locationArea, message } = req.body;
 
     if (!fullName || !phone || !email || !propertyType || !locationArea || !message) {
       return res.status(400).json({
         success: false,
-        message:
-          'Please provide fullName, phone, email, propertyType, locationArea and message',
+        message: 'Please provide fullName, phone, email, propertyType, locationArea and message',
       });
     }
 
-    const sales = await Sales.create({
+    const sell = await Sell.create({
       fullName,
       phone,
       email,
@@ -25,8 +24,8 @@ const createSales = async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      message: 'Sales inquiry created successfully',
-      data: sales,
+      message: 'Sell inquiry created successfully',
+      data: sell,
     });
   } catch (error) {
     return res.status(500).json({
@@ -36,15 +35,15 @@ const createSales = async (req, res) => {
   }
 };
 
-// 2. Get all sales inquiries - GET /api/sales
-const getAllSales = async (req, res) => {
+// 2. Get all sell inquiries - GET /api/sell
+const getAllSell = async (req, res) => {
   try {
-    const sales = await Sales.find().sort({ createdAt: -1 });
+    const sells = await Sell.find().sort({ createdAt: -1 });
 
     return res.status(200).json({
       success: true,
-      count: sales.length,
-      data: sales,
+      count: sells.length,
+      data: sells,
     });
   } catch (error) {
     return res.status(500).json({
@@ -54,29 +53,29 @@ const getAllSales = async (req, res) => {
   }
 };
 
-// 3. Get sales inquiry by id - GET /api/sales/:id
-const getSalesById = async (req, res) => {
+// 3. Get sell inquiry by id - GET /api/sell/:id
+const getSellById = async (req, res) => {
   try {
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid sales id',
+        message: 'Invalid sell id',
       });
     }
 
-    const sales = await Sales.findById(id);
-    if (!sales) {
+    const sell = await Sell.findById(id);
+    if (!sell) {
       return res.status(404).json({
         success: false,
-        message: 'Sales inquiry not found',
+        message: 'Sell inquiry not found',
       });
     }
 
     return res.status(200).json({
       success: true,
-      data: sales,
+      data: sell,
     });
   } catch (error) {
     return res.status(500).json({
@@ -86,15 +85,15 @@ const getSalesById = async (req, res) => {
   }
 };
 
-// 4. Update sales inquiry - PUT /api/sales/:id
-const updateSales = async (req, res) => {
+// 4. Update sell inquiry - PUT /api/sell/:id
+const updateSell = async (req, res) => {
   try {
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid sales id',
+        message: 'Invalid sell id',
       });
     }
 
@@ -104,7 +103,7 @@ const updateSales = async (req, res) => {
       if (req.body[field] !== undefined) updates[field] = req.body[field];
     });
 
-    const updated = await Sales.findByIdAndUpdate(id, updates, {
+    const updated = await Sell.findByIdAndUpdate(id, updates, {
       new: true,
       runValidators: true,
     });
@@ -112,13 +111,13 @@ const updateSales = async (req, res) => {
     if (!updated) {
       return res.status(404).json({
         success: false,
-        message: 'Sales inquiry not found',
+        message: 'Sell inquiry not found',
       });
     }
 
     return res.status(200).json({
       success: true,
-      message: 'Sales inquiry updated successfully',
+      message: 'Sell inquiry updated successfully',
       data: updated,
     });
   } catch (error) {
@@ -129,29 +128,29 @@ const updateSales = async (req, res) => {
   }
 };
 
-// 5. Delete sales inquiry - DELETE /api/sales/:id
-const deleteSales = async (req, res) => {
+// 5. Delete sell inquiry - DELETE /api/sell/:id
+const deleteSell = async (req, res) => {
   try {
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid sales id',
+        message: 'Invalid sell id',
       });
     }
 
-    const deleted = await Sales.findByIdAndDelete(id);
+    const deleted = await Sell.findByIdAndDelete(id);
     if (!deleted) {
       return res.status(404).json({
         success: false,
-        message: 'Sales inquiry not found',
+        message: 'Sell inquiry not found',
       });
     }
 
     return res.status(200).json({
       success: true,
-      message: 'Sales inquiry deleted successfully',
+      message: 'Sell inquiry deleted successfully',
       data: deleted,
     });
   } catch (error) {
@@ -163,10 +162,10 @@ const deleteSales = async (req, res) => {
 };
 
 module.exports = {
-  createSales,
-  getAllSales,
-  getSalesById,
-  updateSales,
-  deleteSales,
+  createSell,
+  getAllSell,
+  getSellById,
+  updateSell,
+  deleteSell,
 };
 

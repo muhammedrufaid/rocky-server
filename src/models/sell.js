@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const SALES_PROPERTY_TYPES = [
+const SELL_PROPERTY_TYPES = [
   'Apartment',
   'Villa',
   'Townhouse',
@@ -12,7 +12,7 @@ const SALES_PROPERTY_TYPES = [
   'Other',
 ];
 
-const salesSchema = new mongoose.Schema(
+const sellSchema = new mongoose.Schema(
   {
     fullName: {
       type: String,
@@ -37,7 +37,7 @@ const salesSchema = new mongoose.Schema(
       type: String,
       required: [true, 'Property Type is required'],
       trim: true,
-      enum: SALES_PROPERTY_TYPES,
+      enum: SELL_PROPERTY_TYPES,
     },
     locationArea: {
       type: String,
@@ -53,5 +53,5 @@ const salesSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-module.exports = mongoose.model('Sales', salesSchema);
+module.exports = mongoose.model('Sell', sellSchema);
 
