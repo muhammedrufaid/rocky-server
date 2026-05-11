@@ -7,6 +7,7 @@ const frontendRoutes = require('./routes/frontendRoutes');
 const salesforceRoutes = require('./routes/salesforceRoutes');
 const contactRoutes = require('./routes/contactRoutes');
 const sellRoutes = require('./routes/sellRoutes');
+const newsletterRoutes = require('./routes/newsletterRoutes');
 const { startSalesforceMigrateScheduler } = require('./jobs/salesforceMigrateScheduler');
 
 const app = express();
@@ -38,6 +39,7 @@ app.use('/api/frontend', frontendRoutes);
 app.use('/api/salesforce', salesforceRoutes);
 app.use('/api/contact', contactRoutes);
 app.use('/api/sell', sellRoutes);
+app.use('/api/newsletter', newsletterRoutes);
 
 // Health check
 app.get('/', (req, res) => {
