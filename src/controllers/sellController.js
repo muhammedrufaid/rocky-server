@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const Sell = require('../models/sell');
+const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 
 // 1. Create sell inquiry - POST /api/sell
 const createSell = async (req, res) => {
@@ -22,10 +23,27 @@ const createSell = async (req, res) => {
       message,
     });
 
+    try {
+      await sendToZapier({
+        fullName: sell.fullName,
+        phone: sell.phone,
+        email: sell.email,
+        propertyType: sell.propertyType,
+        locationArea: sell.locationArea,
+        message: sell.message,
+        source: ZAPIER_SOURCES.SALES_INQUIRY,
+      });
+    } catch (zapierError) {
+      console.error('[Zapier] Unexpected error after sell save:', zapierError.message);
+    }
+
     return res.status(201).json({
       success: true,
       message: 'Sell inquiry created successfully',
-      data: sell,
+      data: {
+        ...sell.toObject(),
+        source: ZAPIER_SOURCES.SALES_INQUIRY,
+      },
     });
   } catch (error) {
     return res.status(500).json({

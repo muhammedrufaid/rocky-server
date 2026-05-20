@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const Contact = require('../models/Contact');
+const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 
 // 1. Create contact - POST /api/contact
 const createContact = async (req, res) => {
@@ -21,10 +22,27 @@ const createContact = async (req, res) => {
       message,
     });
 
+    // MongoDB is source of truth; Zapier is best-effort (never fails the request)
+    try {
+      await sendToZapier({
+        fullName: contact.fullName,
+        email: contact.email,
+        phone: contact.phone,
+        inquiryType: contact.inquiryType,
+        message: contact.message,
+        source: ZAPIER_SOURCES.CONTACT_US,
+      });
+    } catch (zapierError) {
+      console.error('[Zapier] Unexpected error after contact save:', zapierError.message);
+    }
+
     return res.status(201).json({
       success: true,
       message: 'Contact created successfully',
-      data: contact,
+      data: {
+        ...contact.toObject(),
+        source: ZAPIER_SOURCES.CONTACT_US,
+      },
     });
   } catch (error) {
     return res.status(500).json({
