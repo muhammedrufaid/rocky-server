@@ -31,7 +31,7 @@ const createSell = async (req, res) => {
         propertyType: sell.propertyType,
         locationArea: sell.locationArea,
         message: sell.message,
-        source: ZAPIER_SOURCES.SALES_INQUIRY,
+        source: ZAPIER_SOURCES.SELL_INQUIRY,
       });
     } catch (zapierError) {
       console.error('[Zapier] Unexpected error after sell save:', zapierError.message);
@@ -42,7 +42,7 @@ const createSell = async (req, res) => {
       message: 'Sell inquiry created successfully',
       data: {
         ...sell.toObject(),
-        source: ZAPIER_SOURCES.SALES_INQUIRY,
+        source: ZAPIER_SOURCES.SELL_INQUIRY,
       },
     });
   } catch (error) {
