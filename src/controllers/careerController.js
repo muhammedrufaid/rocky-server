@@ -9,12 +9,22 @@ function getFormatFromFilename(filename) {
   return match ? match[1].toLowerCase() : undefined;
 }
 
+function getPublicBaseUrl(req) {
+  if (process.env.PUBLIC_BASE_URL) {
+    return process.env.PUBLIC_BASE_URL.replace(/\/$/, '');
+  }
+
+  const protocol =
+    req.get('x-forwarded-proto')?.split(',')[0]?.trim() || req.protocol;
+  return `${protocol}://${req.get('host')}`;
+}
+
 function buildCvViewUrl(req, careerId) {
-  return `${req.protocol}://${req.get('host')}/api/career/${careerId}/cv/view`;
+  return `${getPublicBaseUrl(req)}/api/career/${careerId}/cv/view`;
 }
 
 function buildCvDownloadUrl(req, careerId) {
-  return `${req.protocol}://${req.get('host')}/api/career/${careerId}/cv/download`;
+  return `${getPublicBaseUrl(req)}/api/career/${careerId}/cv/download`;
 }
 
 // Cloudinary stores raw CV public_id with extension (e.g. ...PM.pdf).

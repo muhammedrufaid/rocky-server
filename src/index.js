@@ -15,6 +15,9 @@ const app = express();
 // Port 5000 is often used by AirPlay on macOS - use 5001 as fallback
 const PORT = process.env.PORT || 5001;
 
+// Trust reverse proxy (nginx, Cloudflare, etc.) so req.protocol is https in production
+app.set('trust proxy', 1);
+
 // Middleware - CORS must allow your frontend origin
 app.use(
   cors({
