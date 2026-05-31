@@ -26,19 +26,33 @@ const careerSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
+    cvUrl: {
+      type: String,
+      required: [true, 'CV URL is required'],
+      trim: true,
+    },
+    cvPublicId: {
+      type: String,
+      trim: true,
+    },
+    cvOriginalFileName: {
+      type: String,
+      trim: true,
+    },
+    cvUpdatedFileName: {
+      type: String,
+      trim: true,
+    },
     cvFileName: {
       type: String,
-      required: [true, 'CV file name is required'],
       trim: true,
     },
     cvType: {
       type: String,
-      required: [true, 'CV file type is required'],
       trim: true,
     },
     cvSize: {
       type: Number,
-      required: [true, 'CV file size is required'],
       min: [0, 'CV file size must be a positive number'],
     },
   },

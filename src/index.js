@@ -43,6 +43,17 @@ app.use('/api/sell', sellRoutes);
 app.use('/api/newsletter', newsletterRoutes);
 app.use('/api/career', careerRoutes);
 
+// Error handler (e.g. Multer/Cloudinary errors)
+app.use((err, req, res, next) => {
+  if (!err) return next();
+
+  const status = err.statusCode || err.status || 400;
+  return res.status(status).json({
+    success: false,
+    message: err.message || 'Request failed',
+  });
+});
+
 // Health check
 app.get('/', (req, res) => {
   res.json({ message: 'Rocky RealEstate API is running' });
