@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const Career = require('../models/Career');
 const cloudinary = require('../config/cloudinary');
 const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
+const { sendCareerToGoogleSheet } = require('../services/googleSheetsService');
 
 function getFormatFromFilename(filename) {
   const match = String(filename || '').match(/\.([a-z0-9]+)$/i);
@@ -164,6 +165,19 @@ const createCareer = async (req, res) => {
       });
     } catch (zapierError) {
       console.error('[Zapier] Unexpected error after career save:', zapierError.message);
+    }
+
+    try {
+      await sendCareerToGoogleSheet({
+        name: career.name,
+        email: career.email,
+        phone: career.phone,
+        position: career.position,
+        cvOriginalFileName: career.cvOriginalFileName,
+        cvUrl: career.cvUrl,
+      });
+    } catch (sheetsError) {
+      console.error('[Google Sheets] Unexpected error after career save:', sheetsError.message);
     }
 
     return res.status(201).json({
