@@ -103,18 +103,20 @@ function getCvFileMeta(uploaded, req) {
 // 1. Create career application - POST /api/career
 const createCareer = async (req, res) => {
   try {
-    const { name, email, phone, position } = req.body;
+    const { fullName, name, email, phone, position } = req.body;
     const uploaded = req.file;
 
+    const resolvedFullName = fullName ?? name;
+
     if (
-      !name ||
+      !resolvedFullName ||
       !email ||
       !phone ||
       !position
     ) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide name, email, phone, and position',
+        message: 'Please provide fullName, email, phone, and position',
       });
     }
 
@@ -135,7 +137,7 @@ const createCareer = async (req, res) => {
     }
 
     const career = await Career.create({
-      name,
+      fullName: resolvedFullName,
       email,
       phone,
       position,
@@ -153,7 +155,8 @@ const createCareer = async (req, res) => {
 
     try {
       await sendToZapier({
-        name: career.name,
+        name: career.fullName,
+        fullName: career.fullName,
         email: career.email,
         phone: career.phone,
         position: career.position,
@@ -169,7 +172,8 @@ const createCareer = async (req, res) => {
 
     try {
       await sendCareerToGoogleSheet({
-        name: career.name,
+        name: career.fullName,
+        fullName: career.fullName,
         email: career.email,
         phone: career.phone,
         position: career.position,
@@ -262,7 +266,7 @@ const updateCareer = async (req, res) => {
 
     const updates = {};
     const allowedFields = [
-      'name',
+      'fullName',
       'email',
       'phone',
       'position',
@@ -270,6 +274,11 @@ const updateCareer = async (req, res) => {
     allowedFields.forEach((field) => {
       if (req.body[field] !== undefined) updates[field] = req.body[field];
     });
+
+    // Backward-compat: accept `name` from older clients
+    if (updates.fullName === undefined && req.body.name !== undefined) {
+      updates.fullName = req.body.name;
+    }
 
     if (uploaded) {
       const { originalFileName, updatedFileName, cvPublicId } = getCvFileMeta(uploaded, req);

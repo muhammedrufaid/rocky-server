@@ -2,9 +2,9 @@ const mongoose = require('mongoose');
 
 const careerSchema = new mongoose.Schema(
   {
-    name: {
+    fullName: {
       type: String,
-      required: [true, 'Name is required'],
+      required: [true, 'Full Name is required'],
       trim: true,
     },
     email: {
