@@ -1,6 +1,9 @@
 const crypto = require('crypto');
 const Property = require('../models/Property');
 const propertyService = require('./propertyService');
+const {
+  FEATURED_DUBAI_SOUTH_PROPERTY_REF_NOS,
+} = require('../constants/featuredDubaiSouthProperties');
 
 const logPrefix = '[salesforce-migrate]';
 
@@ -102,8 +105,13 @@ const removeStaleProperties = async (feedRefNos) => {
     return 0;
   }
 
+  // Delete only listings absent from the feed, except pinned featured Dubai South refs.
+  const protectedRefNos = new Set([
+    ...feedRefNos,
+    ...FEATURED_DUBAI_SOUTH_PROPERTY_REF_NOS,
+  ]);
   const deleteResult = await Property.deleteMany({
-    propertyRefNo: { $nin: feedRefNos },
+    propertyRefNo: { $nin: [...protectedRefNos] },
   });
 
   const deleted = deleteResult.deletedCount || 0;

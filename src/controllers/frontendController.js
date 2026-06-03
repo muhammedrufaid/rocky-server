@@ -344,8 +344,8 @@ const getRentProperties = async (req, res) => {
  */
 const getFeaturedDubaiSouthProperties = async (req, res) => {
     try {
-        const { properties, total } = await propertyService.fetchFeaturedDubaiSouthProperties();
-        res.status(200).json({ properties, total });
+        const { properties, total, missingRefs } = await propertyService.fetchFeaturedDubaiSouthProperties();
+        res.status(200).json({ properties, total, missingRefs });
     } catch (error) {
         console.error('getFeaturedDubaiSouthProperties error:', error);
         res.status(500).json({

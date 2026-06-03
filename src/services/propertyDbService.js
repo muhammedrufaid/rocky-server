@@ -215,15 +215,9 @@ const fetchRentProperties = async (opts = {}) => {
   return paginateAggregation({ basePipeline, page, limit });
 };
 
-const FEATURED_DUBAI_SOUTH_PROPERTY_REF_NOS = [
-  'RO-S-03142',
-  'RO-S-02872',
-  'RO-S-03295',
-  'RO-S-03259',
-  'RO-S-03207',
-  // 'RO-S-02775',
-  'RO-S-02873',
-];
+const {
+  FEATURED_DUBAI_SOUTH_PROPERTY_REF_NOS,
+} = require('../constants/featuredDubaiSouthProperties');
 
 const fetchFeaturedDubaiSouthProperties = async () => {
   const docs = await Property.find({
@@ -231,9 +225,26 @@ const fetchFeaturedDubaiSouthProperties = async () => {
   }).lean();
 
   const byRefNo = new Map(docs.map((doc) => [doc.propertyRefNo, doc]));
-  const properties = FEATURED_DUBAI_SOUTH_PROPERTY_REF_NOS.map((refNo) => byRefNo.get(refNo)).filter(Boolean);
+  const properties = [];
+  const missingRefs = [];
 
-  return { properties, total: properties.length };
+  for (const refNo of FEATURED_DUBAI_SOUTH_PROPERTY_REF_NOS) {
+    const doc = byRefNo.get(refNo);
+    if (doc) {
+      properties.push(doc);
+    } else {
+      missingRefs.push(refNo);
+    }
+  }
+
+  if (missingRefs.length) {
+    console.warn(
+      '[featured-dubai-south] Missing from MongoDB (not in Salesforce feed or never synced):',
+      missingRefs.join(', ')
+    );
+  }
+
+  return { properties, total: properties.length, missingRefs };
 };
 
 const fetchPropertyByRefNo = async (propertyRefNo) => {
