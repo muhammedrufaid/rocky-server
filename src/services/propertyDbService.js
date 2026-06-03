@@ -215,6 +215,26 @@ const fetchRentProperties = async (opts = {}) => {
   return paginateAggregation({ basePipeline, page, limit });
 };
 
+const FEATURED_DUBAI_SOUTH_PROPERTY_REF_NOS = [
+  'RO-S-03142',
+  'RO-S-02872',
+  'RO-S-03295',
+  'RO-S-03259',
+  'RO-S-03207',
+  'RO-S-02775',
+];
+
+const fetchFeaturedDubaiSouthProperties = async () => {
+  const docs = await Property.find({
+    propertyRefNo: { $in: FEATURED_DUBAI_SOUTH_PROPERTY_REF_NOS },
+  }).lean();
+
+  const byRefNo = new Map(docs.map((doc) => [doc.propertyRefNo, doc]));
+  const properties = FEATURED_DUBAI_SOUTH_PROPERTY_REF_NOS.map((refNo) => byRefNo.get(refNo)).filter(Boolean);
+
+  return { properties, total: properties.length };
+};
+
 const fetchPropertyByRefNo = async (propertyRefNo) => {
   if (!propertyRefNo || typeof propertyRefNo !== 'string') return null;
   return Property.findOne({ propertyRefNo: propertyRefNo.trim() }).lean();
@@ -450,6 +470,7 @@ module.exports = {
   fetchReadyProperties,
   fetchBuyProperties,
   fetchRentProperties,
+  fetchFeaturedDubaiSouthProperties,
   fetchPropertyByRefNo,
   fetchSearchSuggestions,
   fetchSearchByAreaSuggestions,

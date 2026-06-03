@@ -339,6 +339,22 @@ const getRentProperties = async (req, res) => {
 };
 
 /**
+ * GET /properties/featured-dubai-south - Returns the fixed featured Dubai South properties
+ * Returns: { properties, total }
+ */
+const getFeaturedDubaiSouthProperties = async (req, res) => {
+    try {
+        const { properties, total } = await propertyService.fetchFeaturedDubaiSouthProperties();
+        res.status(200).json({ properties, total });
+    } catch (error) {
+        console.error('getFeaturedDubaiSouthProperties error:', error);
+        res.status(500).json({
+            message: error.message || 'Failed to fetch featured Dubai South properties'
+        });
+    }
+};
+
+/**
  * GET /properties/:propertyRefNo - Fetches and returns a single property by reference number
  * Works for both Buy and Rent properties
  */
@@ -539,6 +555,7 @@ module.exports = {
     getAllReadyProperties,
     getBuyProperties,
     getRentProperties,
+    getFeaturedDubaiSouthProperties,
     getPropertyByRefNo,
     searchProperties,
     searchPropertiesByArea,
