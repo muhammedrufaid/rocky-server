@@ -74,6 +74,46 @@ const buildBulkUpserts = ({ properties }) => {
   return ops;
 };
 
+/**
+ * @param {object[]} properties
+ * @returns {string[]}
+ */
+const collectPropertyRefNos = ({ properties }) => {
+  const refNos = [];
+
+  properties.forEach((p) => {
+    if (!p) return;
+    const propertyRefNo = (p.propertyRefNo || p.sourceId || '').trim();
+    if (propertyRefNo) refNos.push(propertyRefNo);
+  });
+
+  return refNos;
+};
+
+/**
+ * Remove MongoDB properties that are no longer present in the Salesforce feed.
+ * Only runs when the feed contains at least one valid Property_Ref_No.
+ *
+ * @param {string[]} feedRefNos
+ * @returns {Promise<number>}
+ */
+const removeStaleProperties = async (feedRefNos) => {
+  if (!feedRefNos.length) {
+    return 0;
+  }
+
+  const deleteResult = await Property.deleteMany({
+    propertyRefNo: { $nin: feedRefNos },
+  });
+
+  const deleted = deleteResult.deletedCount || 0;
+  if (deleted > 0) {
+    log('Removed stale properties no longer in Salesforce feed', { deleted });
+  }
+
+  return deleted;
+};
+
 let lastContentHash = null;
 
 const hashXml = (xmlText) =>
@@ -119,6 +159,8 @@ const migrateProperties = async ({ properties, skipIfUnchanged = false, xmlText 
   }
 
   const result = await Property.bulkWrite(ops, { ordered: false });
+  const feedRefNos = collectPropertyRefNos({ properties });
+  const deleted = await removeStaleProperties(feedRefNos);
 
   if (contentHash !== null) {
     lastContentHash = contentHash;
@@ -130,6 +172,7 @@ const migrateProperties = async ({ properties, skipIfUnchanged = false, xmlText 
     upserted: result.upsertedCount || 0,
     modified: result.modifiedCount || 0,
     matched: result.matchedCount || 0,
+    deleted,
   });
 
   return {
@@ -140,6 +183,7 @@ const migrateProperties = async ({ properties, skipIfUnchanged = false, xmlText 
       upserted: result.upsertedCount || 0,
       modified: result.modifiedCount || 0,
       matched: result.matchedCount || 0,
+      deleted,
     },
   };
 };
@@ -167,6 +211,8 @@ const runMigrationFromFeed = async (opts = {}) => {
 
 module.exports = {
   buildBulkUpserts,
+  collectPropertyRefNos,
+  removeStaleProperties,
   runMigrationFromFeed,
   migrateProperties,
   logPrefix,
