@@ -4,7 +4,7 @@ const FEATURED_DUBAI_SOUTH_PROPERTY_REF_NOS = [
   'RO-S-02872',
   'RO-S-03295',
   'RO-S-03259',
-  'RO-S-03207',
+  'RO-S-02636',
   'RO-S-02873',
 ];
 
