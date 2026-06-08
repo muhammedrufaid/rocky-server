@@ -416,6 +416,50 @@ const getRentProperties = async (req, res) => {
 const getDubaiSouthProperties = (req, res) => handleDubaiSouthPropertyList(req, res);
 
 /**
+ * GET /properties/dubai-south/by-listing-agent - Dubai South listings for a specific agent
+ * Query params: listingAgent (required), page, limit, search, and other optional filters
+ */
+const getDubaiSouthPropertiesByListingAgent = async (req, res) => {
+    const listingAgent = (req.query.listingAgent || '').toString().trim();
+    if (!listingAgent) {
+        return res.status(400).json({
+            message: 'Query parameter "listingAgent" is required'
+        });
+    }
+
+    try {
+        let parsed;
+        try {
+            parsed = parsePropertyListQuery(req);
+        } catch (err) {
+            return res.status(400).json({
+                message: 'Invalid "filters" JSON payload'
+            });
+        }
+
+        const { page, limit, search, filters } = parsed;
+        const mergedFilters = {
+            ...filters,
+            locality: DUBAI_SOUTH_LOCALITY,
+            listingAgent
+        };
+
+        const { properties, total, pagination } = await propertyService.fetchAllProperties({
+            page,
+            limit,
+            search,
+            filters: mergedFilters
+        });
+        res.status(200).json({ properties, total, pagination, listingAgent });
+    } catch (error) {
+        console.error('getDubaiSouthPropertiesByListingAgent error:', error);
+        res.status(500).json({
+            message: error.message || 'Failed to fetch Dubai South properties by listing agent'
+        });
+    }
+};
+
+/**
  * GET /properties/featured-dubai-south - Returns the fixed featured Dubai South properties
  * Returns: { properties, total }
  */
@@ -633,6 +677,7 @@ module.exports = {
     getBuyProperties,
     getRentProperties,
     getDubaiSouthProperties,
+    getDubaiSouthPropertiesByListingAgent,
     getFeaturedDubaiSouthProperties,
     getPropertyByRefNo,
     searchProperties,
