@@ -1,7 +1,79 @@
 const propertyService = require('../services/propertyDbService');
 const { parsePaginationParams } = require('../utils/paginationUtils');
+const { DUBAI_SOUTH_LOCALITY } = require('../constants/dubaiSouth');
 
 const DEFAULT_SEARCH_LIMIT = 10;
+
+const FILTER_QUERY_KEYS = [
+    'propertyType',
+    'city',
+    'locality',
+    'subLocality',
+    'towerName',
+    'bedrooms',
+    'bathrooms',
+    'furnished',
+    'offPlan',
+    'propertyStatus',
+    'priceMin',
+    'priceMax',
+    'propertySizeMin',
+    'propertySizeMax'
+];
+
+const parsePropertyListQuery = (req) => {
+    const { page, limit } = parsePaginationParams(req);
+    const search = (req.query.search || '').toString().trim();
+
+    let filters = {};
+    if (req.query.filters !== undefined) {
+        if (typeof req.query.filters === 'string') {
+            filters = JSON.parse(req.query.filters);
+        } else if (typeof req.query.filters === 'object' && req.query.filters !== null) {
+            filters = req.query.filters;
+        } else {
+            filters = {};
+        }
+    }
+
+    const directFilters = {};
+    FILTER_QUERY_KEYS.forEach((key) => {
+        if (req.query[key] !== undefined) directFilters[key] = req.query[key];
+    });
+
+    const mergedFilters = { ...directFilters, ...filters };
+
+    return { page, limit, search, filters: mergedFilters };
+};
+
+const handleDubaiSouthPropertyList = async (req, res) => {
+    try {
+        let parsed;
+        try {
+            parsed = parsePropertyListQuery(req);
+        } catch (err) {
+            return res.status(400).json({
+                message: 'Invalid "filters" JSON payload'
+            });
+        }
+
+        const { page, limit, search, filters } = parsed;
+        const mergedFilters = { ...filters, locality: DUBAI_SOUTH_LOCALITY };
+
+        const { properties, total, pagination } = await propertyService.fetchAllProperties({
+            page,
+            limit,
+            search,
+            filters: mergedFilters
+        });
+        res.status(200).json({ properties, total, pagination });
+    } catch (error) {
+        console.error('getDubaiSouthProperties error:', error);
+        res.status(500).json({
+            message: error.message || 'Failed to fetch Dubai South properties'
+        });
+    }
+};
 
 const RESIDENTIAL_PROPERTY_TYPES = new Set([
     'Apartment',
@@ -339,6 +411,11 @@ const getRentProperties = async (req, res) => {
 };
 
 /**
+ * GET /properties/dubai-south - All Dubai South listings (off-plan, buy, rent) in one response
+ */
+const getDubaiSouthProperties = (req, res) => handleDubaiSouthPropertyList(req, res);
+
+/**
  * GET /properties/featured-dubai-south - Returns the fixed featured Dubai South properties
  * Returns: { properties, total }
  */
@@ -555,6 +632,7 @@ module.exports = {
     getAllReadyProperties,
     getBuyProperties,
     getRentProperties,
+    getDubaiSouthProperties,
     getFeaturedDubaiSouthProperties,
     getPropertyByRefNo,
     searchProperties,
