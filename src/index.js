@@ -10,6 +10,7 @@ const sellRoutes = require('./routes/sellRoutes');
 const newsletterRoutes = require('./routes/newsletterRoutes');
 const careerRoutes = require('./routes/careerRoutes');
 const dubaiSouthLeadRoutes = require('./routes/dubaiSouthLeadRoutes');
+const jewelTowerLeadRoutes = require('./routes/jewelTowerLeadRoutes');
 const { startSalesforceMigrateScheduler } = require('./jobs/salesforceMigrateScheduler');
 
 const app = express();
@@ -47,6 +48,7 @@ app.use('/api/sell', sellRoutes);
 app.use('/api/newsletter', newsletterRoutes);
 app.use('/api/career', careerRoutes);
 app.use('/api/dubai-south-lead', dubaiSouthLeadRoutes);
+app.use('/api/jewel-tower-lead', jewelTowerLeadRoutes);
 
 // Error handler (e.g. Multer/Cloudinary errors)
 app.use((err, req, res, next) => {
