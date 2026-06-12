@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const JewelTowerLead = require('../models/JewelTowerLead');
+const { sendJewelTowerLeadToGoogleSheet } = require('../services/googleSheetsService');
 
 // 1. Create Jewel Tower lead - POST /api/jewel-tower-lead
 const createJewelTowerLead = async (req, res) => {
@@ -19,6 +20,17 @@ const createJewelTowerLead = async (req, res) => {
       phone,
       message,
     });
+
+    try {
+      await sendJewelTowerLeadToGoogleSheet({
+        fullName: lead.fullName,
+        email: lead.email,
+        phone: lead.phone,
+        message: lead.message,
+      });
+    } catch (sheetsError) {
+      console.error('[Google Sheets] Unexpected error after Jewel Tower lead save:', sheetsError.message);
+    }
 
     return res.status(201).json({
       success: true,
