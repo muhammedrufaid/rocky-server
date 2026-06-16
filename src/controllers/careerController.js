@@ -155,7 +155,6 @@ const createCareer = async (req, res) => {
 
     try {
       await sendToZapier({
-        name: career.fullName,
         fullName: career.fullName,
         email: career.email,
         phone: career.phone,
@@ -172,7 +171,6 @@ const createCareer = async (req, res) => {
 
     try {
       await sendCareerToGoogleSheet({
-        name: career.fullName,
         fullName: career.fullName,
         email: career.email,
         phone: career.phone,
