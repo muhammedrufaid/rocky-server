@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const JewelTowerLead = require('../models/JewelTowerLead');
 const { sendJewelTowerLeadToGoogleSheet } = require('../services/googleSheetsService');
+const { sendJewelTowerLeadToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 
 // 1. Create Jewel Tower lead - POST /api/jewel-tower-lead
 const createJewelTowerLead = async (req, res) => {
@@ -30,6 +31,18 @@ const createJewelTowerLead = async (req, res) => {
       });
     } catch (sheetsError) {
       console.error('[Google Sheets] Unexpected error after Jewel Tower lead save:', sheetsError.message);
+    }
+
+    try {
+      await sendJewelTowerLeadToZapier({
+        fullName: lead.fullName,
+        email: lead.email,
+        phone: lead.phone,
+        message: lead.message,
+        source: ZAPIER_SOURCES.JEWEL_TOWER_LEAD,
+      });
+    } catch (zapierError) {
+      console.error('[Zapier] Unexpected error after Jewel Tower lead save:', zapierError.message);
     }
 
     return res.status(201).json({
