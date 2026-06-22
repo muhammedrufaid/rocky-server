@@ -2,9 +2,9 @@ const mongoose = require('mongoose');
 
 const factsheetSchema = new mongoose.Schema(
   {
-    name: {
+    fullName: {
       type: String,
-      required: [true, 'Name is required'],
+      required: [true, 'Full name is required'],
       trim: true,
     },
     fileUrl: {

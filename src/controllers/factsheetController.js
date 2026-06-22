@@ -10,13 +10,13 @@ function getFactsheetFileMeta(uploaded, req) {
 
 const uploadFactsheet = async (req, res) => {
   try {
-    const name = (req.body?.name || '').trim();
+    const fullName = (req.body?.fullName || '').trim();
     const uploaded = req.file;
 
-    if (!name) {
+    if (!fullName) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide name',
+        message: 'Please provide fullName',
       });
     }
 
@@ -37,7 +37,7 @@ const uploadFactsheet = async (req, res) => {
     }
 
     const factsheet = await Factsheet.create({
-      name,
+      fullName,
       fileUrl,
       fileName,
     });
@@ -46,7 +46,7 @@ const uploadFactsheet = async (req, res) => {
       success: true,
       data: {
         id: factsheet._id,
-        name: factsheet.name,
+        fullName: factsheet.fullName,
         fileUrl: factsheet.fileUrl,
         fileName: factsheet.fileName,
         createdAt: factsheet.createdAt,
