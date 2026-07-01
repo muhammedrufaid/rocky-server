@@ -146,7 +146,7 @@ const uploadPDF = createS3UploadMiddleware({
 const uploadCV = createS3UploadMiddleware({
   fieldName: 'cv',
   allowedMimeTypes: CV_MIME_TYPES,
-  label: 'CV (PDF or Word)',
+  label: 'PDF',
   maxSize: getMaxFileSize('cv'),
 });
 

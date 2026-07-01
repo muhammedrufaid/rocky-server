@@ -1,4 +1,4 @@
-const { S3Client } = require('@aws-sdk/client-s3');
+const { S3Client, HeadBucketCommand } = require('@aws-sdk/client-s3');
 
 function requireEnv(name) {
   const value = process.env[name];
@@ -8,17 +8,58 @@ function requireEnv(name) {
   return value;
 }
 
+function getCredentials() {
+  return {
+    accessKeyId: requireEnv('AWS_ACCESS_KEY_ID'),
+    secretAccessKey: requireEnv('AWS_SECRET_ACCESS_KEY'),
+  };
+}
+
 let s3Client;
 let bucket;
+let resolvedRegion;
+let regionPromise;
 
-function getS3Client() {
+async function resolveBucketRegion() {
+  if (resolvedRegion) {
+    return resolvedRegion;
+  }
+
+  if (!regionPromise) {
+    regionPromise = (async () => {
+      const bucketName = requireEnv('AWS_S3_BUCKET');
+      const configuredRegion = requireEnv('AWS_REGION');
+      const probeClient = new S3Client({
+        region: configuredRegion,
+        credentials: getCredentials(),
+      });
+
+      try {
+        await probeClient.send(new HeadBucketCommand({ Bucket: bucketName }));
+        resolvedRegion = configuredRegion;
+        return resolvedRegion;
+      } catch (error) {
+        const actualRegion = error?.$response?.headers?.['x-amz-bucket-region'];
+
+        if (actualRegion) {
+          resolvedRegion = actualRegion;
+          return resolvedRegion;
+        }
+
+        throw error;
+      }
+    })();
+  }
+
+  return regionPromise;
+}
+
+async function getS3Client() {
   if (!s3Client) {
+    const region = await resolveBucketRegion();
     s3Client = new S3Client({
-      region: requireEnv('AWS_REGION'),
-      credentials: {
-        accessKeyId: requireEnv('AWS_ACCESS_KEY_ID'),
-        secretAccessKey: requireEnv('AWS_SECRET_ACCESS_KEY'),
-      },
+      region,
+      credentials: getCredentials(),
     });
   }
 
@@ -33,8 +74,8 @@ function getBucket() {
   return bucket;
 }
 
-function getRegion() {
-  return requireEnv('AWS_REGION');
+async function getRegion() {
+  return resolveBucketRegion();
 }
 
 module.exports = {

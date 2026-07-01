@@ -34,17 +34,13 @@ const VIDEO_MIME_TYPES = Object.freeze([
 
 const PDF_MIME_TYPES = Object.freeze(['application/pdf']);
 
-const CV_MIME_TYPES = Object.freeze([
-  'application/pdf',
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-]);
+const CV_MIME_TYPES = Object.freeze(['application/pdf']);
 
 const DEFAULT_MAX_FILE_SIZES = Object.freeze({
   image: 5 * 1024 * 1024,
   video: 100 * 1024 * 1024,
   pdf: 10 * 1024 * 1024,
-  cv: 10 * 1024 * 1024,
+  cv: 5 * 1024 * 1024,
 });
 
 function parseMaxSize(envValue, fallback) {

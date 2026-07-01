@@ -27,10 +27,24 @@ function getFileExtension(originalName, mimetype) {
   return MIME_TO_EXTENSION[mimetype] || '';
 }
 
+function sanitizeFilenamePart(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
 function generateUniqueFilename(originalName, mimetype) {
-  const extension = getFileExtension(originalName, mimetype);
-  const uniqueId = `${Date.now()}-${crypto.randomUUID()}`;
-  return `${uniqueId}${extension}`;
+  const extension = getFileExtension(originalName, mimetype) || '.pdf';
+  const baseName = path.basename(String(originalName || 'cv'), extension);
+  const safeBase = sanitizeFilenamePart(baseName) || 'cv';
+  const timestamp = Math.floor(Date.now() / 1000);
+  const randomPart = crypto.randomUUID().split('-')[0];
+
+  return `${safeBase}-${timestamp}-${randomPart}${extension}`;
 }
 
 function buildS3Key(folder, fileName) {
@@ -40,6 +54,7 @@ function buildS3Key(folder, fileName) {
 
 module.exports = {
   getFileExtension,
+  sanitizeFilenamePart,
   generateUniqueFilename,
   buildS3Key,
 };

@@ -1,119 +1,46 @@
-const https = require('https');
 const mongoose = require('mongoose');
 const Career = require('../models/Career');
-const cloudinary = require('../config/cloudinary');
+const { uploadFile, deleteFile } = require('../services/s3Service');
 const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 const { sendCareerToGoogleSheet } = require('../services/googleSheetsService');
 
-function getFormatFromFilename(filename) {
-  const match = String(filename || '').match(/\.([a-z0-9]+)$/i);
-  return match ? match[1].toLowerCase() : undefined;
+function getCvKey(career) {
+  return career.cv?.key || null;
 }
 
-function getPublicBaseUrl(req) {
-  if (process.env.PUBLIC_BASE_URL) {
-    return process.env.PUBLIC_BASE_URL.replace(/\/$/, '');
+function buildPublicCvUrl(key) {
+  if (!key) return null;
+  const bucket = process.env.AWS_S3_BUCKET;
+  const region = process.env.AWS_REGION;
+  if (!bucket || !region) return null;
+
+  return `https://${bucket}.s3.${region}.amazonaws.com/${key}`;
+}
+
+async function uploadCareerCv(file) {
+  return uploadFile(file, 'cvs');
+}
+
+async function removeCareerCvFromS3(key) {
+  if (!key) return;
+
+  try {
+    await deleteFile(key);
+  } catch (error) {
+    console.error('[S3] Failed to delete CV:', error.message);
   }
-
-  const protocol =
-    req.get('x-forwarded-proto')?.split(',')[0]?.trim() || req.protocol;
-  return `${protocol}://${req.get('host')}`;
-}
-
-function buildCvViewUrl(req, careerId) {
-  return `${getPublicBaseUrl(req)}/api/career/${careerId}/cv/view`;
-}
-
-function buildCvDownloadUrl(req, careerId) {
-  return `${getPublicBaseUrl(req)}/api/career/${careerId}/cv/download`;
-}
-
-// Cloudinary stores raw CV public_id with extension (e.g. ...PM.pdf).
-function resolveCloudinaryPublicId(cvPublicId, updatedFileName, originalFileName) {
-  const id = String(cvPublicId || '').trim();
-  if (!id) return id;
-  if (/\.(pdf|doc|docx)$/i.test(id)) return id;
-
-  const format =
-    getFormatFromFilename(updatedFileName) || getFormatFromFilename(originalFileName);
-  return format ? `${id}.${format}` : id;
-}
-
-function buildCloudinaryDownloadUrl(publicId, format, { attachment } = {}) {
-  const options = { resource_type: 'raw', type: 'upload' };
-  if (attachment) options.attachment = attachment;
-  return cloudinary.utils.private_download_url(publicId, format, options);
-}
-
-function streamCvFromCloudinary(downloadUrl, res, { contentType, disposition, filename }) {
-  return new Promise((resolve, reject) => {
-    https
-      .get(downloadUrl, (cloudRes) => {
-        if (cloudRes.statusCode && cloudRes.statusCode >= 400) {
-          cloudRes.resume();
-          reject(new Error(`Failed to fetch CV (${cloudRes.statusCode})`));
-          return;
-        }
-
-        res.setHeader('Content-Type', contentType);
-        res.setHeader('Content-Disposition', `${disposition}; filename="${filename}"`);
-        cloudRes.pipe(res);
-        cloudRes.on('end', resolve);
-        cloudRes.on('error', reject);
-      })
-      .on('error', reject);
-  });
-}
-
-async function streamCareerCv(career, res, { download = false } = {}) {
-  const displayName =
-    career.cvUpdatedFileName || career.cvOriginalFileName || career.cvFileName || 'cv';
-  const publicId = resolveCloudinaryPublicId(
-    career.cvPublicId,
-    career.cvUpdatedFileName,
-    career.cvOriginalFileName
-  );
-  const format =
-    getFormatFromFilename(displayName) ||
-    getFormatFromFilename(publicId) ||
-    getFormatFromFilename(career.cvOriginalFileName);
-
-  const downloadUrl = buildCloudinaryDownloadUrl(publicId, format, {
-    attachment: download ? displayName : undefined,
-  });
-
-  await streamCvFromCloudinary(downloadUrl, res, {
-    contentType: career.cvType || 'application/octet-stream',
-    disposition: download ? 'attachment' : 'inline',
-    filename: displayName,
-  });
-}
-
-// multer-storage-cloudinary sets `filename` = public_id and `path` = secure_url
-function getCvFileMeta(uploaded, req) {
-  const originalFileName =
-    req.cvUploadMeta?.originalFileName || uploaded.originalname || 'cv';
-  const updatedFileName =
-    req.cvUploadMeta?.updatedFileName || uploaded.originalname || 'cv';
-  const cvPublicId = uploaded.filename || uploaded.public_id;
-
-  return { originalFileName, updatedFileName, cvPublicId };
 }
 
 // 1. Create career application - POST /api/career
 const createCareer = async (req, res) => {
+  let uploadedCv;
+
   try {
     const { fullName, name, email, phone, position } = req.body;
     const uploaded = req.file;
-
     const resolvedFullName = fullName ?? name;
 
-    if (
-      !resolvedFullName ||
-      !email ||
-      !phone ||
-      !position
-    ) {
+    if (!resolvedFullName || !email || !phone || !position) {
       return res.status(400).json({
         success: false,
         message: 'Please provide fullName, email, phone, and position',
@@ -127,30 +54,24 @@ const createCareer = async (req, res) => {
       });
     }
 
-    const { originalFileName, updatedFileName, cvPublicId } = getCvFileMeta(uploaded, req);
-
-    if (!cvPublicId) {
-      return res.status(400).json({
-        success: false,
-        message: 'CV upload failed. Please try again.',
-      });
-    }
+    uploadedCv = await uploadCareerCv(uploaded);
 
     const career = await Career.create({
       fullName: resolvedFullName,
       email,
       phone,
       position,
+      cv: {
+        key: uploadedCv.key,
+        fileName: uploaded.originalname,
+      },
       cvUrl: 'pending',
-      cvPublicId,
-      cvOriginalFileName: originalFileName,
-      cvUpdatedFileName: updatedFileName,
-      cvFileName: originalFileName,
+      cvFileName: uploaded.originalname,
       cvType: uploaded.mimetype,
       cvSize: uploaded.size,
     });
 
-    career.cvUrl = buildCvViewUrl(req, career._id);
+    career.cvUrl = buildPublicCvUrl(career.cv.key);
     await career.save();
 
     try {
@@ -160,7 +81,7 @@ const createCareer = async (req, res) => {
         phone: career.phone,
         position: career.position,
         cvUrl: career.cvUrl,
-        cvFileName: career.cvFileName,
+        cvFileName: career.cv.fileName,
         cvType: career.cvType,
         cvSize: career.cvSize,
         source: ZAPIER_SOURCES.CAREERS,
@@ -175,7 +96,7 @@ const createCareer = async (req, res) => {
         email: career.email,
         phone: career.phone,
         position: career.position,
-        cvOriginalFileName: career.cvOriginalFileName,
+        cvOriginalFileName: career.cv.fileName,
         cvUrl: career.cvUrl,
       });
     } catch (sheetsError) {
@@ -187,14 +108,18 @@ const createCareer = async (req, res) => {
       message: 'Career application created successfully',
       data: {
         ...career.toObject(),
-        cvDownloadUrl: buildCvDownloadUrl(req, career._id),
+        cvUrl: buildPublicCvUrl(career.cv?.key),
         source: ZAPIER_SOURCES.CAREERS,
       },
     });
   } catch (error) {
+    if (uploadedCv?.key) {
+      await removeCareerCvFromS3(uploadedCv.key);
+    }
+
     return res.status(500).json({
       success: false,
-      message: error.message || 'Server error',
+      message: error.message || 'Failed to create career application',
     });
   }
 };
@@ -207,7 +132,13 @@ const getAllCareers = async (req, res) => {
     return res.status(200).json({
       success: true,
       count: careers.length,
-      data: careers,
+      data: careers.map((career) => {
+        const obj = career.toObject();
+        return {
+          ...obj,
+          cvUrl: buildPublicCvUrl(obj.cv?.key),
+        };
+      }),
     });
   } catch (error) {
     return res.status(500).json({
@@ -239,7 +170,10 @@ const getCareerById = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      data: career,
+      data: {
+        ...career.toObject(),
+        cvUrl: buildPublicCvUrl(career.cv?.key),
+      },
     });
   } catch (error) {
     return res.status(500).json({
@@ -251,6 +185,9 @@ const getCareerById = async (req, res) => {
 
 // 4. Update career application - PUT /api/career/:id
 const updateCareer = async (req, res) => {
+  let uploadedCv;
+  let previousCvKey;
+
   try {
     const { id } = req.params;
     const uploaded = req.file;
@@ -262,38 +199,36 @@ const updateCareer = async (req, res) => {
       });
     }
 
+    const existingCareer = await Career.findById(id);
+    if (!existingCareer) {
+      return res.status(404).json({
+        success: false,
+        message: 'Career application not found',
+      });
+    }
+
     const updates = {};
-    const allowedFields = [
-      'fullName',
-      'email',
-      'phone',
-      'position',
-    ];
+    const allowedFields = ['fullName', 'email', 'phone', 'position'];
     allowedFields.forEach((field) => {
       if (req.body[field] !== undefined) updates[field] = req.body[field];
     });
 
-    // Backward-compat: accept `name` from older clients
     if (updates.fullName === undefined && req.body.name !== undefined) {
       updates.fullName = req.body.name;
     }
 
     if (uploaded) {
-      const { originalFileName, updatedFileName, cvPublicId } = getCvFileMeta(uploaded, req);
+      previousCvKey = getCvKey(existingCareer);
+      uploadedCv = await uploadCareerCv(uploaded);
 
-      if (!cvPublicId) {
-        return res.status(400).json({
-          success: false,
-          message: 'CV upload failed. Please try again.',
-        });
-      }
-
-      updates.cvPublicId = cvPublicId;
-      updates.cvOriginalFileName = originalFileName;
-      updates.cvUpdatedFileName = updatedFileName;
-      updates.cvFileName = originalFileName;
+      updates.cv = {
+        key: uploadedCv.key,
+        fileName: uploaded.originalname,
+      };
+      updates.cvFileName = uploaded.originalname;
       updates.cvType = uploaded.mimetype;
       updates.cvSize = uploaded.size;
+      updates.cvUrl = buildPublicCvUrl(uploadedCv.key);
     }
 
     const updated = await Career.findByIdAndUpdate(id, updates, {
@@ -301,22 +236,26 @@ const updateCareer = async (req, res) => {
       runValidators: true,
     });
 
-    if (!updated) {
-      return res.status(404).json({
-        success: false,
-        message: 'Career application not found',
-      });
+    if (uploaded && previousCvKey && previousCvKey !== uploadedCv.key) {
+      await removeCareerCvFromS3(previousCvKey);
     }
 
     return res.status(200).json({
       success: true,
       message: 'Career application updated successfully',
-      data: updated,
+      data: {
+        ...updated.toObject(),
+        cvUrl: buildPublicCvUrl(updated.cv?.key),
+      },
     });
   } catch (error) {
+    if (uploadedCv?.key) {
+      await removeCareerCvFromS3(uploadedCv.key);
+    }
+
     return res.status(500).json({
       success: false,
-      message: error.message || 'Server error',
+      message: error.message || 'Failed to update career application',
     });
   }
 };
@@ -341,6 +280,8 @@ const deleteCareer = async (req, res) => {
       });
     }
 
+    await removeCareerCvFromS3(getCvKey(deleted));
+
     return res.status(200).json({
       success: true,
       message: 'Career application deleted successfully',
@@ -354,88 +295,10 @@ const deleteCareer = async (req, res) => {
   }
 };
 
-// 6. View CV inline - GET /api/career/:id/cv/view
-const viewCareerCv = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid career application id',
-      });
-    }
-
-    const career = await Career.findById(id);
-    if (!career) {
-      return res.status(404).json({
-        success: false,
-        message: 'Career application not found',
-      });
-    }
-
-    if (!career.cvPublicId) {
-      return res.status(404).json({
-        success: false,
-        message: 'CV not found for this application',
-      });
-    }
-
-    await streamCareerCv(career, res, { download: false });
-  } catch (error) {
-    if (!res.headersSent) {
-      return res.status(500).json({
-        success: false,
-        message: error.message || 'Server error',
-      });
-    }
-  }
-};
-
-// 7. Download CV - GET /api/career/:id/cv/download
-const downloadCareerCv = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid career application id',
-      });
-    }
-
-    const career = await Career.findById(id);
-    if (!career) {
-      return res.status(404).json({
-        success: false,
-        message: 'Career application not found',
-      });
-    }
-
-    if (!career.cvPublicId) {
-      return res.status(404).json({
-        success: false,
-        message: 'CV not found for this application',
-      });
-    }
-
-    await streamCareerCv(career, res, { download: true });
-  } catch (error) {
-    if (!res.headersSent) {
-      return res.status(500).json({
-        success: false,
-        message: error.message || 'Server error',
-      });
-    }
-  }
-};
-
 module.exports = {
   createCareer,
   getAllCareers,
   getCareerById,
   updateCareer,
   deleteCareer,
-  viewCareerCv,
-  downloadCareerCv,
 };

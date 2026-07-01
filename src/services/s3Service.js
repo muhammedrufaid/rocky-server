@@ -22,9 +22,9 @@ function assertUploadFile(file) {
   }
 }
 
-function getFileUrl(key) {
+async function getFileUrl(key) {
   const bucket = getBucket();
-  const region = getRegion();
+  const region = await getRegion();
   const encodedKey = String(key)
     .split('/')
     .map(encodeURIComponent)
@@ -40,7 +40,7 @@ async function uploadFile(file, folder) {
   const fileName = generateUniqueFilename(file.originalname, file.mimetype);
   const key = buildS3Key(folder, fileName);
   const bucket = getBucket();
-  const client = getS3Client();
+  const client = await getS3Client();
 
   const commandInput = {
     Bucket: bucket,
@@ -55,11 +55,31 @@ async function uploadFile(file, folder) {
 
   await client.send(new PutObjectCommand(commandInput));
 
-  return {
-    key,
-    url: getFileUrl(key),
-    fileName,
-  };
+  const result = { key, fileName };
+
+  if (isPublicFolder(folder)) {
+    result.url = await getFileUrl(key);
+  }
+
+  return result;
+}
+
+async function getFileStream(key) {
+  if (!key) {
+    throw new Error('S3 object key is required');
+  }
+
+  const client = await getS3Client();
+  const bucket = getBucket();
+
+  const response = await client.send(
+    new GetObjectCommand({
+      Bucket: bucket,
+      Key: key,
+    })
+  );
+
+  return response;
 }
 
 async function deleteFile(key) {
@@ -67,7 +87,7 @@ async function deleteFile(key) {
     throw new Error('S3 object key is required for delete');
   }
 
-  const client = getS3Client();
+  const client = await getS3Client();
   const bucket = getBucket();
 
   await client.send(
@@ -86,7 +106,7 @@ async function getSignedUrl(key, options = {}) {
   }
 
   const { expiresIn = 3600, downloadFileName } = options;
-  const client = getS3Client();
+  const client = await getS3Client();
   const bucket = getBucket();
 
   const commandInput = {
@@ -110,4 +130,5 @@ module.exports = {
   deleteFile,
   getFileUrl,
   getSignedUrl,
+  getFileStream,
 };

@@ -26,9 +26,18 @@ const careerSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
+    cv: {
+      key: {
+        type: String,
+        trim: true,
+      },
+      fileName: {
+        type: String,
+        trim: true,
+      },
+    },
     cvUrl: {
       type: String,
-      required: [true, 'CV URL is required'],
       trim: true,
     },
     cvPublicId: {
