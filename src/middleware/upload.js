@@ -2,6 +2,13 @@ const multer = require('multer');
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const path = require('path');
 const cloudinary = require('../config/cloudinary');
+const {
+  IMAGE_MIME_TYPES,
+  VIDEO_MIME_TYPES,
+  PDF_MIME_TYPES,
+  CV_MIME_TYPES,
+  getMaxFileSize,
+} = require('../constants/s3');
 
 function pad2(n) {
   return String(n).padStart(2, '0');
@@ -95,5 +102,58 @@ const upload = multer({
   limits: { fileSize: 10 * 1024 * 1024 },
 });
 
-module.exports = { upload };
+const memoryStorage = multer.memoryStorage();
 
+function createMimeTypeFilter(allowedMimeTypes, label) {
+  return (req, file, cb) => {
+    if (!allowedMimeTypes.includes(file.mimetype)) {
+      return cb(new Error(`Only ${label} files are allowed`), false);
+    }
+
+    return cb(null, true);
+  };
+}
+
+function createS3UploadMiddleware({ fieldName, allowedMimeTypes, label, maxSize }) {
+  return multer({
+    storage: memoryStorage,
+    fileFilter: createMimeTypeFilter(allowedMimeTypes, label),
+    limits: { fileSize: maxSize },
+  }).single(fieldName);
+}
+
+const uploadImage = createS3UploadMiddleware({
+  fieldName: 'image',
+  allowedMimeTypes: IMAGE_MIME_TYPES,
+  label: 'image',
+  maxSize: getMaxFileSize('image'),
+});
+
+const uploadVideo = createS3UploadMiddleware({
+  fieldName: 'video',
+  allowedMimeTypes: VIDEO_MIME_TYPES,
+  label: 'video',
+  maxSize: getMaxFileSize('video'),
+});
+
+const uploadPDF = createS3UploadMiddleware({
+  fieldName: 'pdf',
+  allowedMimeTypes: PDF_MIME_TYPES,
+  label: 'PDF',
+  maxSize: getMaxFileSize('pdf'),
+});
+
+const uploadCV = createS3UploadMiddleware({
+  fieldName: 'cv',
+  allowedMimeTypes: CV_MIME_TYPES,
+  label: 'CV (PDF or Word)',
+  maxSize: getMaxFileSize('cv'),
+});
+
+module.exports = {
+  upload,
+  uploadImage,
+  uploadVideo,
+  uploadPDF,
+  uploadCV,
+};
