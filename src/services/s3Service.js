@@ -49,10 +49,6 @@ async function uploadFile(file, folder) {
     ContentType: file.mimetype,
   };
 
-  if (isPublicFolder(folder)) {
-    commandInput.ACL = 'public-read';
-  }
-
   await client.send(new PutObjectCommand(commandInput));
 
   const result = { key, fileName };

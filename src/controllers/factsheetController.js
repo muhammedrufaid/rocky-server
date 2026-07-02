@@ -1,14 +1,24 @@
 const Factsheet = require('../models/Factsheet');
+const { uploadFile, deleteFile } = require('../services/s3Service');
+const { S3_FOLDERS } = require('../constants/s3');
 
-function getFactsheetFileMeta(uploaded, req) {
-  const fileName =
-    req.cvUploadMeta?.originalFileName || uploaded.originalname || 'factsheet.pdf';
-  const fileUrl = uploaded.path;
+async function uploadFactsheetPdf(file) {
+  return uploadFile(file, S3_FOLDERS.PDFS);
+}
 
-  return { fileName, fileUrl };
+async function removeFactsheetPdfFromS3(key) {
+  if (!key) return;
+
+  try {
+    await deleteFile(key);
+  } catch (error) {
+    console.error('[S3] Failed to delete factsheet PDF:', error.message);
+  }
 }
 
 const uploadFactsheet = async (req, res) => {
+  let uploadedPdf;
+
   try {
     const fullName = (req.body?.fullName || '').trim();
     const uploaded = req.file;
@@ -27,19 +37,16 @@ const uploadFactsheet = async (req, res) => {
       });
     }
 
-    const { fileName, fileUrl } = getFactsheetFileMeta(uploaded, req);
+    uploadedPdf = await uploadFactsheetPdf(uploaded);
 
-    if (!fileUrl) {
-      return res.status(400).json({
-        success: false,
-        message: 'PDF upload failed. Please try again.',
-      });
+    if (!uploadedPdf.url) {
+      throw new Error('PDF upload failed. Please try again.');
     }
 
     const factsheet = await Factsheet.create({
       fullName,
-      fileUrl,
-      fileName,
+      fileUrl: uploadedPdf.url,
+      fileName: uploaded.originalname || uploadedPdf.fileName,
     });
 
     return res.status(201).json({
@@ -53,6 +60,10 @@ const uploadFactsheet = async (req, res) => {
       },
     });
   } catch (error) {
+    if (uploadedPdf?.key) {
+      await removeFactsheetPdfFromS3(uploadedPdf.key);
+    }
+
     return res.status(500).json({
       success: false,
       message: error.message || 'Server error',
