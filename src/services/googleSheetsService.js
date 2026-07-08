@@ -81,8 +81,13 @@ async function sendBinghattiLeadToGoogleSheet(payload) {
   return sendToGoogleSheet('GOOGLE_SHEETS_BINGHATTI_LEAD_URL', payload);
 }
 
+async function sendLandingPageLeadToGoogleSheet(payload) {
+  return sendToGoogleSheet('GOOGLE_SHEETS_LANDING_PAGE_LEAD_URL', payload);
+}
+
 module.exports = {
   sendCareerToGoogleSheet,
   sendJewelTowerLeadToGoogleSheet,
   sendBinghattiLeadToGoogleSheet,
+  sendLandingPageLeadToGoogleSheet,
 };

@@ -12,6 +12,7 @@ const careerRoutes = require('./routes/careerRoutes');
 const dubaiSouthLeadRoutes = require('./routes/dubaiSouthLeadRoutes');
 const jewelTowerLeadRoutes = require('./routes/jewelTowerLeadRoutes');
 const binghattiLeadRoutes = require('./routes/binghattiLeadRoutes');
+const landingPageLeadRoutes = require('./routes/landingPageLeadRoutes');
 const propertyManagementLeadRoutes = require('./routes/propertyManagementLeadRoutes');
 const factsheetRoutes = require('./routes/factsheetRoutes');
 const { startSalesforceMigrateScheduler } = require('./jobs/salesforceMigrateScheduler');
@@ -53,6 +54,7 @@ app.use('/api/career', careerRoutes);
 app.use('/api/dubai-south-lead', dubaiSouthLeadRoutes);
 app.use('/api/jewel-tower-lead', jewelTowerLeadRoutes);
 app.use('/api/binghatti-lead', binghattiLeadRoutes);
+app.use('/api/landing-page-lead', landingPageLeadRoutes);
 app.use('/api/property-management-lead', propertyManagementLeadRoutes);
 app.use('/api/factsheets', factsheetRoutes);
 
