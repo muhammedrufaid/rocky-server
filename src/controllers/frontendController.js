@@ -476,6 +476,22 @@ const getFeaturedDubaiSouthProperties = async (req, res) => {
 };
 
 /**
+ * GET /properties/featured-jebel-ali-village - Returns the fixed featured Jebel Ali Village properties
+ * Returns: { properties, total }
+ */
+const getFeaturedJebelAliVillageProperties = async (req, res) => {
+    try {
+        const { properties, total, missingRefs } = await propertyService.fetchFeaturedJebelAliVillageProperties();
+        res.status(200).json({ properties, total, missingRefs });
+    } catch (error) {
+        console.error('getFeaturedJebelAliVillageProperties error:', error);
+        res.status(500).json({
+            message: error.message || 'Failed to fetch featured Jebel Ali Village properties'
+        });
+    }
+};
+
+/**
  * GET /properties/:propertyRefNo - Fetches and returns a single property by reference number
  * Works for both Buy and Rent properties
  */
@@ -679,6 +695,7 @@ module.exports = {
     getDubaiSouthProperties,
     getDubaiSouthPropertiesByListingAgent,
     getFeaturedDubaiSouthProperties,
+    getFeaturedJebelAliVillageProperties,
     getPropertyByRefNo,
     searchProperties,
     searchPropertiesByArea,
