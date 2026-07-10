@@ -1,9 +1,6 @@
 const crypto = require('crypto');
 const Property = require('../models/Property');
 const propertyService = require('./propertyService');
-const {
-  FEATURED_DUBAI_SOUTH_PROPERTY_REF_NOS,
-} = require('../constants/featuredDubaiSouthProperties');
 
 const logPrefix = '[salesforce-migrate]';
 
@@ -106,19 +103,27 @@ const removeStaleProperties = async (feedRefNos) => {
     return 0;
   }
 
-  // Delete only listings absent from the feed, except pinned featured Dubai South refs.
-  const protectedRefNos = new Set([
-    ...feedRefNos,
-    ...FEATURED_DUBAI_SOUTH_PROPERTY_REF_NOS,
-  ]);
+  const feedRefSet = new Set(feedRefNos);
+  const staleDocs = await Property.find(
+    { propertyRefNo: { $nin: [...feedRefSet] } },
+    { propertyRefNo: 1 }
+  ).lean();
+
+  if (!staleDocs.length) {
+    return 0;
+  }
+
+  const staleRefNos = staleDocs.map((doc) => doc.propertyRefNo);
   const deleteResult = await Property.deleteMany({
-    propertyRefNo: { $nin: [...protectedRefNos] },
+    propertyRefNo: { $in: staleRefNos },
   });
 
   const deleted = deleteResult.deletedCount || 0;
-  if (deleted > 0) {
-    log('Removed stale properties no longer in Salesforce feed', { deleted });
-  }
+  log('Removed stale properties no longer in Salesforce feed', {
+    deleted,
+    feedCount: feedRefSet.size,
+    staleRefNos,
+  });
 
   return deleted;
 };
@@ -167,8 +172,10 @@ const migrateProperties = async ({ properties, skipIfUnchanged = false, xmlText 
     };
   }
 
-  const result = await Property.bulkWrite(ops, { ordered: false });
   const feedRefNos = collectPropertyRefNos({ properties });
+  log('Salesforce feed property count', { feedCount: feedRefNos.length });
+
+  const result = await Property.bulkWrite(ops, { ordered: false });
   const deleted = await removeStaleProperties(feedRefNos);
 
   if (contentHash !== null) {
