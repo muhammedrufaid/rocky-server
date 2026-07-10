@@ -6,6 +6,7 @@ const propertySchema = new mongoose.Schema(
 
     // Common fields we use in the app (keeps queries fast/typed)
     permitNumber: String,
+    trakheesiPermitUrl: String,
     propertyStatus: String,
     propertyPurpose: String,
     propertyType: { type: String, index: true },

@@ -34,6 +34,7 @@ const buildBulkUpserts = ({ properties }) => {
           $set: {
             propertyRefNo,
             permitNumber: p.permitNumber || null,
+            trakheesiPermitUrl: p.trakheesiPermitUrl || null,
             propertyStatus: p.propertyStatus || null,
             propertyPurpose: p.propertyPurpose || null,
             propertyType: p.propertyType || null,

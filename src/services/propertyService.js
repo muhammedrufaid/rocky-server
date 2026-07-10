@@ -17,6 +17,7 @@ const transformProperty = (prop) => {
     return {
         propertyRefNo: extractText(prop.Property_Ref_No),
         permitNumber: extractText(prop.Permit_Number),
+        trakheesiPermitUrl: extractText(prop.Trakheesi_Permit_URL),
         propertyStatus: extractText(prop.Property_Status),
         propertyPurpose: extractText(prop.Property_purpose),
         propertyType: extractText(prop.Property_Type),
