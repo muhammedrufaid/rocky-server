@@ -1,21 +1,23 @@
 const mongoose = require('mongoose');
 const LandingPageLead = require('../models/LandingPageLead');
 const { sendLandingPageLeadToGoogleSheet } = require('../services/googleSheetsService');
+const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 
 // 1. Create landing page lead - POST /api/landing-page-lead
 const createLandingPageLead = async (req, res) => {
   try {
-    const { landingPage, fullName, email, phone, message } = req.body;
+    const { landingPage, subSource, fullName, email, phone, message } = req.body;
 
-    if (!landingPage || !fullName || !email || !phone || !message) {
+    if (!landingPage || !subSource || !fullName || !email || !phone || !message) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide landingPage, fullName, email, phone and message',
+        message: 'Please provide landingPage, subSource, fullName, email, phone and message',
       });
     }
 
     const lead = await LandingPageLead.create({
       landingPage,
+      subSource,
       fullName,
       email,
       phone,
@@ -25,6 +27,7 @@ const createLandingPageLead = async (req, res) => {
     try {
       await sendLandingPageLeadToGoogleSheet({
         landingPage: lead.landingPage,
+        subSource: lead.subSource,
         fullName: lead.fullName,
         email: lead.email,
         phone: lead.phone,
@@ -32,6 +35,21 @@ const createLandingPageLead = async (req, res) => {
       });
     } catch (sheetsError) {
       console.error('[Google Sheets] Unexpected error after landing page lead save:', sheetsError.message);
+    }
+
+    // MongoDB is source of truth; Zapier is best-effort (never fails the request)
+    try {
+      await sendToZapier({
+        landingPage: lead.landingPage,
+        subSource: lead.subSource,
+        fullName: lead.fullName,
+        email: lead.email,
+        phone: lead.phone,
+        message: lead.message,
+        source: ZAPIER_SOURCES.LANDING_PAGE_LEAD,
+      });
+    } catch (zapierError) {
+      console.error('[Zapier] Unexpected error after landing page lead save:', zapierError.message);
     }
 
     return res.status(201).json({
@@ -115,7 +133,7 @@ const updateLandingPageLead = async (req, res) => {
     }
 
     const updates = {};
-    const allowedFields = ['landingPage', 'fullName', 'email', 'phone', 'message'];
+    const allowedFields = ['landingPage', 'subSource', 'fullName', 'email', 'phone', 'message'];
     allowedFields.forEach((field) => {
       if (req.body[field] !== undefined) updates[field] = req.body[field];
     });

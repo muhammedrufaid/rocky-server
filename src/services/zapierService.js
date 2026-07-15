@@ -2,6 +2,8 @@ const ZAPIER_SOURCES = {
   CONTACT_US: 'Contact Us',
   SELL_INQUIRY: 'Sell Inquiry',
   JEWEL_TOWER_LEAD: 'Jewel Tower Lead',
+  LANDING_PAGE_LEAD: 'Landing Page Lead',
+
   // CAREERS: 'Careers',
   // DUBAI_SOUTH_LEAD: 'Dubai South Lead',
 };

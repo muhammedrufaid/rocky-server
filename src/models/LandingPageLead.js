@@ -9,6 +9,11 @@ const landingPageLeadSchema = new mongoose.Schema(
       lowercase: true,
       index: true,
     },
+    subSource: {
+      type: String,
+      required: [true, 'Sub source is required'],
+      trim: true,
+    },
     fullName: {
       type: String,
       required: [true, 'Full Name is required'],
