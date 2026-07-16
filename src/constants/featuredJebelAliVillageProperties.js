@@ -1,5 +1,6 @@
 /** Fixed featured listings for GET /properties/featured-jebel-ali-village (order preserved). */
 const FEATURED_JEBEL_ALI_VILLAGE_PROPERTY_REF_NOS = [
+  'RO-S-03599',
   'RO-S-03260',
   'RO-S-02990',
   'RO-S-02991',
@@ -15,7 +16,6 @@ const FEATURED_JEBEL_ALI_VILLAGE_PROPERTY_REF_NOS = [
   'RO-S-03198',
   'RO-S-03197',
   'RO-R-02378',
-  'RO-S-03599',
 ];
 
 module.exports = { FEATURED_JEBEL_ALI_VILLAGE_PROPERTY_REF_NOS };
