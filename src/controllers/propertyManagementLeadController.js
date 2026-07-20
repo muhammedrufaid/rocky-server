@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const PropertyManagementLead = require('../models/PropertyManagementLead');
+const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 
 // 1. Create property management lead - POST /api/property-management-lead
 const createPropertyManagementLead = async (req, res) => {
@@ -19,6 +20,19 @@ const createPropertyManagementLead = async (req, res) => {
       phone,
       message,
     });
+
+    // MongoDB is source of truth; Zapier is best-effort (never fails the request)
+    try {
+      await sendToZapier({
+        fullName: lead.fullName,
+        email: lead.email,
+        phone: lead.phone,
+        message: lead.message,
+        source: ZAPIER_SOURCES.PROPERTY_MANAGEMENT_LEAD,
+      });
+    } catch (zapierError) {
+      console.error('[Zapier] Unexpected error after property management lead save:', zapierError.message);
+    }
 
     return res.status(201).json({
       success: true,
