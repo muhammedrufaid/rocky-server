@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const PropertyManagementLead = require('../models/PropertyManagementLead');
+const { PROPERTY_MANAGEMENT_SUB_SOURCE } = PropertyManagementLead;
 const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 
 // 1. Create property management lead - POST /api/property-management-lead
@@ -15,6 +16,7 @@ const createPropertyManagementLead = async (req, res) => {
     }
 
     const lead = await PropertyManagementLead.create({
+      subSource: PROPERTY_MANAGEMENT_SUB_SOURCE,
       fullName,
       email,
       phone,
@@ -24,6 +26,7 @@ const createPropertyManagementLead = async (req, res) => {
     // MongoDB is source of truth; Zapier is best-effort (never fails the request)
     try {
       await sendToZapier({
+        subSource: lead.subSource,
         fullName: lead.fullName,
         email: lead.email,
         phone: lead.phone,
@@ -110,7 +113,7 @@ const updatePropertyManagementLead = async (req, res) => {
     }
 
     const updates = {};
-    const allowedFields = ['fullName', 'email', 'phone', 'message'];
+    const allowedFields = ['subSource', 'fullName', 'email', 'phone', 'message'];
     allowedFields.forEach((field) => {
       if (req.body[field] !== undefined) updates[field] = req.body[field];
     });

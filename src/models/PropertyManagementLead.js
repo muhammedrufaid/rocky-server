@@ -1,7 +1,15 @@
 const mongoose = require('mongoose');
 
+const PROPERTY_MANAGEMENT_SUB_SOURCE = 'Property Management';
+
 const propertyManagementLeadSchema = new mongoose.Schema(
   {
+    subSource: {
+      type: String,
+      required: [true, 'Sub source is required'],
+      trim: true,
+      default: PROPERTY_MANAGEMENT_SUB_SOURCE,
+    },
     fullName: {
       type: String,
       required: [true, 'Full Name is required'],
@@ -30,3 +38,4 @@ const propertyManagementLeadSchema = new mongoose.Schema(
 );
 
 module.exports = mongoose.model('PropertyManagementLead', propertyManagementLeadSchema);
+module.exports.PROPERTY_MANAGEMENT_SUB_SOURCE = PROPERTY_MANAGEMENT_SUB_SOURCE;
