@@ -2,10 +2,9 @@ const ZAPIER_SOURCES = {
   AREA_GUIDES: 'Area Guides',
   CONTACT_US: 'Contact Us',
   SELL_INQUIRY: 'Sell Inquiry',
-  JEWEL_TOWER_LEAD: 'Jewel Tower Lead',
   LANDING_PAGE_LEAD: 'Landing Page Lead',
   PROPERTY_MANAGEMENT_LEAD: 'Property Management Lead',
-
+  // JEWEL_TOWER_LEAD: 'Jewel Tower Lead',
   // CAREERS: 'Careers',
   // DUBAI_SOUTH_LEAD: 'Dubai South Lead',
 };
