@@ -34,6 +34,11 @@ const areaGuideSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
+    propertyType: {
+      type: String,
+      required: [true, 'Property Type is required'],
+      trim: true,
+    },
     message: {
       type: String,
       required: [true, 'Message is required'],

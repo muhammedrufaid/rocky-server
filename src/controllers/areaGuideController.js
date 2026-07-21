@@ -6,12 +6,13 @@ const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 // 1. Create area guide inquiry - POST /api/area-guides
 const createAreaGuide = async (req, res) => {
   try {
-    const { subSource, fullName, email, phone, inquiryType, message } = req.body;
+    const { subSource, fullName, email, phone, inquiryType, propertyType, message } = req.body;
 
-    if (!fullName || !email || !phone || !inquiryType || !message) {
+    if (!fullName || !email || !phone || !inquiryType || !propertyType || !message) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide fullName, email, phone, inquiryType and message',
+        message:
+          'Please provide fullName, email, phone, inquiryType, propertyType and message',
       });
     }
 
@@ -21,6 +22,7 @@ const createAreaGuide = async (req, res) => {
       email,
       phone,
       inquiryType,
+      propertyType,
       message,
     });
 
@@ -32,6 +34,7 @@ const createAreaGuide = async (req, res) => {
         email: areaGuide.email,
         phone: areaGuide.phone,
         inquiryType: areaGuide.inquiryType,
+        propertyType: areaGuide.propertyType,
         message: areaGuide.message,
         source: ZAPIER_SOURCES.AREA_GUIDES,
       });
@@ -118,7 +121,15 @@ const updateAreaGuide = async (req, res) => {
     }
 
     const updates = {};
-    const allowedFields = ['subSource', 'fullName', 'email', 'phone', 'inquiryType', 'message'];
+    const allowedFields = [
+      'subSource',
+      'fullName',
+      'email',
+      'phone',
+      'inquiryType',
+      'propertyType',
+      'message',
+    ];
     allowedFields.forEach((field) => {
       if (req.body[field] !== undefined) updates[field] = req.body[field];
     });
