@@ -1,4 +1,5 @@
 const ZAPIER_SOURCES = {
+  AREA_GUIDES: 'Area Guides',
   CONTACT_US: 'Contact Us',
   SELL_INQUIRY: 'Sell Inquiry',
   JEWEL_TOWER_LEAD: 'Jewel Tower Lead',
