@@ -6,7 +6,7 @@ const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 // 1. Create area guide inquiry - POST /api/area-guides
 const createAreaGuide = async (req, res) => {
   try {
-    const { fullName, email, phone, inquiryType, message } = req.body;
+    const { subSource, fullName, email, phone, inquiryType, message } = req.body;
 
     if (!fullName || !email || !phone || !inquiryType || !message) {
       return res.status(400).json({
@@ -16,7 +16,7 @@ const createAreaGuide = async (req, res) => {
     }
 
     const areaGuide = await AreaGuide.create({
-      subSource: AREA_GUIDE_SUB_SOURCE,
+      subSource: subSource || AREA_GUIDE_SUB_SOURCE,
       fullName,
       email,
       phone,
