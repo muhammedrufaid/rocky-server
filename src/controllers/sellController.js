@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const Sell = require('../models/sell');
+const { SELL_SUB_SOURCE } = Sell;
 const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 
 // 1. Create sell inquiry - POST /api/sell
@@ -15,6 +16,7 @@ const createSell = async (req, res) => {
     }
 
     const sell = await Sell.create({
+      subSource: SELL_SUB_SOURCE,
       fullName,
       phone,
       email,
@@ -25,6 +27,7 @@ const createSell = async (req, res) => {
 
     try {
       await sendToZapier({
+        subSource: sell.subSource,
         fullName: sell.fullName,
         phone: sell.phone,
         email: sell.email,
@@ -116,7 +119,15 @@ const updateSell = async (req, res) => {
     }
 
     const updates = {};
-    const allowedFields = ['fullName', 'phone', 'email', 'propertyType', 'locationArea', 'message'];
+    const allowedFields = [
+      'subSource',
+      'fullName',
+      'phone',
+      'email',
+      'propertyType',
+      'locationArea',
+      'message',
+    ];
     allowedFields.forEach((field) => {
       if (req.body[field] !== undefined) updates[field] = req.body[field];
     });

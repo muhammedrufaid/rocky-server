@@ -1,7 +1,15 @@
 const mongoose = require('mongoose');
 
+const CONTACT_SUB_SOURCE = 'Contact Us';
+
 const contactSchema = new mongoose.Schema(
   {
+    subSource: {
+      type: String,
+      required: [true, 'Sub source is required'],
+      trim: true,
+      default: CONTACT_SUB_SOURCE,
+    },
     fullName: {
       type: String,
       required: [true, 'Full Name is required'],
@@ -36,4 +44,5 @@ const contactSchema = new mongoose.Schema(
 );
 
 module.exports = mongoose.model('Contact', contactSchema);
+module.exports.CONTACT_SUB_SOURCE = CONTACT_SUB_SOURCE;
 

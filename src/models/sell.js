@@ -1,5 +1,7 @@
 const mongoose = require('mongoose');
 
+const SELL_SUB_SOURCE = 'Sell Inquiry';
+
 const SELL_PROPERTY_TYPES = [
   'Apartment',
   'Villa',
@@ -14,6 +16,12 @@ const SELL_PROPERTY_TYPES = [
 
 const sellSchema = new mongoose.Schema(
   {
+    subSource: {
+      type: String,
+      required: [true, 'Sub source is required'],
+      trim: true,
+      default: SELL_SUB_SOURCE,
+    },
     fullName: {
       type: String,
       required: [true, 'Full Name is required'],
@@ -54,4 +62,5 @@ const sellSchema = new mongoose.Schema(
 );
 
 module.exports = mongoose.model('Sell', sellSchema);
+module.exports.SELL_SUB_SOURCE = SELL_SUB_SOURCE;
 

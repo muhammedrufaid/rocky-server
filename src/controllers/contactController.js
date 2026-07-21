@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const Contact = require('../models/Contact');
+const { CONTACT_SUB_SOURCE } = Contact;
 const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 
 // 1. Create contact - POST /api/contact
@@ -15,6 +16,7 @@ const createContact = async (req, res) => {
     }
 
     const contact = await Contact.create({
+      subSource: CONTACT_SUB_SOURCE,
       fullName,
       email,
       phone,
@@ -25,6 +27,7 @@ const createContact = async (req, res) => {
     // MongoDB is source of truth; Zapier is best-effort (never fails the request)
     try {
       await sendToZapier({
+        subSource: contact.subSource,
         fullName: contact.fullName,
         email: contact.email,
         phone: contact.phone,
@@ -115,7 +118,7 @@ const updateContact = async (req, res) => {
     }
 
     const updates = {};
-    const allowedFields = ['fullName', 'email', 'phone', 'inquiryType', 'message'];
+    const allowedFields = ['subSource', 'fullName', 'email', 'phone', 'inquiryType', 'message'];
     allowedFields.forEach((field) => {
       if (req.body[field] !== undefined) updates[field] = req.body[field];
     });
