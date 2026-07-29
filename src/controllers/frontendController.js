@@ -24,8 +24,8 @@ const FILTER_QUERY_KEYS = [
     'propertySizeMax'
 ];
 
-const parsePropertyListQuery = (req, paginationOptions = {}) => {
-    const { page, limit } = parsePaginationParams(req, paginationOptions);
+const parsePropertyListQuery = (req, options = {}) => {
+    const { page, limit } = parsePaginationParams(req, options);
     const search = (req.query.search || '').toString().trim();
 
     let filters = {};
@@ -464,14 +464,14 @@ const getDubaiSouthPropertiesByListingAgent = async (req, res) => {
 
 /**
  * GET /properties/featured-dubai-south - Azizi Venice (Dubai South) properties
- * Query params: page, limit (default: 8), search, and optional filters
+ * Query params: page, limit (default: 6), search, and optional filters
  * Returns: { properties, total, pagination }
  */
 const getFeaturedDubaiSouthProperties = async (req, res) => {
     try {
         let parsed;
         try {
-            parsed = parsePropertyListQuery(req, { defaultLimit: 8 });
+            parsed = parsePropertyListQuery(req, { defaultLimit: 6 });
         } catch (err) {
             return res.status(400).json({
                 message: 'Invalid "filters" JSON payload'
