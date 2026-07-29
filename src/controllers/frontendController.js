@@ -1,6 +1,9 @@
 const propertyService = require('../services/propertyDbService');
 const { parsePaginationParams } = require('../utils/paginationUtils');
-const { DUBAI_SOUTH_LOCALITY } = require('../constants/dubaiSouth');
+const {
+    DUBAI_SOUTH_LOCALITY,
+    AZIZI_VENICE_SUB_LOCALITY,
+} = require('../constants/dubaiSouth');
 
 const DEFAULT_SEARCH_LIMIT = 10;
 
@@ -21,8 +24,8 @@ const FILTER_QUERY_KEYS = [
     'propertySizeMax'
 ];
 
-const parsePropertyListQuery = (req) => {
-    const { page, limit } = parsePaginationParams(req);
+const parsePropertyListQuery = (req, paginationOptions = {}) => {
+    const { page, limit } = parsePaginationParams(req, paginationOptions);
     const search = (req.query.search || '').toString().trim();
 
     let filters = {};
@@ -460,13 +463,35 @@ const getDubaiSouthPropertiesByListingAgent = async (req, res) => {
 };
 
 /**
- * GET /properties/featured-dubai-south - Returns the fixed featured Dubai South properties
- * Returns: { properties, total }
+ * GET /properties/featured-dubai-south - Azizi Venice (Dubai South) properties
+ * Query params: page, limit (default: 8), search, and optional filters
+ * Returns: { properties, total, pagination }
  */
 const getFeaturedDubaiSouthProperties = async (req, res) => {
     try {
-        const { properties, total, missingRefs } = await propertyService.fetchFeaturedDubaiSouthProperties();
-        res.status(200).json({ properties, total, missingRefs });
+        let parsed;
+        try {
+            parsed = parsePropertyListQuery(req, { defaultLimit: 8 });
+        } catch (err) {
+            return res.status(400).json({
+                message: 'Invalid "filters" JSON payload'
+            });
+        }
+
+        const { page, limit, search, filters } = parsed;
+        const mergedFilters = {
+            ...filters,
+            locality: DUBAI_SOUTH_LOCALITY,
+            subLocality: AZIZI_VENICE_SUB_LOCALITY,
+        };
+
+        const { properties, total, pagination } = await propertyService.fetchAllProperties({
+            page,
+            limit,
+            search,
+            filters: mergedFilters
+        });
+        res.status(200).json({ properties, total, pagination });
     } catch (error) {
         console.error('getFeaturedDubaiSouthProperties error:', error);
         res.status(500).json({

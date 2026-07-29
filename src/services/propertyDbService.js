@@ -218,39 +218,8 @@ const fetchRentProperties = async (opts = {}) => {
 };
 
 const {
-  FEATURED_DUBAI_SOUTH_PROPERTY_REF_NOS,
-} = require('../constants/featuredDubaiSouthProperties');
-const {
   FEATURED_JEBEL_ALI_VILLAGE_PROPERTY_REF_NOS,
 } = require('../constants/featuredJebelAliVillageProperties');
-
-const fetchFeaturedDubaiSouthProperties = async () => {
-  const docs = await Property.find({
-    propertyRefNo: { $in: FEATURED_DUBAI_SOUTH_PROPERTY_REF_NOS },
-  }).lean();
-
-  const byRefNo = new Map(docs.map((doc) => [doc.propertyRefNo, doc]));
-  const properties = [];
-  const missingRefs = [];
-
-  for (const refNo of FEATURED_DUBAI_SOUTH_PROPERTY_REF_NOS) {
-    const doc = byRefNo.get(refNo);
-    if (doc) {
-      properties.push(doc);
-    } else {
-      missingRefs.push(refNo);
-    }
-  }
-
-  if (missingRefs.length) {
-    console.warn(
-      '[featured-dubai-south] Missing from MongoDB (not in Salesforce feed or never synced):',
-      missingRefs.join(', ')
-    );
-  }
-
-  return { properties, total: properties.length, missingRefs };
-};
 
 const fetchFeaturedJebelAliVillageProperties = async () => {
   const docs = await Property.find({
@@ -515,7 +484,6 @@ module.exports = {
   fetchReadyProperties,
   fetchBuyProperties,
   fetchRentProperties,
-  fetchFeaturedDubaiSouthProperties,
   fetchFeaturedJebelAliVillageProperties,
   fetchPropertyByRefNo,
   fetchSearchSuggestions,
