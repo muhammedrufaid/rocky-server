@@ -16,7 +16,9 @@ const binghattiLeadRoutes = require('./routes/binghattiLeadRoutes');
 const landingPageLeadRoutes = require('./routes/landingPageLeadRoutes');
 const propertyManagementLeadRoutes = require('./routes/propertyManagementLeadRoutes');
 const factsheetRoutes = require('./routes/factsheetRoutes');
+const teamtailorRoutes = require('./routes/teamtailorRoutes');
 const { startSalesforceMigrateScheduler } = require('./jobs/salesforceMigrateScheduler');
+const { startTeamTailorSyncScheduler } = require('./jobs/teamtailorSyncScheduler');
 
 const app = express();
 // Port 5000 is often used by AirPlay on macOS - use 5001 as fallback
@@ -59,6 +61,7 @@ app.use('/api/binghatti-lead', binghattiLeadRoutes);
 app.use('/api/landing-page-lead', landingPageLeadRoutes);
 app.use('/api/property-management-lead', propertyManagementLeadRoutes);
 app.use('/api/factsheets', factsheetRoutes);
+app.use('/api/teamtailor', teamtailorRoutes);
 
 // Error handler (e.g. Multer/Cloudinary errors)
 app.use((err, req, res, next) => {
@@ -79,6 +82,7 @@ app.get('/', (req, res) => {
 const bootstrap = async () => {
   await connectDB();
   startSalesforceMigrateScheduler();
+  startTeamTailorSyncScheduler();
 
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
