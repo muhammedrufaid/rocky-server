@@ -19,6 +19,7 @@ const factsheetRoutes = require('./routes/factsheetRoutes');
 const teamtailorRoutes = require('./routes/teamtailorRoutes');
 const { startSalesforceMigrateScheduler } = require('./jobs/salesforceMigrateScheduler');
 const { startTeamTailorSyncScheduler } = require('./jobs/teamtailorSyncScheduler');
+const { requireApiKey } = require('./middleware/apiKeyMiddleware');
 
 const app = express();
 // Port 5000 is often used by AirPlay on macOS - use 5001 as fallback
@@ -32,7 +33,7 @@ app.use(
   cors({
     origin: true, // Allow request origin (or use '*' for all)
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-api-key'],
     credentials: true,
   })
 );
@@ -45,6 +46,9 @@ app.use(
 );
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Protect all /api routes with a shared API key (health check "/" stays public)
+app.use('/api', requireApiKey);
 
 // Routes
 app.use('/api/auth', authRoutes);
