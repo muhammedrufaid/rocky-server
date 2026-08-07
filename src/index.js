@@ -17,6 +17,7 @@ const landingPageLeadRoutes = require('./routes/landingPageLeadRoutes');
 const propertyManagementLeadRoutes = require('./routes/propertyManagementLeadRoutes');
 const factsheetRoutes = require('./routes/factsheetRoutes');
 const teamtailorRoutes = require('./routes/teamtailorRoutes');
+const aiChatRoutes = require('./ai/routes/chat.routes');
 const { startSalesforceMigrateScheduler } = require('./jobs/salesforceMigrateScheduler');
 const { startTeamTailorSyncScheduler } = require('./jobs/teamtailorSyncScheduler');
 const { requireApiKey } = require('./middleware/apiKeyMiddleware');
@@ -66,6 +67,7 @@ app.use('/api/landing-page-lead', landingPageLeadRoutes);
 app.use('/api/property-management-lead', propertyManagementLeadRoutes);
 app.use('/api/factsheets', factsheetRoutes);
 app.use('/api/teamtailor', teamtailorRoutes);
+app.use('/api/ai', aiChatRoutes);
 
 // Error handler (e.g. Multer/Cloudinary errors)
 app.use((err, req, res, next) => {
