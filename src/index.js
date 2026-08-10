@@ -19,6 +19,7 @@ const factsheetRoutes = require('./routes/factsheetRoutes');
 const teamtailorRoutes = require('./routes/teamtailorRoutes');
 const faqRoutes = require('./routes/faqRoutes');
 const serviceRoutes = require('./routes/serviceRoutes');
+const blogRoutes = require('./routes/blogRoutes');
 const { startSalesforceMigrateScheduler } = require('./jobs/salesforceMigrateScheduler');
 const { startTeamTailorSyncScheduler } = require('./jobs/teamtailorSyncScheduler');
 const { requireApiKey } = require('./middleware/apiKeyMiddleware');
@@ -70,6 +71,7 @@ app.use('/api/factsheets', factsheetRoutes);
 app.use('/api/teamtailor', teamtailorRoutes);
 app.use('/api/faqs', faqRoutes);
 app.use('/api/services', serviceRoutes);
+app.use('/api/blogs', blogRoutes);
 
 // Error handler (e.g. Multer/Cloudinary errors)
 app.use((err, req, res, next) => {
