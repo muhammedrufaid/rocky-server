@@ -1,6 +1,9 @@
 const crypto = require('crypto');
 const Property = require('../models/Property');
 const propertyService = require('./propertyService');
+const {
+  syncAllAreaGuideAgentOrders,
+} = require('./areaGuideAgentOrdersService');
 
 const logPrefix = '[salesforce-migrate]';
 
@@ -178,6 +181,20 @@ const migrateProperties = async ({ properties, skipIfUnchanged = false, xmlText 
   const result = await Property.bulkWrite(ops, { ordered: false });
   const deleted = await removeStaleProperties(feedRefNos);
 
+  // Keep AreaGuide.agentOrders in sync with listing agents in matching areas
+  let agentOrdersSync = null;
+  try {
+    agentOrdersSync = await syncAllAreaGuideAgentOrders();
+    log('Area guide agentOrders sync finished', {
+      guides: agentOrdersSync.count,
+      changed: agentOrdersSync.changedCount,
+    });
+  } catch (syncError) {
+    log('Area guide agentOrders sync failed', {
+      message: syncError?.message || String(syncError),
+    });
+  }
+
   if (contentHash !== null) {
     lastContentHash = contentHash;
   }
@@ -200,6 +217,12 @@ const migrateProperties = async ({ properties, skipIfUnchanged = false, xmlText 
       modified: result.modifiedCount || 0,
       matched: result.matchedCount || 0,
       deleted,
+      agentOrdersSync: agentOrdersSync
+        ? {
+            count: agentOrdersSync.count,
+            changedCount: agentOrdersSync.changedCount,
+          }
+        : null,
     },
   };
 };

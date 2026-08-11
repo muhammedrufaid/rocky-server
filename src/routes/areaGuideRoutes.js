@@ -8,25 +8,38 @@ const {
   getAreaGuideBySlug,
   updateAreaGuide,
   deleteAreaGuide,
+  getAgentsByListingsSearch,
+  syncAllAreaGuideAgents,
+  syncAreaGuideAgents,
 } = require('../controllers/areaGuideController');
 
 // 1. Create Area Guide - POST /api/area-guides
 router.post('/', createAreaGuide);
 
-// 2. Get all Area Guides - GET /api/area-guides
+// 2. Sync all area guide agentOrders from property listings
+// Must be before /:id
+router.post('/sync-agents', syncAllAreaGuideAgents);
+
+// 3. Get all Area Guides - GET /api/area-guides
 router.get('/', getAreaGuides);
 
-// 3. Get Area Guide by slug - GET /api/area-guides/slug/:slug
-// Must be registered before /:id to avoid treating "slug" as an ObjectId
+// 4. Preview agents from listingsSearch - GET /api/area-guides/agents
+// Must be before /:id
+router.get('/agents', getAgentsByListingsSearch);
+
+// 5. Get Area Guide by slug - GET /api/area-guides/slug/:slug
 router.get('/slug/:slug', getAreaGuideBySlug);
 
-// 4. Get Area Guide by id - GET /api/area-guides/:id
+// 6. Get Area Guide by id - GET /api/area-guides/:id
 router.get('/:id', getAreaGuideById);
 
-// 5. Update Area Guide - PUT /api/area-guides/:id
+// 7. Sync one area guide agentOrders - POST /api/area-guides/:id/sync-agents
+router.post('/:id/sync-agents', syncAreaGuideAgents);
+
+// 8. Update Area Guide - PUT /api/area-guides/:id
 router.put('/:id', updateAreaGuide);
 
-// 6. Delete Area Guide - DELETE /api/area-guides/:id
+// 9. Delete Area Guide - DELETE /api/area-guides/:id
 router.delete('/:id', deleteAreaGuide);
 
 module.exports = router;

@@ -46,7 +46,10 @@ const areaGuideSchema = new mongoose.Schema(
       type: [keyHighlightSchema],
       default: [],
     },
-    /** TeamMember.order values for featured agents on this area guide */
+    /**
+     * TeamMember.order values for featured agents on this area guide.
+     * Kept in sync from property listings that match listingsSearch (or title).
+     */
     agentOrders: {
       type: [Number],
       default: [],
