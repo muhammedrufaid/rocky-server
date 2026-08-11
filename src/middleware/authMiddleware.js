@@ -1,18 +1,40 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 
+/**
+ * Require a valid logged-in user JWT.
+ * Expects: Authorization: Bearer <token>
+ *
+ * Used together with requireApiKey (global /api):
+ *   x-api-key: <API_SECRET_KEY>
+ *   Authorization: Bearer <USER_JWT>
+ */
 const protect = async (req, res, next) => {
   try {
-    let token = null;
+    const authHeader = req.headers.authorization;
 
-    if (req.headers.authorization?.startsWith('Bearer')) {
-      token = req.headers.authorization.split(' ')[1];
-    }
-
-    if (!token) {
+    if (!authHeader) {
+      console.warn('[auth] Missing authentication token');
       return res.status(401).json({
         success: false,
-        message: 'Not authorized. No token provided',
+        message: 'Authentication token is required',
+      });
+    }
+
+    if (!authHeader.startsWith('Bearer ')) {
+      console.warn('[auth] Invalid authentication token scheme');
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized. Bearer token required',
+      });
+    }
+
+    const token = authHeader.slice(7).trim();
+    if (!token) {
+      console.warn('[auth] Missing authentication token');
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication token is required',
       });
     }
 
@@ -20,32 +42,39 @@ const protect = async (req, res, next) => {
     const user = await User.findById(decoded.id).select('-password');
 
     if (!user) {
+      console.warn('[auth] Invalid authentication token');
       return res.status(401).json({
         success: false,
-        message: 'User not found',
+        message: 'Invalid token',
       });
     }
 
     req.user = user;
-    next();
+    return next();
   } catch (error) {
     if (error.name === 'JsonWebTokenError') {
+      console.warn('[auth] Invalid authentication token');
       return res.status(401).json({
         success: false,
         message: 'Invalid token',
       });
     }
     if (error.name === 'TokenExpiredError') {
+      console.warn('[auth] Invalid authentication token');
       return res.status(401).json({
         success: false,
         message: 'Token expired',
       });
     }
-    res.status(500).json({
+
+    return res.status(500).json({
       success: false,
       message: 'Server error',
     });
   }
 };
 
-module.exports = { protect };
+/** Alias used on enquiry/lead admin routes */
+const requireUserToken = protect;
+
+module.exports = { protect, requireUserToken };

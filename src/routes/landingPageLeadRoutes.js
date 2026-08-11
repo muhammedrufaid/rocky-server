@@ -8,20 +8,13 @@ const {
   updateLandingPageLead,
   deleteLandingPageLead,
 } = require('../controllers/landingPageLeadController');
+const { requireUserToken } = require('../middleware/authMiddleware');
 
-// 1. Create landing page lead - POST /api/landing-page-lead
 router.post('/', createLandingPageLead);
 
-// 2. Get all landing page leads - GET /api/landing-page-lead
-router.get('/', getAllLandingPageLeads);
-
-// 3. Get landing page lead by id - GET /api/landing-page-lead/:id
-router.get('/:id', getLandingPageLeadById);
-
-// 4. Update landing page lead - PUT /api/landing-page-lead/:id
-router.put('/:id', updateLandingPageLead);
-
-// 5. Delete landing page lead - DELETE /api/landing-page-lead/:id
-router.delete('/:id', deleteLandingPageLead);
+router.get('/', requireUserToken, getAllLandingPageLeads);
+router.get('/:id', requireUserToken, getLandingPageLeadById);
+router.put('/:id', requireUserToken, updateLandingPageLead);
+router.delete('/:id', requireUserToken, deleteLandingPageLead);
 
 module.exports = router;

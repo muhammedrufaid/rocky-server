@@ -9,20 +9,15 @@ const {
   updateCareer,
   deleteCareer,
 } = require('../controllers/careerController');
+const { requireUserToken } = require('../middleware/authMiddleware');
 
-// 1. Create career application - POST /api/career
+// 1. Create career application - POST /api/career (public form; x-api-key only)
 router.post('/', uploadCV, createCareer);
 
-// 2. Get all career applications - GET /api/career
-router.get('/', getAllCareers);
-
-// 3. Get career application by id - GET /api/career/:id
-router.get('/:id', getCareerById);
-
-// 4. Update career application - PUT /api/career/:id
-router.put('/:id', uploadCV, updateCareer);
-
-// 5. Delete career application - DELETE /api/career/:id
-router.delete('/:id', deleteCareer);
+// Admin / sensitive enquiry data: x-api-key + Bearer user token
+router.get('/', requireUserToken, getAllCareers);
+router.get('/:id', requireUserToken, getCareerById);
+router.put('/:id', requireUserToken, uploadCV, updateCareer);
+router.delete('/:id', requireUserToken, deleteCareer);
 
 module.exports = router;

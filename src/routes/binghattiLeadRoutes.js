@@ -8,20 +8,13 @@ const {
   updateBinghattiLead,
   deleteBinghattiLead,
 } = require('../controllers/binghattiLeadController');
+const { requireUserToken } = require('../middleware/authMiddleware');
 
-// 1. Create Binghatti lead - POST /api/binghatti-lead
 router.post('/', createBinghattiLead);
 
-// 2. Get all Binghatti leads - GET /api/binghatti-lead
-router.get('/', getAllBinghattiLeads);
-
-// 3. Get Binghatti lead by id - GET /api/binghatti-lead/:id
-router.get('/:id', getBinghattiLeadById);
-
-// 4. Update Binghatti lead - PUT /api/binghatti-lead/:id
-router.put('/:id', updateBinghattiLead);
-
-// 5. Delete Binghatti lead - DELETE /api/binghatti-lead/:id
-router.delete('/:id', deleteBinghattiLead);
+router.get('/', requireUserToken, getAllBinghattiLeads);
+router.get('/:id', requireUserToken, getBinghattiLeadById);
+router.put('/:id', requireUserToken, updateBinghattiLead);
+router.delete('/:id', requireUserToken, deleteBinghattiLead);
 
 module.exports = router;

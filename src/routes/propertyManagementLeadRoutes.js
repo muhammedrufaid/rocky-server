@@ -8,20 +8,15 @@ const {
   updatePropertyManagementLead,
   deletePropertyManagementLead,
 } = require('../controllers/propertyManagementLeadController');
+const { requireUserToken } = require('../middleware/authMiddleware');
 
-// 1. Create property management lead - POST /api/property-management-lead
+// 1. Create property management lead - POST (public form; x-api-key only)
 router.post('/', createPropertyManagementLead);
 
-// 2. Get all property management leads - GET /api/property-management-lead
-router.get('/', getAllPropertyManagementLeads);
-
-// 3. Get property management lead by id - GET /api/property-management-lead/:id
-router.get('/:id', getPropertyManagementLeadById);
-
-// 4. Update property management lead - PUT /api/property-management-lead/:id
-router.put('/:id', updatePropertyManagementLead);
-
-// 5. Delete property management lead - DELETE /api/property-management-lead/:id
-router.delete('/:id', deletePropertyManagementLead);
+// Admin / sensitive enquiry data: x-api-key + Bearer user token
+router.get('/', requireUserToken, getAllPropertyManagementLeads);
+router.get('/:id', requireUserToken, getPropertyManagementLeadById);
+router.put('/:id', requireUserToken, updatePropertyManagementLead);
+router.delete('/:id', requireUserToken, deletePropertyManagementLead);
 
 module.exports = router;
