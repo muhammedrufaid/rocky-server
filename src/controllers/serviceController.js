@@ -7,7 +7,6 @@ const isDuplicateKeyError = (error) =>
 const duplicateFieldMessage = (error) => {
   const key = error?.keyPattern ? Object.keys(error.keyPattern)[0] : null;
   if (key === 'slug') return 'A service with this slug already exists';
-  if (key === 'id') return 'A service with this id already exists';
   return 'A service with this value already exists';
 };
 
@@ -42,7 +41,6 @@ const validateSubservices = (subservices) => {
 const createService = async (req, res) => {
   try {
     const {
-      id,
       slug,
       title,
       image,
@@ -54,17 +52,10 @@ const createService = async (req, res) => {
       isActive,
     } = req.body;
 
-    if (id === undefined || id === null || id === '' || !slug || !title || !description) {
+    if (!slug || !title || !description) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide id, slug, title and description',
-      });
-    }
-
-    if (typeof id !== 'number' || Number.isNaN(id)) {
-      return res.status(400).json({
-        success: false,
-        message: 'id must be a number',
+        message: 'Please provide slug, title and description',
       });
     }
 
@@ -91,16 +82,7 @@ const createService = async (req, res) => {
       });
     }
 
-    const existingId = await Service.findOne({ id });
-    if (existingId) {
-      return res.status(400).json({
-        success: false,
-        message: 'A service with this id already exists',
-      });
-    }
-
     const service = await Service.create({
-      id,
       slug: String(slug).trim().toLowerCase(),
       title,
       image,
@@ -141,7 +123,7 @@ const getServices = async (req, res) => {
       filter.isActive = req.query.isActive === 'true';
     }
 
-    const services = await Service.find(filter).sort({ id: 1 });
+    const services = await Service.find(filter).sort({ createdAt: 1 });
 
     return res.status(200).json({
       success: true,
@@ -245,7 +227,6 @@ const updateService = async (req, res) => {
 
     const updates = {};
     const allowedFields = [
-      'id',
       'slug',
       'title',
       'image',
@@ -262,13 +243,6 @@ const updateService = async (req, res) => {
         updates[field] = req.body[field];
       }
     });
-
-    if (updates.id !== undefined && (typeof updates.id !== 'number' || Number.isNaN(updates.id))) {
-      return res.status(400).json({
-        success: false,
-        message: 'id must be a number',
-      });
-    }
 
     if (updates.slug !== undefined) {
       if (!updates.slug || typeof updates.slug !== 'string') {
@@ -304,19 +278,6 @@ const updateService = async (req, res) => {
         return res.status(400).json({
           success: false,
           message: 'A service with this slug already exists',
-        });
-      }
-    }
-
-    if (updates.id !== undefined) {
-      const existingId = await Service.findOne({
-        id: updates.id,
-        _id: { $ne: id },
-      });
-      if (existingId) {
-        return res.status(400).json({
-          success: false,
-          message: 'A service with this id already exists',
         });
       }
     }

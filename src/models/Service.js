@@ -29,12 +29,6 @@ const subServiceSchema = new mongoose.Schema(
 
 const serviceSchema = new mongoose.Schema(
   {
-    id: {
-      type: Number,
-      required: [true, 'Service id is required'],
-      unique: true,
-      index: true,
-    },
     slug: {
       type: String,
       required: [true, 'Slug is required'],
@@ -82,6 +76,6 @@ const serviceSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-serviceSchema.index({ isActive: 1, id: 1 });
+serviceSchema.index({ isActive: 1, createdAt: 1 });
 
 module.exports = mongoose.model('Service', serviceSchema, 'services');

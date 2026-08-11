@@ -19,12 +19,6 @@ const contentBlockSchema = new mongoose.Schema(
 
 const blogSchema = new mongoose.Schema(
   {
-    id: {
-      type: Number,
-      required: [true, 'Blog id is required'],
-      unique: true,
-      index: true,
-    },
     slug: {
       type: String,
       required: [true, 'Slug is required'],
@@ -78,7 +72,6 @@ const blogSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-blogSchema.index({ isActive: 1, id: -1 });
 blogSchema.index({ isActive: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Blog', blogSchema, 'blogs');

@@ -7,7 +7,6 @@ const isDuplicateKeyError = (error) =>
 const duplicateFieldMessage = (error) => {
   const key = error?.keyPattern ? Object.keys(error.keyPattern)[0] : null;
   if (key === 'slug') return 'A blog with this slug already exists';
-  if (key === 'id') return 'A blog with this id already exists';
   return 'A blog with this value already exists';
 };
 
@@ -70,7 +69,6 @@ const slugFromPath = (path) => {
 const createBlog = async (req, res) => {
   try {
     const {
-      id,
       slug,
       title,
       category,
@@ -83,24 +81,10 @@ const createBlog = async (req, res) => {
       isActive,
     } = req.body;
 
-    if (
-      id === undefined ||
-      id === null ||
-      id === '' ||
-      !title ||
-      !category ||
-      !description
-    ) {
+    if (!title || !category || !description) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide id, title, category and description',
-      });
-    }
-
-    if (typeof id !== 'number' || Number.isNaN(id)) {
-      return res.status(400).json({
-        success: false,
-        message: 'id must be a number',
+        message: 'Please provide title, category and description',
       });
     }
 
@@ -135,16 +119,7 @@ const createBlog = async (req, res) => {
       });
     }
 
-    const existingId = await Blog.findOne({ id });
-    if (existingId) {
-      return res.status(400).json({
-        success: false,
-        message: 'A blog with this id already exists',
-      });
-    }
-
     const blog = await Blog.create({
-      id,
       slug: resolvedSlug,
       title,
       category,
@@ -194,8 +169,8 @@ const getBlogs = async (req, res) => {
       filter.isFeatured = req.query.isFeatured === 'true';
     }
 
-    // Newest first by business id (matches frontend array order / recency)
-    const blogs = await Blog.find(filter).sort({ id: -1 });
+    // Newest first
+    const blogs = await Blog.find(filter).sort({ createdAt: -1 });
 
     return res.status(200).json({
       success: true,
@@ -297,7 +272,6 @@ const updateBlog = async (req, res) => {
 
     const updates = {};
     const allowedFields = [
-      'id',
       'slug',
       'title',
       'category',
@@ -315,13 +289,6 @@ const updateBlog = async (req, res) => {
         updates[field] = req.body[field];
       }
     });
-
-    if (updates.id !== undefined && (typeof updates.id !== 'number' || Number.isNaN(updates.id))) {
-      return res.status(400).json({
-        success: false,
-        message: 'id must be a number',
-      });
-    }
 
     if (updates.slug !== undefined) {
       if (!updates.slug || typeof updates.slug !== 'string') {
@@ -350,19 +317,6 @@ const updateBlog = async (req, res) => {
         return res.status(400).json({
           success: false,
           message: 'A blog with this slug already exists',
-        });
-      }
-    }
-
-    if (updates.id !== undefined) {
-      const existingId = await Blog.findOne({
-        id: updates.id,
-        _id: { $ne: id },
-      });
-      if (existingId) {
-        return res.status(400).json({
-          success: false,
-          message: 'A blog with this id already exists',
         });
       }
     }
