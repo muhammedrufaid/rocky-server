@@ -1,56 +1,213 @@
 const mongoose = require('mongoose');
 const AreaGuide = require('../models/AreaGuide');
-const { AREA_GUIDE_SUB_SOURCE } = AreaGuide;
-const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
+const TeamMember = require('../models/TeamMember');
 
-// 1. Create area guide inquiry - POST /api/area-guides
+const isDuplicateKeyError = (error) =>
+  Boolean(error && (error.code === 11000 || error.code === '11000'));
+
+const duplicateFieldMessage = (error) => {
+  const key = error?.keyPattern ? Object.keys(error.keyPattern)[0] : null;
+  if (key === 'slug') return 'An area guide with this slug already exists';
+  if (key === 'order') return 'An area guide with this order already exists';
+  return 'An area guide with this value already exists';
+};
+
+const normalizeSlug = (slug) => String(slug || '').trim().toLowerCase();
+
+const slugFromPath = (path) => {
+  if (!path || typeof path !== 'string') return '';
+  const cleaned = path.trim().replace(/\/+$/, '');
+  const parts = cleaned.split('/').filter(Boolean);
+  return parts.length ? parts[parts.length - 1].toLowerCase() : '';
+};
+
+const validateKeyHighlights = (keyHighlights) => {
+  if (keyHighlights === undefined) return null;
+  if (!Array.isArray(keyHighlights)) {
+    return 'keyHighlights must be an array';
+  }
+
+  for (let i = 0; i < keyHighlights.length; i += 1) {
+    const item = keyHighlights[i];
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return `keyHighlights[${i}] must be an object`;
+    }
+    if (!item.icon || typeof item.icon !== 'string') {
+      return `keyHighlights[${i}] must include an icon string`;
+    }
+    if (!item.title || typeof item.title !== 'string') {
+      return `keyHighlights[${i}] must include a title string`;
+    }
+  }
+
+  return null;
+};
+
+const validateAgentOrders = (agentOrders) => {
+  if (agentOrders === undefined) return null;
+  if (!Array.isArray(agentOrders)) {
+    return 'agentOrders must be an array';
+  }
+
+  for (let i = 0; i < agentOrders.length; i += 1) {
+    if (typeof agentOrders[i] !== 'number' || Number.isNaN(agentOrders[i])) {
+      return `agentOrders[${i}] must be a number`;
+    }
+  }
+
+  return null;
+};
+
+const validateListingsSearch = (listingsSearch) => {
+  if (listingsSearch === undefined) return null;
+  if (!Array.isArray(listingsSearch)) {
+    return 'listingsSearch must be an array';
+  }
+
+  for (let i = 0; i < listingsSearch.length; i += 1) {
+    if (typeof listingsSearch[i] !== 'string') {
+      return `listingsSearch[${i}] must be a string`;
+    }
+  }
+
+  return null;
+};
+
+const attachAgents = async (guide) => {
+  const plain = guide.toObject ? guide.toObject() : { ...guide };
+  const orders = Array.isArray(plain.agentOrders) ? plain.agentOrders : [];
+
+  if (!orders.length) {
+    plain.agents = [];
+    return plain;
+  }
+
+  const members = await TeamMember.find({
+    order: { $in: orders },
+    isActive: true,
+  }).sort({ order: 1 });
+
+  const byOrder = new Map(members.map((m) => [m.order, m]));
+  plain.agents = orders.map((order) => byOrder.get(order)).filter(Boolean);
+
+  return plain;
+};
+
+// 1. Create Area Guide - POST /api/area-guides
 const createAreaGuide = async (req, res) => {
   try {
-    const { subSource, fullName, email, phone, inquiryType, propertyType, message } = req.body;
+    const {
+      order,
+      slug,
+      title,
+      about,
+      keyHighlights,
+      agentOrders,
+      mapQuery,
+      image,
+      path,
+      listingsSearch,
+      isActive,
+    } = req.body;
 
-    if (!fullName || !email || !phone || !inquiryType || !propertyType || !message) {
+    if (
+      order === undefined ||
+      order === null ||
+      order === '' ||
+      !title ||
+      !about ||
+      !mapQuery
+    ) {
       return res.status(400).json({
         success: false,
-        message:
-          'Please provide fullName, email, phone, inquiryType, propertyType and message',
+        message: 'Please provide order, title, about and mapQuery',
+      });
+    }
+
+    if (typeof order !== 'number' || Number.isNaN(order)) {
+      return res.status(400).json({
+        success: false,
+        message: 'order must be a number',
+      });
+    }
+
+    const resolvedSlug = normalizeSlug(slug) || slugFromPath(path);
+    if (!resolvedSlug) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide slug (or a path that includes a slug)',
+      });
+    }
+
+    const highlightsError = validateKeyHighlights(keyHighlights);
+    if (highlightsError) {
+      return res.status(400).json({
+        success: false,
+        message: highlightsError,
+      });
+    }
+
+    const agentsError = validateAgentOrders(agentOrders);
+    if (agentsError) {
+      return res.status(400).json({
+        success: false,
+        message: agentsError,
+      });
+    }
+
+    const listingsError = validateListingsSearch(listingsSearch);
+    if (listingsError) {
+      return res.status(400).json({
+        success: false,
+        message: listingsError,
+      });
+    }
+
+    const existingSlug = await AreaGuide.findOne({ slug: resolvedSlug });
+    if (existingSlug) {
+      return res.status(400).json({
+        success: false,
+        message: 'An area guide with this slug already exists',
+      });
+    }
+
+    const existingOrder = await AreaGuide.findOne({ order });
+    if (existingOrder) {
+      return res.status(400).json({
+        success: false,
+        message: 'An area guide with this order already exists',
       });
     }
 
     const areaGuide = await AreaGuide.create({
-      subSource: subSource || AREA_GUIDE_SUB_SOURCE,
-      fullName,
-      email,
-      phone,
-      inquiryType,
-      propertyType,
-      message,
+      order,
+      slug: resolvedSlug,
+      title,
+      about,
+      keyHighlights: keyHighlights || [],
+      agentOrders: agentOrders || [],
+      mapQuery,
+      image,
+      path: path || `/area-guides/${resolvedSlug}`,
+      listingsSearch,
+      isActive: isActive !== undefined ? isActive : true,
     });
 
-    // MongoDB is source of truth; Zapier is best-effort (never fails the request)
-    try {
-      await sendToZapier({
-        subSource: areaGuide.subSource,
-        fullName: areaGuide.fullName,
-        email: areaGuide.email,
-        phone: areaGuide.phone,
-        inquiryType: areaGuide.inquiryType,
-        propertyType: areaGuide.propertyType,
-        message: areaGuide.message,
-        source: ZAPIER_SOURCES.AREA_GUIDES,
-      });
-    } catch (zapierError) {
-      console.error('[Zapier] Unexpected error after area guide save:', zapierError.message);
-    }
+    const data = await attachAgents(areaGuide);
 
     return res.status(201).json({
       success: true,
-      message: 'Area guide inquiry created successfully',
-      data: {
-        ...areaGuide.toObject(),
-        source: ZAPIER_SOURCES.AREA_GUIDES,
-      },
+      message: 'Area guide created successfully',
+      data,
     });
   } catch (error) {
+    if (isDuplicateKeyError(error)) {
+      return res.status(400).json({
+        success: false,
+        message: duplicateFieldMessage(error),
+      });
+    }
+
     return res.status(500).json({
       success: false,
       message: error.message || 'Server error',
@@ -58,15 +215,26 @@ const createAreaGuide = async (req, res) => {
   }
 };
 
-// 2. Get all area guide inquiries - GET /api/area-guides
-const getAllAreaGuides = async (req, res) => {
+// 2. Get all Area Guides - GET /api/area-guides?isActive=true
+const getAreaGuides = async (req, res) => {
   try {
-    const areaGuides = await AreaGuide.find().sort({ createdAt: -1 });
+    const filter = {};
+
+    if (req.query.isActive !== undefined) {
+      filter.isActive = req.query.isActive === 'true';
+    }
+
+    const guides = await AreaGuide.find(filter).sort({ order: 1 });
+
+    const includeAgents = req.query.includeAgents === 'true';
+    const data = includeAgents
+      ? await Promise.all(guides.map((guide) => attachAgents(guide)))
+      : guides;
 
     return res.status(200).json({
       success: true,
-      count: areaGuides.length,
-      data: areaGuides,
+      count: data.length,
+      data,
     });
   } catch (error) {
     return res.status(500).json({
@@ -76,7 +244,7 @@ const getAllAreaGuides = async (req, res) => {
   }
 };
 
-// 3. Get area guide inquiry by id - GET /api/area-guides/:id
+// 3. Get Area Guide by MongoDB _id - GET /api/area-guides/:id
 const getAreaGuideById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -92,13 +260,15 @@ const getAreaGuideById = async (req, res) => {
     if (!areaGuide) {
       return res.status(404).json({
         success: false,
-        message: 'Area guide inquiry not found',
+        message: 'Area guide not found',
       });
     }
 
+    const data = await attachAgents(areaGuide);
+
     return res.status(200).json({
       success: true,
-      data: areaGuide,
+      data,
     });
   } catch (error) {
     return res.status(500).json({
@@ -108,7 +278,49 @@ const getAreaGuideById = async (req, res) => {
   }
 };
 
-// 4. Update area guide inquiry - PUT /api/area-guides/:id
+// 4. Get Area Guide by slug - GET /api/area-guides/slug/:slug
+const getAreaGuideBySlug = async (req, res) => {
+  try {
+    const slug = normalizeSlug(req.params.slug);
+
+    if (!slug) {
+      return res.status(400).json({
+        success: false,
+        message: 'Slug is required',
+      });
+    }
+
+    const filter = { slug };
+
+    if (req.query.isActive === 'false') {
+      filter.isActive = false;
+    } else if (req.query.isActive === 'true' || req.query.isActive === undefined) {
+      filter.isActive = true;
+    }
+
+    const areaGuide = await AreaGuide.findOne(filter);
+    if (!areaGuide) {
+      return res.status(404).json({
+        success: false,
+        message: 'Area guide not found',
+      });
+    }
+
+    const data = await attachAgents(areaGuide);
+
+    return res.status(200).json({
+      success: true,
+      data,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error',
+    });
+  }
+};
+
+// 5. Update Area Guide - PUT /api/area-guides/:id
 const updateAreaGuide = async (req, res) => {
   try {
     const { id } = req.params;
@@ -122,17 +334,93 @@ const updateAreaGuide = async (req, res) => {
 
     const updates = {};
     const allowedFields = [
-      'subSource',
-      'fullName',
-      'email',
-      'phone',
-      'inquiryType',
-      'propertyType',
-      'message',
+      'order',
+      'slug',
+      'title',
+      'about',
+      'keyHighlights',
+      'agentOrders',
+      'mapQuery',
+      'image',
+      'path',
+      'listingsSearch',
+      'isActive',
     ];
+
     allowedFields.forEach((field) => {
-      if (req.body[field] !== undefined) updates[field] = req.body[field];
+      if (req.body[field] !== undefined) {
+        updates[field] = req.body[field];
+      }
     });
+
+    if (updates.slug !== undefined) {
+      if (!updates.slug || typeof updates.slug !== 'string') {
+        return res.status(400).json({
+          success: false,
+          message: 'slug must be a non-empty string',
+        });
+      }
+      updates.slug = normalizeSlug(updates.slug);
+    }
+
+    if (updates.order !== undefined) {
+      if (typeof updates.order !== 'number' || Number.isNaN(updates.order)) {
+        return res.status(400).json({
+          success: false,
+          message: 'order must be a number',
+        });
+      }
+    }
+
+    const highlightsError = validateKeyHighlights(updates.keyHighlights);
+    if (highlightsError) {
+      return res.status(400).json({
+        success: false,
+        message: highlightsError,
+      });
+    }
+
+    const agentsError = validateAgentOrders(updates.agentOrders);
+    if (agentsError) {
+      return res.status(400).json({
+        success: false,
+        message: agentsError,
+      });
+    }
+
+    const listingsError = validateListingsSearch(updates.listingsSearch);
+    if (listingsError) {
+      return res.status(400).json({
+        success: false,
+        message: listingsError,
+      });
+    }
+
+    if (updates.slug) {
+      const existingSlug = await AreaGuide.findOne({
+        slug: updates.slug,
+        _id: { $ne: id },
+      });
+      if (existingSlug) {
+        return res.status(400).json({
+          success: false,
+          message: 'An area guide with this slug already exists',
+        });
+      }
+    }
+
+    if (updates.order !== undefined) {
+      const existingOrder = await AreaGuide.findOne({
+        order: updates.order,
+        _id: { $ne: id },
+      });
+      if (existingOrder) {
+        return res.status(400).json({
+          success: false,
+          message: 'An area guide with this order already exists',
+        });
+      }
+    }
 
     const updated = await AreaGuide.findByIdAndUpdate(id, updates, {
       new: true,
@@ -142,16 +430,25 @@ const updateAreaGuide = async (req, res) => {
     if (!updated) {
       return res.status(404).json({
         success: false,
-        message: 'Area guide inquiry not found',
+        message: 'Area guide not found',
       });
     }
 
+    const data = await attachAgents(updated);
+
     return res.status(200).json({
       success: true,
-      message: 'Area guide inquiry updated successfully',
-      data: updated,
+      message: 'Area guide updated successfully',
+      data,
     });
   } catch (error) {
+    if (isDuplicateKeyError(error)) {
+      return res.status(400).json({
+        success: false,
+        message: duplicateFieldMessage(error),
+      });
+    }
+
     return res.status(500).json({
       success: false,
       message: error.message || 'Server error',
@@ -159,7 +456,7 @@ const updateAreaGuide = async (req, res) => {
   }
 };
 
-// 5. Delete area guide inquiry - DELETE /api/area-guides/:id
+// 6. Delete Area Guide - DELETE /api/area-guides/:id (soft delete via isActive: false)
 const deleteAreaGuide = async (req, res) => {
   try {
     const { id } = req.params;
@@ -171,17 +468,22 @@ const deleteAreaGuide = async (req, res) => {
       });
     }
 
-    const deleted = await AreaGuide.findByIdAndDelete(id);
+    const deleted = await AreaGuide.findByIdAndUpdate(
+      id,
+      { isActive: false },
+      { new: true, runValidators: true }
+    );
+
     if (!deleted) {
       return res.status(404).json({
         success: false,
-        message: 'Area guide inquiry not found',
+        message: 'Area guide not found',
       });
     }
 
     return res.status(200).json({
       success: true,
-      message: 'Area guide inquiry deleted successfully',
+      message: 'Area guide deleted successfully',
       data: deleted,
     });
   } catch (error) {
@@ -194,8 +496,9 @@ const deleteAreaGuide = async (req, res) => {
 
 module.exports = {
   createAreaGuide,
-  getAllAreaGuides,
+  getAreaGuides,
   getAreaGuideById,
+  getAreaGuideBySlug,
   updateAreaGuide,
   deleteAreaGuide,
 };

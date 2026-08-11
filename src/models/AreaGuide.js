@@ -1,52 +1,83 @@
 const mongoose = require('mongoose');
 
-const AREA_GUIDE_SUB_SOURCE = 'Area Guides';
+const keyHighlightSchema = new mongoose.Schema(
+  {
+    icon: {
+      type: String,
+      required: [true, 'Highlight icon is required'],
+      trim: true,
+    },
+    title: {
+      type: String,
+      required: [true, 'Highlight title is required'],
+      trim: true,
+    },
+  },
+  { _id: false }
+);
 
 const areaGuideSchema = new mongoose.Schema(
   {
-    subSource: {
-      type: String,
-      required: [true, 'Sub source is required'],
-      trim: true,
-      default: AREA_GUIDE_SUB_SOURCE,
+    order: {
+      type: Number,
+      required: [true, 'Order is required'],
+      unique: true,
+      index: true,
     },
-    fullName: {
+    slug: {
       type: String,
-      required: [true, 'Full Name is required'],
+      required: [true, 'Slug is required'],
+      unique: true,
       trim: true,
-    },
-    email: {
-      type: String,
-      required: [true, 'Email is required'],
       lowercase: true,
-      trim: true,
-      match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email address'],
       index: true,
     },
-    phone: {
+    title: {
       type: String,
-      required: [true, 'Phone is required'],
+      required: [true, 'Title is required'],
       trim: true,
     },
-    inquiryType: {
+    about: {
       type: String,
-      required: [true, 'Inquiry Type is required'],
+      required: [true, 'About is required'],
       trim: true,
+    },
+    keyHighlights: {
+      type: [keyHighlightSchema],
+      default: [],
+    },
+    /** TeamMember.order values for featured agents on this area guide */
+    agentOrders: {
+      type: [Number],
+      default: [],
+    },
+    mapQuery: {
+      type: String,
+      required: [true, 'Map query is required'],
+      trim: true,
+    },
+    image: {
+      type: String,
+      trim: true,
+    },
+    path: {
+      type: String,
+      trim: true,
+    },
+    /** Optional nearby listing search terms when the area has no dedicated inventory */
+    listingsSearch: {
+      type: [String],
+      default: undefined,
+    },
+    isActive: {
+      type: Boolean,
+      default: true,
       index: true,
-    },
-    propertyType: {
-      type: String,
-      required: [true, 'Property Type is required'],
-      trim: true,
-    },
-    message: {
-      type: String,
-      required: [true, 'Message is required'],
-      trim: true,
     },
   },
   { timestamps: true }
 );
 
-module.exports = mongoose.model('AreaGuide', areaGuideSchema);
-module.exports.AREA_GUIDE_SUB_SOURCE = AREA_GUIDE_SUB_SOURCE;
+areaGuideSchema.index({ isActive: 1, order: 1 });
+
+module.exports = mongoose.model('AreaGuide', areaGuideSchema, 'areaguides');
