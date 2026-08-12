@@ -100,6 +100,27 @@ const normalizePlaceholders = (text) =>
     .trim();
 
 /**
+ * Strip contact / PII noise that often appears inside public marketing copy
+ * (e.g. propertyDescription footers with company email / phone / call CTAs).
+ * Does not invent replacement values.
+ * @param {string} text
+ * @returns {string}
+ */
+const sanitizeContactNoise = (text) =>
+  String(text || '')
+    // Emails
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '')
+    // UAE / local phone styles (+971..., 05x..., 04 ...)
+    .replace(/(?:\+971[\s-]?)?(?:0?5[0-9]|0?4)[\s-]?\d{3}[\s-]?\d{4}/g, '')
+    // Generic xxx-xxx-xxxx / xxx xxx xxxx
+    .replace(/\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/g, '')
+    // Agent BRN call lines commonly pasted into listing descriptions
+    .replace(/^.*\bBRN\s*#?\s*\d+.*$/gim, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+/**
  * Extract public text from blog content blocks (skips image URLs).
  * @param {unknown} content
  * @returns {string}
@@ -353,7 +374,9 @@ const buildSearchableText = (sourceType, doc) => {
 
   const config = assertAllowedSource(sourceType);
   const raw = config.buildText(doc);
-  return normalizePlaceholders(String(raw || ''))
+  return sanitizeContactNoise(
+    normalizePlaceholders(String(raw || ''))
+  )
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 };
