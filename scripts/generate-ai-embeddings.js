@@ -5,8 +5,12 @@
  * Usage:
  *   node scripts/generate-ai-embeddings.js --dry-run
  *   node scripts/generate-ai-embeddings.js
- *   node scripts/generate-ai-embeddings.js --sources=blog,faq
+ *   node scripts/generate-ai-embeddings.js --source=property
+ *   node scripts/generate-ai-embeddings.js --source=blog
  *   node scripts/generate-ai-embeddings.js --batch-size=16
+ *
+ * Default sources (no --source): blog, areaGuide, faq, service
+ * Property is opt-in via --source=property
  *
  * Dry-run: 0 OpenAI calls, 0 MongoDB writes.
  */
@@ -21,11 +25,26 @@ const {
   syncSourceEmbeddings,
 } = require('../src/ai/embeddingService');
 
+/** Default run excludes properties (opt-in via --source=property). */
+const DEFAULT_SOURCES = Object.freeze([
+  'blog',
+  'areaGuide',
+  'faq',
+  'service',
+]);
+
+const parseSourceList = (raw) =>
+  String(raw || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
 const parseArgs = (argv) => {
   const args = {
     dryRun: false,
     batchSize: 32,
-    sources: Object.keys(SOURCE_CONFIG),
+    sources: [...DEFAULT_SOURCES],
+    sourceExplicit: false,
   };
 
   argv.forEach((arg) => {
@@ -33,16 +52,32 @@ const parseArgs = (argv) => {
       args.dryRun = true;
       return;
     }
+
     if (arg.startsWith('--batch-size=')) {
-      args.batchSize = Math.max(1, parseInt(arg.slice('--batch-size='.length), 10) || 32);
+      args.batchSize = Math.max(
+        1,
+        parseInt(arg.slice('--batch-size='.length), 10) || 32
+      );
       return;
     }
+
+    // Singular --source=property (primary CLI form)
+    if (arg.startsWith('--source=')) {
+      const list = parseSourceList(arg.slice('--source='.length));
+      if (list.length) {
+        args.sources = list;
+        args.sourceExplicit = true;
+      }
+      return;
+    }
+
+    // Plural --sources=blog,faq (optional alias)
     if (arg.startsWith('--sources=')) {
-      args.sources = arg
-        .slice('--sources='.length)
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
+      const list = parseSourceList(arg.slice('--sources='.length));
+      if (list.length) {
+        args.sources = list;
+        args.sourceExplicit = true;
+      }
     }
   });
 
@@ -55,7 +90,9 @@ const assertSourceAllowed = (sourceType) => {
     throw new Error(`Unknown source: ${sourceType}`);
   }
   if (!ALLOWED_COLLECTIONS.includes(config.collection)) {
-    throw new Error(`Source ${sourceType} maps to disallowed collection ${config.collection}`);
+    throw new Error(
+      `Source ${sourceType} maps to disallowed collection ${config.collection}`
+    );
   }
   if (FORBIDDEN_COLLECTIONS.includes(config.collection)) {
     throw new Error(`Refusing forbidden collection: ${config.collection}`);
@@ -64,6 +101,10 @@ const assertSourceAllowed = (sourceType) => {
 
 const main = async () => {
   const args = parseArgs(process.argv.slice(2));
+
+  if (!args.sources.length) {
+    throw new Error('No sources selected. Use --source=blog|areaGuide|faq|service|property');
+  }
 
   for (const sourceType of args.sources) {
     assertSourceAllowed(sourceType);
