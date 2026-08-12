@@ -4,6 +4,7 @@ const {
   BlogVectorSearchError,
 } = require('../services/blogVectorSearchService');
 const { generateBlogAnswer } = require('../services/blogRagService');
+const { handleChat } = require('../ai/orchestrator/aiOrchestrator');
 
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_QUERY_LENGTH = 1000;
@@ -182,8 +183,52 @@ const blogChatHandler = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/ai/chat
+ * Phase 1 orchestrator: validate → confidential guard → company.md → gpt-5-nano
+ * Does NOT call Blog RAG as a generic fallback.
+ */
+const chatHandler = async (req, res) => {
+  try {
+    const { message } = req.body || {};
+    const result = await handleChat(message);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        reply: result.reply,
+      },
+    });
+  } catch (error) {
+    if (error instanceof OpenAIServiceError) {
+      return res.status(error.statusCode || 502).json({
+        success: false,
+        error: { message: error.message },
+      });
+    }
+
+    if (error?.statusCode === 400 || error?.category === 'invalid_request') {
+      return res.status(400).json({
+        success: false,
+        error: { message: error.message || 'Invalid request.' },
+      });
+    }
+
+    console.error('[AI] Chat unexpected error', {
+      category: 'unexpected_error',
+      name: error?.name,
+    });
+
+    return res.status(500).json({
+      success: false,
+      error: { message: 'AI chat is temporarily unavailable.' },
+    });
+  }
+};
+
 module.exports = {
   testOpenAI,
   searchBlogChunksHandler,
   blogChatHandler,
+  chatHandler,
 };
