@@ -129,7 +129,7 @@ const mapOpenAIError = (error) => {
  * Uses Chat Completions API with GPT-5 `reasoning_effort`.
  *
  * @param {string} message - User message
- * @param {{ system?: string, model?: string, reasoningEffort?: string }} [options]
+ * @param {{ system?: string, model?: string, reasoningEffort?: string, signal?: AbortSignal }} [options]
  * @returns {Promise<{ text: string, model: string, durationMs: number, reasoningEffort: string }>}
  */
 const generateText = async (message, options = {}) => {
@@ -164,11 +164,14 @@ const generateText = async (message, options = {}) => {
     }
     messages.push({ role: 'user', content: message.trim() });
 
-    const completion = await openai.chat.completions.create({
-      model,
-      messages,
-      reasoning_effort: reasoningEffort,
-    });
+    const completion = await openai.chat.completions.create(
+      {
+        model,
+        messages,
+        reasoning_effort: reasoningEffort,
+      },
+      options.signal ? { signal: options.signal } : undefined
+    );
 
     const reply = completion?.choices?.[0]?.message?.content;
 
@@ -194,6 +197,13 @@ const generateText = async (message, options = {}) => {
       reasoningEffort,
     };
   } catch (error) {
+    if (error?.name === 'AbortError' || options.signal?.aborted) {
+      throw new OpenAIServiceError('AI request was cancelled.', {
+        statusCode: 499,
+        category: 'aborted',
+      });
+    }
+
     const mapped = mapOpenAIError(error);
     const durationMs = Date.now() - startedAt;
 
@@ -232,8 +242,111 @@ const generateText = async (message, options = {}) => {
   }
 };
 
+/**
+ * Stream a chat completion. Yields only newly generated text deltas.
+ *
+ * @param {string} message
+ * @param {{ system?: string, model?: string, reasoningEffort?: string, signal?: AbortSignal }} [options]
+ * @returns {AsyncGenerator<{ text: string, model: string, reasoningEffort: string }, { text: string, model: string, durationMs: number, reasoningEffort: string }, void>}
+ */
+async function* generateTextStream(message, options = {}) {
+  const startedAt = Date.now();
+  const model = options.model || getModel();
+  const system = typeof options.system === 'string' ? options.system.trim() : '';
+  const reasoningEffort =
+    typeof options.reasoningEffort === 'string' &&
+    ALLOWED_REASONING_EFFORTS.has(options.reasoningEffort.trim().toLowerCase())
+      ? options.reasoningEffort.trim().toLowerCase()
+      : getReasoningEffort();
+
+  if (!message || typeof message !== 'string' || !message.trim()) {
+    throw new OpenAIServiceError('Message is required.', {
+      statusCode: 400,
+      category: 'invalid_request',
+    });
+  }
+
+  console.log('[OpenAI] stream started', {
+    model,
+    reasoningEffort,
+    hasSystem: Boolean(system),
+  });
+
+  try {
+    const openai = getClient();
+    const messages = [];
+    if (system) {
+      messages.push({ role: 'system', content: system });
+    }
+    messages.push({ role: 'user', content: message.trim() });
+
+    const stream = await openai.chat.completions.create(
+      {
+        model,
+        messages,
+        reasoning_effort: reasoningEffort,
+        stream: true,
+      },
+      options.signal ? { signal: options.signal } : undefined
+    );
+
+    let fullText = '';
+
+    for await (const chunk of stream) {
+      if (options.signal?.aborted) {
+        break;
+      }
+      const delta = chunk?.choices?.[0]?.delta?.content;
+      if (typeof delta === 'string' && delta.length) {
+        fullText += delta;
+        yield { text: delta, model, reasoningEffort };
+      }
+    }
+
+    if (options.signal?.aborted) {
+      throw new OpenAIServiceError('AI request was cancelled.', {
+        statusCode: 499,
+        category: 'aborted',
+      });
+    }
+
+    const trimmed = fullText.trim();
+    if (!trimmed) {
+      throw new OpenAIServiceError('AI service returned an empty response.', {
+        statusCode: 502,
+        category: 'empty_response',
+      });
+    }
+
+    const durationMs = Date.now() - startedAt;
+    console.log('[OpenAI] stream completed', {
+      model,
+      reasoningEffort,
+      durationMs,
+      category: 'success',
+    });
+
+    return {
+      text: trimmed,
+      model,
+      durationMs,
+      reasoningEffort,
+    };
+  } catch (error) {
+    if (error instanceof OpenAIServiceError) throw error;
+    if (error?.name === 'AbortError' || options.signal?.aborted) {
+      throw new OpenAIServiceError('AI request was cancelled.', {
+        statusCode: 499,
+        category: 'aborted',
+      });
+    }
+    throw mapOpenAIError(error);
+  }
+}
+
 module.exports = {
   generateText,
+  generateTextStream,
   getClient,
   getReasoningEffort,
   mapOpenAIError,

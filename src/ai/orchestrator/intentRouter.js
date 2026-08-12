@@ -1,14 +1,15 @@
 /**
- * Phase 1–3 intent router — rules only.
- * Priority: COMPANY → SERVICES → TEAM → PROPERTY_COUNT → PROPERTY_SEARCH → UNSUPPORTED
+ * Phase 1–4 intent router — rules only.
  *
- * Owner/Founder/Director/established/HQ stay on COMPANY (company.md).
- * Property ownership questions are handled by the confidential guard / refusal paths.
+ * Priority (after confidential guard in orchestrator):
+ * PROPERTY_COUNT → PROPERTY_SEARCH → COMPANY → SERVICES → TEAM
+ * → BLOG → AREA_GUIDE / FAQ (or both) → UNSUPPORTED
+ *
+ * Dynamic property intents must win over Area Guide / FAQ / Blog.
  */
 
 const COMPANY_PATTERNS = [
   /\b(who\s+(is|are)\s+(the\s+)?)?(owner|founder|director)\b/i,
-  // Company ownership only — not "who owns this property"
   /\bwho\s+owns\b(?!\s+(?:this|the|a|an|my|our)\b)/i,
   /\b(founded|established|founded\s+by|established\s+in|since\s+when|when\s+was\s+.{0,40}established)\b/i,
   /\b(head\s*office|headquarters|hq|where\s+(are|is)\s+you\s+(based|located)|office\s+address|where\s+is\s+your\s+office)\b/i,
@@ -35,14 +36,15 @@ const TEAM_PATTERNS = [
   /\bwho\s+are\s+(?:the\s+)?(property\s+consultants?|agents?)\b/i,
   /\bproperty\s+consultants?\b/i,
   /\bwho\s+works\s+in\b/i,
-  /\btell\s+me\s+about\s+(?!rocky\b)([A-Za-z][A-Za-z'-]+(?:\s+[A-Za-z][A-Za-z'-]+)+)\b/i,
-  /\bwho\s+is\s+(?!the\s+(?:owner|founder|director)\b)(?!rocky\b)([A-Za-z][A-Za-z'-]+(?:\s+[A-Za-z][A-Za-z'-]+)+)\b/i,
+  /\btell\s+me\s+about\s+(?!rocky\b)(?!dubai\b|jumeirah\b|arabian\b|business\b|emaar\b|madinat\b|the\s+springs\b|the\s+greens\b|jebel\b|palm\b|marina\b)([A-Za-z][A-Za-z'-]+(?:\s+[A-Za-z][A-Za-z'-]+)+)\b/i,
+  /\bwho\s+is\s+(?!the\s+(?:owner|founder|director)\b)(?!rocky\b)(?!dubai\b|jumeirah\b|arabian\b|business\b|emaar\b|madinat\b)([A-Za-z][A-Za-z'-]+(?:\s+[A-Za-z][A-Za-z'-]+)+)\b/i,
   /\bhead\s+of\s+[a-z]/i,
   /\b(ceo|general\s+manager)\b/i,
 ];
 
 const PROPERTY_COUNT_PATTERNS = [
   /\bhow\s+many\s+(properties|listings|homes|units)\b/i,
+  /\bhow\s+many\s+.{0,40}\b(properties|listings)\b/i,
   /\b(property|listing)\s+count\b/i,
   /\bnumber\s+of\s+(properties|listings)\b/i,
 ];
@@ -53,36 +55,63 @@ const PROPERTY_SEARCH_PATTERNS = [
   /\bproperties?\s+(under|below|less\s+than|above|over|in|at|for)\b/i,
   /\blistings?\s+(under|below|in|at|for)\b/i,
   /\b(under|below)\s+(?:aed\s*)?[\d,.]+\s*(million|m)?\b.{0,20}\b(propert|listing|apartment|villa)/i,
-  /\b(dubai\s+marina|arabian\s+ranches|jvc|jumeirah|palm\s+jumeirah|business\s+bay|downtown)\b/i,
+  /\b(current|live)?\s*price\s+of\b.{0,50}\b(apartment|villa|property|townhouse)\b/i,
+  /\b(apartment|villa|property)\s+(?:current\s+)?price\b/i,
+  /\bhow\s+much\s+(?:is|for|does)\b.{0,40}\b(apartment|villa|property)\b/i,
 ];
+
+// Narrow blog signals — do not steal FAQ buying questions
+const BLOG_PATTERNS = [
+  /\bflexi\s*rent\b/i,
+  /\bfreehold\s+vs\s+leasehold\b/i,
+  /\b(difference\s+between\s+)?freehold\s+and\s+leasehold\b/i,
+  /\bpayment\s+options?\b.{0,40}\bflexi\b/i,
+  /\bexemptions?\b.{0,40}\bflexi\b/i,
+];
+
+const AREA_GUIDE_PATTERNS = [
+  /\b(what\s+is|tell\s+me\s+about|where\s+is|living\s+in|highlights?\s+of|what\s+are\s+the\s+highlights)\b.{0,80}\b(dubai\s+marina|dubai\s+south|arabian\s+ranches|dubai\s+media\s+city|jumeirah\s+village\s+circle|\bjvc\b|business\s+bay|the\s+springs|the\s+greens|emaar\s+beachfront|dubai\s+creek|jebel\s+ali|madinat\s+jumeirah|jumeirah\s+golf)\b/i,
+  /\b(dubai\s+marina|dubai\s+south|arabian\s+ranches|dubai\s+media\s+city|jumeirah\s+village\s+circle|\bjvc\b|business\s+bay|the\s+springs|the\s+greens|emaar\s+beachfront|dubai\s+creek\s+harbour|jebel\s+ali\s+village|madinat\s+jumeirah|jumeirah\s+golf\s+estates)\b.{0,40}\b(like|overview|highlights?|community|area)\b/i,
+  /\bwhat\s+is\s+.{0,40}\s+like\b/i,
+  /\barea\s+guide\b/i,
+];
+
+// FAQ signals grounded in actual FAQ topics (home / off-plan)
+const FAQ_PATTERNS = [
+  /\b(faq|frequently\s+asked)\b/i,
+  /\b(buying\s+process|costs?\s+involved|can\s+foreigners\s+buy|golden\s+visa|snagging|why\s+should\s+i\s+choose\s+rocky)\b/i,
+  /\b(is\s+it\s+safe\s+to\s+buy\s+off[\s-]?plan|sell\s+my\s+off[\s-]?plan|off[\s-]?plan\s+(process|property|buyers?))\b/i,
+  /\bcan\s+foreigners\s+buy\s+property\b/i,
+  /\bwhat\s+are\s+the\s+costs?\s+involved\b/i,
+  /\bhow\s+long\s+does\s+the\s+buying\s+process\b/i,
+  /\bcommon\s+questions?\b/i,
+];
+
+const matchesAny = (text, patterns) => patterns.some((re) => re.test(text));
 
 /**
  * @param {string} message
- * @returns {'COMPANY_INFO'|'SERVICE_INFO'|'TEAM_INFO'|'PROPERTY_COUNT'|'PROPERTY_SEARCH'|'UNSUPPORTED'}
+ * @returns {
+ *   'PROPERTY_COUNT'|'PROPERTY_SEARCH'|'COMPANY_INFO'|'SERVICE_INFO'|'TEAM_INFO'|
+ *   'BLOG'|'AREA_GUIDE'|'FAQ'|'KNOWLEDGE_BOTH'|'UNSUPPORTED'
+ * }
  */
 const classifyIntent = (message) => {
   const text = String(message || '').trim();
   if (!text) return 'UNSUPPORTED';
 
-  for (const pattern of COMPANY_PATTERNS) {
-    if (pattern.test(text)) return 'COMPANY_INFO';
-  }
+  if (matchesAny(text, PROPERTY_COUNT_PATTERNS)) return 'PROPERTY_COUNT';
+  if (matchesAny(text, PROPERTY_SEARCH_PATTERNS)) return 'PROPERTY_SEARCH';
+  if (matchesAny(text, COMPANY_PATTERNS)) return 'COMPANY_INFO';
+  if (matchesAny(text, SERVICE_PATTERNS)) return 'SERVICE_INFO';
+  if (matchesAny(text, TEAM_PATTERNS)) return 'TEAM_INFO';
+  if (matchesAny(text, BLOG_PATTERNS)) return 'BLOG';
 
-  for (const pattern of SERVICE_PATTERNS) {
-    if (pattern.test(text)) return 'SERVICE_INFO';
-  }
-
-  for (const pattern of TEAM_PATTERNS) {
-    if (pattern.test(text)) return 'TEAM_INFO';
-  }
-
-  for (const pattern of PROPERTY_COUNT_PATTERNS) {
-    if (pattern.test(text)) return 'PROPERTY_COUNT';
-  }
-
-  for (const pattern of PROPERTY_SEARCH_PATTERNS) {
-    if (pattern.test(text)) return 'PROPERTY_SEARCH';
-  }
+  const area = matchesAny(text, AREA_GUIDE_PATTERNS);
+  const faq = matchesAny(text, FAQ_PATTERNS);
+  if (area && faq) return 'KNOWLEDGE_BOTH';
+  if (area) return 'AREA_GUIDE';
+  if (faq) return 'FAQ';
 
   return 'UNSUPPORTED';
 };

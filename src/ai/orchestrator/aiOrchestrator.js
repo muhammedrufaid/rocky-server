@@ -1,4 +1,8 @@
-const { generateText, OpenAIServiceError } = require('../../services/openaiService');
+const {
+  generateText,
+  generateTextStream,
+  OpenAIServiceError,
+} = require('../../services/openaiService');
 const {
   detectConfidentialRequest,
   CONFIDENTIAL_REFUSAL,
@@ -15,12 +19,35 @@ const {
   resolvePropertySearchContext,
   formatCountReply,
 } = require('../tools/propertyTools');
+const {
+  generateBlogAnswer,
+  prepareBlogRagContext,
+} = require('../../services/blogRagService');
+const {
+  generateKnowledgeAnswer,
+  prepareKnowledgeRagContext,
+} = require('../../services/knowledgeRagService');
 const { classifyIntent } = require('./intentRouter');
+
+/** Default stream timeout (ms). Override with AI_STREAM_TIMEOUT_MS. */
+const DEFAULT_STREAM_TIMEOUT_MS = 60000;
+
+const getStreamTimeoutMs = () => {
+  const raw = process.env.AI_STREAM_TIMEOUT_MS;
+  if (!raw || typeof raw !== 'string' || !raw.trim()) {
+    return DEFAULT_STREAM_TIMEOUT_MS;
+  }
+  const n = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(n) || n < 1000) {
+    return DEFAULT_STREAM_TIMEOUT_MS;
+  }
+  return n;
+};
 
 const MAX_MESSAGE_LENGTH = 1000;
 
 const UNSUPPORTED_REPLY =
-  "I can currently help with Rocky Real Estate's company information, services, public team details, and public property listings. More knowledge sources will be connected shortly.";
+  "I don't have enough information in my current knowledge base to answer that accurately. I can help with company info, services, team, properties, blogs, area guides, and FAQs.";
 
 const COMPANY_SYSTEM_PROMPT = `You are the Rocky Real Estate AI Assistant.
 
@@ -107,7 +134,12 @@ const validateMessage = (message) => {
   return trimmed;
 };
 
-const answerFromCompanyKnowledge = async (question) => {
+/**
+ * Prepare GPT prompts / immediate replies without calling OpenAI.
+ * Shared by non-streaming and streaming paths.
+ */
+
+const prepareCompanyContext = (question) => {
   const knowledge = getCompanyKnowledgeText();
   const userPrompt = `ROCKY REAL ESTATE COMPANY KNOWLEDGE
 
@@ -118,11 +150,16 @@ ${question}
 
 Answer the question using only the company knowledge above.`;
 
-  const result = await generateText(userPrompt, { system: COMPANY_SYSTEM_PROMPT });
-  return { reply: result.text, gptMs: result.durationMs };
+  return {
+    mode: 'gpt',
+    system: COMPANY_SYSTEM_PROMPT,
+    userPrompt,
+    sources: [],
+    collectionsAccessed: [],
+  };
 };
 
-const answerFromServices = async (question) => {
+const prepareServicesContext = async (question) => {
   const serviceQuery = extractServiceQuery(question);
   let payload;
   let mode;
@@ -150,15 +187,16 @@ ${question}
 
 Answer using only this public services data.`;
 
-  const result = await generateText(userPrompt, { system: SERVICES_SYSTEM_PROMPT });
   return {
-    reply: result.text,
-    gptMs: result.durationMs,
+    mode: 'gpt',
+    system: SERVICES_SYSTEM_PROMPT,
+    userPrompt,
+    sources: [],
     collectionsAccessed: ['services'],
   };
 };
 
-const answerFromTeam = async (question) => {
+const prepareTeamContext = async (question) => {
   const team = await resolveTeamContext(question);
   const payload = team.data || [];
 
@@ -171,10 +209,11 @@ ${question}
 
 Answer using only this public team data. Do not include or invent phone, email, or WhatsApp details.`;
 
-  const result = await generateText(userPrompt, { system: TEAM_SYSTEM_PROMPT });
   return {
-    reply: result.text,
-    gptMs: result.durationMs,
+    mode: 'gpt',
+    system: TEAM_SYSTEM_PROMPT,
+    userPrompt,
+    sources: [],
     collectionsAccessed: ['teammembers'],
   };
 };
@@ -182,17 +221,18 @@ Answer using only this public team data. Do not include or invent phone, email, 
 /**
  * Deterministic count — no GPT rephrasing.
  */
-const answerFromPropertyCount = async () => {
+const preparePropertyCountContext = async () => {
   const { count } = await getPropertyCount();
   return {
+    mode: 'immediate',
     reply: formatCountReply(count),
-    gptMs: 0,
+    sources: [],
     collectionsAccessed: ['properties'],
     count,
   };
 };
 
-const answerFromPropertySearch = async (question) => {
+const preparePropertySearchContext = async (question) => {
   const result = await resolvePropertySearchContext(question);
   const payload = {
     totalMatches: result.total,
@@ -212,19 +252,146 @@ ${question}
 
 Summarize these public listings only. Do not invent properties or prices. Do not include agent/owner contact details.`;
 
-  const gpt = await generateText(userPrompt, { system: PROPERTY_SEARCH_SYSTEM_PROMPT });
   return {
-    reply: gpt.text,
-    gptMs: gpt.durationMs,
+    mode: 'gpt',
+    system: PROPERTY_SEARCH_SYSTEM_PROMPT,
+    userPrompt,
+    sources: [],
     collectionsAccessed: ['properties'],
     total: result.total,
   };
 };
 
+const prepareBlogContext = async (question) => {
+  const prepared = await prepareBlogRagContext(question);
+  if (prepared.mode === 'immediate') {
+    return {
+      mode: 'immediate',
+      reply: prepared.answer,
+      sources: [],
+      collectionsAccessed: ['blog_embeddings'],
+      timingsDetail: prepared.timings,
+      usedGpt: false,
+    };
+  }
+  return {
+    mode: 'gpt',
+    system: prepared.system,
+    userPrompt: prepared.userPrompt,
+    sources: prepared.sources || [],
+    collectionsAccessed: ['blog_embeddings'],
+    timingsDetail: prepared.timings,
+    usedGpt: true,
+  };
+};
+
+const prepareKnowledgeContext = async (question, sourceType) => {
+  const prepared = await prepareKnowledgeRagContext(question, {
+    sourceType,
+    skipGuards: true,
+  });
+  if (prepared.mode === 'immediate') {
+    return {
+      mode: 'immediate',
+      reply: prepared.answer,
+      sources: prepared.sources || [],
+      collectionsAccessed: ['knowledge_embeddings'],
+      timingsDetail: prepared.timings,
+      usedGpt: false,
+      sourceSelection: prepared.sourceSelection,
+    };
+  }
+  return {
+    mode: 'gpt',
+    system: prepared.system,
+    userPrompt: prepared.userPrompt,
+    sources: prepared.sources || [],
+    collectionsAccessed: ['knowledge_embeddings'],
+    timingsDetail: prepared.timings,
+    usedGpt: true,
+    sourceSelection: prepared.sourceSelection,
+  };
+};
+
+const answerFromCompanyKnowledge = async (question) => {
+  const prepared = prepareCompanyContext(question);
+  const result = await generateText(prepared.userPrompt, { system: prepared.system });
+  return { reply: result.text, gptMs: result.durationMs };
+};
+
+const answerFromServices = async (question) => {
+  const prepared = await prepareServicesContext(question);
+  const result = await generateText(prepared.userPrompt, { system: prepared.system });
+  return {
+    reply: result.text,
+    gptMs: result.durationMs,
+    collectionsAccessed: prepared.collectionsAccessed,
+  };
+};
+
+const answerFromTeam = async (question) => {
+  const prepared = await prepareTeamContext(question);
+  const result = await generateText(prepared.userPrompt, { system: prepared.system });
+  return {
+    reply: result.text,
+    gptMs: result.durationMs,
+    collectionsAccessed: prepared.collectionsAccessed,
+  };
+};
+
+const answerFromPropertyCount = async () => {
+  const prepared = await preparePropertyCountContext();
+  return {
+    reply: prepared.reply,
+    gptMs: 0,
+    collectionsAccessed: prepared.collectionsAccessed,
+    count: prepared.count,
+  };
+};
+
+const answerFromPropertySearch = async (question) => {
+  const prepared = await preparePropertySearchContext(question);
+  const gpt = await generateText(prepared.userPrompt, { system: prepared.system });
+  return {
+    reply: gpt.text,
+    gptMs: gpt.durationMs,
+    collectionsAccessed: prepared.collectionsAccessed,
+    total: prepared.total,
+  };
+};
+
+const answerFromBlog = async (question) => {
+  const result = await generateBlogAnswer(question);
+  return {
+    reply: result.answer,
+    gptMs: result.timings?.gptMs || 0,
+    collectionsAccessed: ['blog_embeddings'],
+    sources: result.sources || [],
+    timingsDetail: result.timings,
+    usedGpt: result.usedGpt,
+  };
+};
+
+const answerFromKnowledge = async (question, sourceType) => {
+  const result = await generateKnowledgeAnswer(question, {
+    sourceType,
+    skipGuards: true, // confidential + dynamic already handled upstream
+  });
+  return {
+    reply: result.answer,
+    gptMs: result.timings?.gptMs || 0,
+    collectionsAccessed: ['knowledge_embeddings'],
+    sources: result.sources || [],
+    timingsDetail: result.timings,
+    usedGpt: result.usedGpt,
+    sourceSelection: result.sourceSelection,
+  };
+};
+
 /**
- * Phase 1–3 orchestrator.
- * Does NOT call blogRagService.
- * Allowlisted collections: services, teammembers, properties (plus company.md file).
+ * Phase 1–4 orchestrator.
+ * Allowlisted: company.md, services, teammembers, properties,
+ * blog_embeddings, knowledge_embeddings.
  *
  * @param {string} message
  */
@@ -250,64 +417,17 @@ const handleChat = async (message) => {
       usedGpt: false,
       mongoQueried: false,
       collectionsAccessed: [],
+      sources: [],
       timings: { gptMs: 0, totalMs },
     };
   }
 
+  const intentStarted = Date.now();
   const intent = classifyIntent(trimmed);
-  console.log('[AIOrchestrator] intent classified', { intent });
+  const intentMs = Date.now() - intentStarted;
+  console.log('[AIOrchestrator] intent classified', { intent, intentMs });
 
   try {
-    if (intent === 'COMPANY_INFO') {
-      const { reply, gptMs } = await answerFromCompanyKnowledge(trimmed);
-      const totalMs = Date.now() - totalStarted;
-      console.log('[AIOrchestrator] company answer completed', { gptMs, totalMs });
-      return {
-        reply,
-        route: 'COMPANY_INFO',
-        usedGpt: true,
-        mongoQueried: false,
-        collectionsAccessed: [],
-        timings: { gptMs, totalMs },
-      };
-    }
-
-    if (intent === 'SERVICE_INFO') {
-      const { reply, gptMs, collectionsAccessed } = await answerFromServices(trimmed);
-      const totalMs = Date.now() - totalStarted;
-      console.log('[AIOrchestrator] services answer completed', {
-        gptMs,
-        totalMs,
-        collectionsAccessed,
-      });
-      return {
-        reply,
-        route: 'SERVICE_INFO',
-        usedGpt: true,
-        mongoQueried: true,
-        collectionsAccessed,
-        timings: { gptMs, totalMs },
-      };
-    }
-
-    if (intent === 'TEAM_INFO') {
-      const { reply, gptMs, collectionsAccessed } = await answerFromTeam(trimmed);
-      const totalMs = Date.now() - totalStarted;
-      console.log('[AIOrchestrator] team answer completed', {
-        gptMs,
-        totalMs,
-        collectionsAccessed,
-      });
-      return {
-        reply,
-        route: 'TEAM_INFO',
-        usedGpt: true,
-        mongoQueried: true,
-        collectionsAccessed,
-        timings: { gptMs, totalMs },
-      };
-    }
-
     if (intent === 'PROPERTY_COUNT') {
       const { reply, gptMs, collectionsAccessed, count } = await answerFromPropertyCount();
       const totalMs = Date.now() - totalStarted;
@@ -323,7 +443,8 @@ const handleChat = async (message) => {
         usedGpt: false,
         mongoQueried: true,
         collectionsAccessed,
-        timings: { gptMs, totalMs },
+        sources: [],
+        timings: { intentMs, gptMs, totalMs },
       };
     }
 
@@ -342,7 +463,113 @@ const handleChat = async (message) => {
         usedGpt: true,
         mongoQueried: true,
         collectionsAccessed,
-        timings: { gptMs, totalMs },
+        sources: [],
+        timings: { intentMs, gptMs, totalMs },
+      };
+    }
+
+    if (intent === 'COMPANY_INFO') {
+      const { reply, gptMs } = await answerFromCompanyKnowledge(trimmed);
+      const totalMs = Date.now() - totalStarted;
+      console.log('[AIOrchestrator] company answer completed', { gptMs, totalMs });
+      return {
+        reply,
+        route: 'COMPANY_INFO',
+        usedGpt: true,
+        mongoQueried: false,
+        collectionsAccessed: [],
+        sources: [],
+        timings: { intentMs, gptMs, totalMs },
+      };
+    }
+
+    if (intent === 'SERVICE_INFO') {
+      const { reply, gptMs, collectionsAccessed } = await answerFromServices(trimmed);
+      const totalMs = Date.now() - totalStarted;
+      console.log('[AIOrchestrator] services answer completed', {
+        gptMs,
+        totalMs,
+        collectionsAccessed,
+      });
+      return {
+        reply,
+        route: 'SERVICE_INFO',
+        usedGpt: true,
+        mongoQueried: true,
+        collectionsAccessed,
+        sources: [],
+        timings: { intentMs, gptMs, totalMs },
+      };
+    }
+
+    if (intent === 'TEAM_INFO') {
+      const { reply, gptMs, collectionsAccessed } = await answerFromTeam(trimmed);
+      const totalMs = Date.now() - totalStarted;
+      console.log('[AIOrchestrator] team answer completed', {
+        gptMs,
+        totalMs,
+        collectionsAccessed,
+      });
+      return {
+        reply,
+        route: 'TEAM_INFO',
+        usedGpt: true,
+        mongoQueried: true,
+        collectionsAccessed,
+        sources: [],
+        timings: { intentMs, gptMs, totalMs },
+      };
+    }
+
+    if (intent === 'BLOG') {
+      const result = await answerFromBlog(trimmed);
+      const totalMs = Date.now() - totalStarted;
+      console.log('[AIOrchestrator] blog answer completed', {
+        gptMs: result.gptMs,
+        totalMs,
+      });
+      return {
+        reply: result.reply,
+        route: 'BLOG',
+        usedGpt: result.usedGpt,
+        mongoQueried: true,
+        collectionsAccessed: result.collectionsAccessed,
+        sources: result.sources,
+        timings: {
+          intentMs,
+          embeddingMs: result.timingsDetail?.embeddingMs,
+          vectorSearchMs: result.timingsDetail?.vectorSearchMs,
+          gptMs: result.gptMs,
+          totalMs,
+        },
+      };
+    }
+
+    if (intent === 'AREA_GUIDE' || intent === 'FAQ' || intent === 'KNOWLEDGE_BOTH') {
+      const sourceType =
+        intent === 'AREA_GUIDE' ? 'area_guide' : intent === 'FAQ' ? 'faq' : 'both';
+      const result = await answerFromKnowledge(trimmed, sourceType);
+      const totalMs = Date.now() - totalStarted;
+      console.log('[AIOrchestrator] knowledge answer completed', {
+        intent,
+        sourceType,
+        gptMs: result.gptMs,
+        totalMs,
+      });
+      return {
+        reply: result.reply,
+        route: intent,
+        usedGpt: result.usedGpt,
+        mongoQueried: true,
+        collectionsAccessed: result.collectionsAccessed,
+        sources: result.sources,
+        timings: {
+          intentMs,
+          embeddingMs: result.timingsDetail?.embeddingMs,
+          vectorSearchMs: result.timingsDetail?.vectorSearchMs,
+          gptMs: result.gptMs,
+          totalMs,
+        },
       };
     }
   } catch (error) {
@@ -359,13 +586,235 @@ const handleChat = async (message) => {
     usedGpt: false,
     mongoQueried: false,
     collectionsAccessed: [],
-    timings: { gptMs: 0, totalMs },
+    sources: [],
+    timings: { intentMs, gptMs: 0, totalMs },
   };
 };
 
+/**
+ * Resolve the same routing/retrieval plan as handleChat, without GPT generation.
+ * Used by the streaming path so delivery differs but answers share one source of truth.
+ *
+ * @param {string} trimmed
+ * @returns {Promise<{
+ *   route: string,
+ *   prepared: object,
+ *   intentMs: number,
+ * }>}
+ */
+const resolveStreamPlan = async (trimmed) => {
+  const intentStarted = Date.now();
+  const intent = classifyIntent(trimmed);
+  const intentMs = Date.now() - intentStarted;
+  console.log('[AIOrchestrator] stream intent classified', { intent, intentMs });
+
+  if (intent === 'PROPERTY_COUNT') {
+    const prepared = await preparePropertyCountContext();
+    return { route: 'PROPERTY_COUNT', prepared, intentMs };
+  }
+
+  if (intent === 'PROPERTY_SEARCH') {
+    const prepared = await preparePropertySearchContext(trimmed);
+    return { route: 'PROPERTY_SEARCH', prepared, intentMs };
+  }
+
+  if (intent === 'COMPANY_INFO') {
+    return {
+      route: 'COMPANY_INFO',
+      prepared: prepareCompanyContext(trimmed),
+      intentMs,
+    };
+  }
+
+  if (intent === 'SERVICE_INFO') {
+    const prepared = await prepareServicesContext(trimmed);
+    return { route: 'SERVICE_INFO', prepared, intentMs };
+  }
+
+  if (intent === 'TEAM_INFO') {
+    const prepared = await prepareTeamContext(trimmed);
+    return { route: 'TEAM_INFO', prepared, intentMs };
+  }
+
+  if (intent === 'BLOG') {
+    const prepared = await prepareBlogContext(trimmed);
+    return { route: 'BLOG', prepared, intentMs };
+  }
+
+  if (intent === 'AREA_GUIDE' || intent === 'FAQ' || intent === 'KNOWLEDGE_BOTH') {
+    const sourceType =
+      intent === 'AREA_GUIDE' ? 'area_guide' : intent === 'FAQ' ? 'faq' : 'both';
+    const prepared = await prepareKnowledgeContext(trimmed, sourceType);
+    return { route: intent, prepared, intentMs };
+  }
+
+  return {
+    route: 'UNSUPPORTED',
+    prepared: {
+      mode: 'immediate',
+      reply: UNSUPPORTED_REPLY,
+      sources: [],
+      collectionsAccessed: [],
+      usedGpt: false,
+    },
+    intentMs,
+  };
+};
+
+/**
+ * Streaming chat orchestration.
+ * Yields SSE-ready events: start → delta* → sources? → done | error
+ * Reuses the same intent + retrieval + prompts as handleChat; only final GPT streams.
+ *
+ * @param {string} message
+ * @param {{ signal?: AbortSignal }} [options]
+ * @returns {AsyncGenerator<{ event: string, data: object }>}
+ */
+async function* handleChatStream(message, options = {}) {
+  const totalStarted = Date.now();
+  const signal = options.signal;
+
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      const err = new OpenAIServiceError('AI request was cancelled.', {
+        statusCode: 499,
+        category: 'aborted',
+      });
+      throw err;
+    }
+  };
+
+  let trimmed;
+  try {
+    trimmed = validateMessage(message);
+  } catch (error) {
+    yield {
+      event: 'error',
+      data: {
+        success: false,
+        message: error?.message || 'Unable to generate a response.',
+      },
+    };
+    return;
+  }
+
+  console.log('[AIOrchestrator] stream request started', {
+    messageLength: trimmed.length,
+  });
+
+  yield { event: 'start', data: { success: true } };
+
+  try {
+    throwIfAborted();
+
+    const confidential = detectConfidentialRequest(trimmed);
+    if (confidential.blocked) {
+      const totalMs = Date.now() - totalStarted;
+      console.log('[AIOrchestrator] stream blocked confidential', {
+        reason: confidential.reason,
+        totalMs,
+      });
+      yield { event: 'delta', data: { text: CONFIDENTIAL_REFUSAL } };
+      yield { event: 'done', data: { success: true } };
+      return;
+    }
+
+    throwIfAborted();
+    const { route, prepared, intentMs } = await resolveStreamPlan(trimmed);
+    throwIfAborted();
+
+    if (prepared.mode === 'immediate') {
+      if (prepared.reply) {
+        yield { event: 'delta', data: { text: prepared.reply } };
+      }
+      if (Array.isArray(prepared.sources) && prepared.sources.length) {
+        yield { event: 'sources', data: { sources: prepared.sources } };
+      }
+      const totalMs = Date.now() - totalStarted;
+      console.log('[AIOrchestrator] stream immediate completed', {
+        route,
+        intentMs,
+        totalMs,
+        collectionsAccessed: prepared.collectionsAccessed || [],
+      });
+      yield { event: 'done', data: { success: true } };
+      return;
+    }
+
+    // GPT streaming path — retrieval already finished; only answer tokens stream
+    let deltaCount = 0;
+    const gptStarted = Date.now();
+
+    for await (const chunk of generateTextStream(prepared.userPrompt, {
+      system: prepared.system,
+      signal,
+    })) {
+      throwIfAborted();
+      if (chunk.text) {
+        deltaCount += 1;
+        yield { event: 'delta', data: { text: chunk.text } };
+      }
+    }
+
+    if (Array.isArray(prepared.sources) && prepared.sources.length) {
+      yield { event: 'sources', data: { sources: prepared.sources } };
+    }
+
+    const totalMs = Date.now() - totalStarted;
+    console.log('[AIOrchestrator] stream gpt completed', {
+      route,
+      intentMs,
+      gptMs: Date.now() - gptStarted,
+      deltaCount,
+      totalMs,
+      collectionsAccessed: prepared.collectionsAccessed || [],
+    });
+
+    yield { event: 'done', data: { success: true } };
+  } catch (error) {
+    const abortReason = signal?.reason;
+    const isTimeout =
+      abortReason === 'timeout' ||
+      error?.category === 'timeout' ||
+      (signal?.aborted && abortReason === 'timeout');
+
+    if (isTimeout) {
+      yield {
+        event: 'error',
+        data: {
+          success: false,
+          message: 'The response took too long. Please try again.',
+        },
+      };
+      return;
+    }
+
+    if (signal?.aborted || error?.category === 'aborted') {
+      console.log('[AIOrchestrator] stream aborted by client');
+      return;
+    }
+
+    console.error('[AIOrchestrator] stream failed', {
+      category: error?.category || 'unexpected_error',
+      statusCode: error?.statusCode,
+    });
+
+    yield {
+      event: 'error',
+      data: {
+        success: false,
+        message: 'Unable to generate a response.',
+      },
+    };
+  }
+}
+
 module.exports = {
   handleChat,
+  handleChatStream,
   validateMessage,
+  getStreamTimeoutMs,
   UNSUPPORTED_REPLY,
   MAX_MESSAGE_LENGTH,
+  DEFAULT_STREAM_TIMEOUT_MS,
 };

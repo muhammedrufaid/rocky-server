@@ -157,20 +157,11 @@ const mapSources = (chunks) => {
 };
 
 /**
- * Blog-only RAG: question → vector search → gpt-5-nano grounded answer.
- *
- * Does NOT query properties, leads, contacts, or other confidential data.
- * Does NOT use conversation memory.
- *
+ * Prepare blog RAG context for non-streaming or streaming GPT.
+ * Does not call GPT.
  * @param {string} query
- * @returns {Promise<{
- *   answer: string,
- *   sources: Array<{ title: string|null, slug: string|null, heading: string|null }>,
- *   timings: object,
- *   usedGpt: boolean,
- * }>}
  */
-const generateBlogAnswer = async (query) => {
+const prepareBlogRagContext = async (query) => {
   const totalStarted = Date.now();
 
   if (query === undefined || query === null) {
@@ -232,14 +223,61 @@ const generateBlogAnswer = async (query) => {
   });
 
   if (!relevantChunks.length) {
-    const totalMs = Date.now() - totalStarted;
-    console.log('[BlogRAG] no useful context; skipping GPT', { totalMs });
     return {
+      mode: 'immediate',
       answer: NO_CONTEXT_ANSWER,
       sources: [],
+      system: null,
+      userPrompt: null,
       timings: {
         embeddingMs: searchResult.timings.embeddingMs,
         vectorSearchMs: searchResult.timings.vectorSearchMs,
+        prepareMs: Date.now() - totalStarted,
+      },
+    };
+  }
+
+  return {
+    mode: 'gpt',
+    answer: null,
+    sources: mapSources(relevantChunks),
+    system: SYSTEM_PROMPT,
+    userPrompt: buildUserPrompt(trimmed, buildContextBlock(relevantChunks)),
+    timings: {
+      embeddingMs: searchResult.timings.embeddingMs,
+      vectorSearchMs: searchResult.timings.vectorSearchMs,
+      prepareMs: Date.now() - totalStarted,
+    },
+  };
+};
+
+/**
+ * Blog-only RAG: question → vector search → gpt-5-nano grounded answer.
+ *
+ * Does NOT query properties, leads, contacts, or other confidential data.
+ * Does NOT use conversation memory.
+ *
+ * @param {string} query
+ * @returns {Promise<{
+ *   answer: string,
+ *   sources: Array<{ title: string|null, slug: string|null, heading: string|null }>,
+ *   timings: object,
+ *   usedGpt: boolean,
+ * }>}
+ */
+const generateBlogAnswer = async (query) => {
+  const totalStarted = Date.now();
+  const prepared = await prepareBlogRagContext(query);
+
+  if (prepared.mode === 'immediate') {
+    const totalMs = Date.now() - totalStarted;
+    console.log('[BlogRAG] no useful context; skipping GPT', { totalMs });
+    return {
+      answer: prepared.answer,
+      sources: [],
+      timings: {
+        embeddingMs: prepared.timings.embeddingMs,
+        vectorSearchMs: prepared.timings.vectorSearchMs,
         gptMs: 0,
         totalMs,
       },
@@ -247,12 +285,9 @@ const generateBlogAnswer = async (query) => {
     };
   }
 
-  const contextBlock = buildContextBlock(relevantChunks);
-  const userPrompt = buildUserPrompt(trimmed, contextBlock);
-
   let gptResult;
   try {
-    gptResult = await generateText(userPrompt, { system: SYSTEM_PROMPT });
+    gptResult = await generateText(prepared.userPrompt, { system: prepared.system });
   } catch (error) {
     if (error instanceof OpenAIServiceError) {
       throw error;
@@ -265,20 +300,19 @@ const generateBlogAnswer = async (query) => {
 
   const totalMs = Date.now() - totalStarted;
   console.log('[BlogRAG] request completed', {
-    selected: relevantChunks.length,
     usedGpt: true,
-    embeddingMs: searchResult.timings.embeddingMs,
-    vectorSearchMs: searchResult.timings.vectorSearchMs,
+    embeddingMs: prepared.timings.embeddingMs,
+    vectorSearchMs: prepared.timings.vectorSearchMs,
     gptMs: gptResult.durationMs,
     totalMs,
   });
 
   return {
     answer: gptResult.text,
-    sources: mapSources(relevantChunks),
+    sources: prepared.sources,
     timings: {
-      embeddingMs: searchResult.timings.embeddingMs,
-      vectorSearchMs: searchResult.timings.vectorSearchMs,
+      embeddingMs: prepared.timings.embeddingMs,
+      vectorSearchMs: prepared.timings.vectorSearchMs,
       gptMs: gptResult.durationMs,
       totalMs,
     },
@@ -288,6 +322,7 @@ const generateBlogAnswer = async (query) => {
 
 module.exports = {
   generateBlogAnswer,
+  prepareBlogRagContext,
   getRagConfig,
   selectRelevantChunks,
   buildContextBlock,
