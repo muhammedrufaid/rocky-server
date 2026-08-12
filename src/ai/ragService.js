@@ -169,7 +169,8 @@ const generateGroundedText = async (userPrompt) => {
 };
 
 /**
- * Grounded RAG answer from ai_knowledge only.
+ * Retrieve + build grounded RAG context without calling GPT.
+ * Used by both generateRagAnswer and streaming orchestration.
  *
  * @param {string} query
  * @param {{
@@ -177,9 +178,15 @@ const generateGroundedText = async (userPrompt) => {
  *   sourceTypes?: string[],
  *   limit?: number,
  * }} [options]
- * @returns {Promise<{ reply: string, sources: Array<object> }>}
+ * @returns {Promise<{
+ *   mode: 'immediate'|'gpt',
+ *   reply?: string,
+ *   sources: Array<object>,
+ *   system?: string,
+ *   userPrompt?: string,
+ * }>}
  */
-const generateRagAnswer = async (query, options = {}) => {
+const prepareRagContext = async (query, options = {}) => {
   const trimmed = asTrimmedString(query);
 
   if (!trimmed) {
@@ -232,6 +239,7 @@ const generateRagAnswer = async (query, options = {}) => {
 
   if (!relevant.length) {
     return {
+      mode: 'immediate',
       reply: UNAVAILABLE_REPLY,
       sources: [],
     };
@@ -246,11 +254,40 @@ const generateRagAnswer = async (query, options = {}) => {
     trimmed,
   ].join('\n');
 
-  const reply = await generateGroundedText(userPrompt);
+  return {
+    mode: 'gpt',
+    system: SYSTEM_PROMPT,
+    userPrompt,
+    sources: toSafeSources(relevant),
+  };
+};
+
+/**
+ * Grounded RAG answer from ai_knowledge only.
+ *
+ * @param {string} query
+ * @param {{
+ *   sourceType?: string,
+ *   sourceTypes?: string[],
+ *   limit?: number,
+ * }} [options]
+ * @returns {Promise<{ reply: string, sources: Array<object> }>}
+ */
+const generateRagAnswer = async (query, options = {}) => {
+  const prepared = await prepareRagContext(query, options);
+
+  if (prepared.mode === 'immediate') {
+    return {
+      reply: prepared.reply,
+      sources: prepared.sources || [],
+    };
+  }
+
+  const reply = await generateGroundedText(prepared.userPrompt);
 
   return {
     reply,
-    sources: toSafeSources(relevant),
+    sources: prepared.sources || [],
   };
 };
 
@@ -258,7 +295,9 @@ module.exports = {
   CHAT_MODEL,
   REASONING_EFFORT,
   UNAVAILABLE_REPLY,
+  SYSTEM_PROMPT,
   RagServiceError,
+  prepareRagContext,
   generateRagAnswer,
   filterRelevantResults,
 };
