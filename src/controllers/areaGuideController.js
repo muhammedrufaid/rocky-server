@@ -7,6 +7,7 @@ const {
   syncAreaGuideAgentOrders,
   syncAllAreaGuideAgentOrders,
 } = require('../services/areaGuideAgentOrdersService');
+const { scheduleDocumentEmbedding } = require('../ai/embeddingService');
 
 const isDuplicateKeyError = (error) =>
   Boolean(error && (error.code === 11000 || error.code === '11000'));
@@ -201,6 +202,8 @@ const createAreaGuide = async (req, res) => {
 
     // Derive agentOrders from property listings matching listingsSearch / title
     await syncAreaGuideAgentOrders(areaGuide);
+
+    scheduleDocumentEmbedding('areaGuide', areaGuide._id);
 
     const data = await attachAgents(areaGuide);
 
@@ -445,6 +448,8 @@ const updateAreaGuide = async (req, res) => {
 
     // Keep agentOrders aligned with listing agents in matching areas
     await syncAreaGuideAgentOrders(updated);
+
+    scheduleDocumentEmbedding('areaGuide', updated._id);
 
     const data = await attachAgents(updated);
 

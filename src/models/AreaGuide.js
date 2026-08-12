@@ -77,10 +77,28 @@ const areaGuideSchema = new mongoose.Schema(
       default: true,
       index: true,
     },
+    // AI embedding — excluded from normal API responses (select: false)
+    embedding: {
+      type: [Number],
+      select: false,
+    },
+    embeddingHash: {
+      type: String,
+      select: false,
+    },
   },
   { timestamps: true }
 );
 
 areaGuideSchema.index({ isActive: 1, order: 1 });
+
+const stripEmbeddingFields = (_doc, ret) => {
+  delete ret.embedding;
+  delete ret.embeddingHash;
+  return ret;
+};
+
+areaGuideSchema.set('toJSON', { transform: stripEmbeddingFields });
+areaGuideSchema.set('toObject', { transform: stripEmbeddingFields });
 
 module.exports = mongoose.model('AreaGuide', areaGuideSchema, 'areaguides');

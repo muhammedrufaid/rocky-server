@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const Service = require('../models/Service');
+const { scheduleDocumentEmbedding } = require('../ai/embeddingService');
 
 const isDuplicateKeyError = (error) =>
   Boolean(error && (error.code === 11000 || error.code === '11000'));
@@ -93,6 +94,8 @@ const createService = async (req, res) => {
       subservices: subservices || [],
       isActive: isActive !== undefined ? isActive : true,
     });
+
+    scheduleDocumentEmbedding('service', service._id);
 
     return res.status(201).json({
       success: true,
@@ -293,6 +296,8 @@ const updateService = async (req, res) => {
         message: 'Service not found',
       });
     }
+
+    scheduleDocumentEmbedding('service', updated._id);
 
     return res.status(200).json({
       success: true,

@@ -56,6 +56,15 @@ const faqSchema = new mongoose.Schema(
       default: true,
       index: true,
     },
+    // AI embedding — excluded from normal API responses (select: false)
+    embedding: {
+      type: [Number],
+      select: false,
+    },
+    embeddingHash: {
+      type: String,
+      select: false,
+    },
   },
   { timestamps: true }
 );
@@ -65,6 +74,15 @@ faqSchema.index({ page: 1, isActive: 1, order: 1 });
 
 // Dynamic pages: find by page + slug + isActive, sorted by order
 faqSchema.index({ page: 1, slug: 1, isActive: 1, order: 1 });
+
+const stripEmbeddingFields = (_doc, ret) => {
+  delete ret.embedding;
+  delete ret.embeddingHash;
+  return ret;
+};
+
+faqSchema.set('toJSON', { transform: stripEmbeddingFields });
+faqSchema.set('toObject', { transform: stripEmbeddingFields });
 
 module.exports = mongoose.model('Faq', faqSchema);
 module.exports.FAQ_PAGES = FAQ_PAGES;

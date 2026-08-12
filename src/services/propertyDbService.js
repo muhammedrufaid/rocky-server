@@ -174,13 +174,15 @@ const paginateAggregation = async ({ basePipeline, page = 1, limit = 10, sort = 
     hasPrevPage: safePage > 1,
   };
 
-  // remove internal computed fields
+  // remove internal computed fields + AI embedding vectors (aggregation bypasses select:false)
   const cleaned = items.map((doc) => {
     // docs are plain objects here
     delete doc.__priceNum;
     delete doc.__sizeNum;
     delete doc.__bedroomsNum;
     delete doc.__bathroomsNum;
+    delete doc.embedding;
+    delete doc.embeddingHash;
     return doc;
   });
 
@@ -221,6 +223,13 @@ const {
   FEATURED_JEBEL_ALI_VILLAGE_PROPERTY_REF_NOS,
 } = require('../constants/featuredJebelAliVillageProperties');
 
+const stripPropertyEmbeddingFields = (doc) => {
+  if (!doc || typeof doc !== 'object') return doc;
+  delete doc.embedding;
+  delete doc.embeddingHash;
+  return doc;
+};
+
 const fetchFeaturedJebelAliVillageProperties = async () => {
   const docs = await Property.find({
     propertyRefNo: { $in: FEATURED_JEBEL_ALI_VILLAGE_PROPERTY_REF_NOS },
@@ -233,7 +242,7 @@ const fetchFeaturedJebelAliVillageProperties = async () => {
   for (const refNo of FEATURED_JEBEL_ALI_VILLAGE_PROPERTY_REF_NOS) {
     const doc = byRefNo.get(refNo);
     if (doc) {
-      properties.push(doc);
+      properties.push(stripPropertyEmbeddingFields(doc));
     } else {
       missingRefs.push(refNo);
     }
@@ -251,7 +260,8 @@ const fetchFeaturedJebelAliVillageProperties = async () => {
 
 const fetchPropertyByRefNo = async (propertyRefNo) => {
   if (!propertyRefNo || typeof propertyRefNo !== 'string') return null;
-  return Property.findOne({ propertyRefNo: propertyRefNo.trim() }).lean();
+  const doc = await Property.findOne({ propertyRefNo: propertyRefNo.trim() }).lean();
+  return stripPropertyEmbeddingFields(doc);
 };
 
 const fetchUniquePropertyTypes = async () => {

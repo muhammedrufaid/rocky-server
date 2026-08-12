@@ -7,7 +7,10 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "test": "jest",
-    "migrate:area-guides": "node scripts/migrateAreaGuides.js"
+    "migrate:area-guides": "node scripts/migrateAreaGuides.js",
+    "ai:embeddings": "node scripts/generate-ai-embeddings.js",
+    "ai:embeddings:dry-run": "node scripts/generate-ai-embeddings.js --dry-run",
+    "test:ai-embedding-foundation": "node scripts/test-ai-embedding-foundation.js"
   },
   "keywords": [],
   "author": "",
@@ -27,7 +30,8 @@
     "mongoose": "^9.2.2",
     "multer": "^2.1.1",
     "multer-storage-cloudinary": "^4.0.0",
-    "node-cron": "^4.2.1"
+    "node-cron": "^4.2.1",
+    "openai": "^7.4.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

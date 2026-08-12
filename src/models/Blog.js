@@ -68,10 +68,28 @@ const blogSchema = new mongoose.Schema(
       default: true,
       index: true,
     },
+    // AI embedding — excluded from normal API responses (select: false)
+    embedding: {
+      type: [Number],
+      select: false,
+    },
+    embeddingHash: {
+      type: String,
+      select: false,
+    },
   },
   { timestamps: true }
 );
 
 blogSchema.index({ isActive: 1, createdAt: -1 });
+
+const stripEmbeddingFields = (_doc, ret) => {
+  delete ret.embedding;
+  delete ret.embeddingHash;
+  return ret;
+};
+
+blogSchema.set('toJSON', { transform: stripEmbeddingFields });
+blogSchema.set('toObject', { transform: stripEmbeddingFields });
 
 module.exports = mongoose.model('Blog', blogSchema, 'blogs');

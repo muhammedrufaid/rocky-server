@@ -4,6 +4,9 @@ const propertyService = require('./propertyService');
 const {
   syncAllAreaGuideAgentOrders,
 } = require('./areaGuideAgentOrdersService');
+const {
+  schedulePropertyEmbeddingsAfterMigrate,
+} = require('../ai/embeddingService');
 
 const logPrefix = '[salesforce-migrate]';
 
@@ -207,6 +210,9 @@ const migrateProperties = async ({ properties, skipIfUnchanged = false, xmlText 
     matched: result.matchedCount || 0,
     deleted,
   });
+
+  // Non-blocking: regenerate property embeddings only when searchable hash changes
+  schedulePropertyEmbeddingsAfterMigrate();
 
   return {
     skipped: false,

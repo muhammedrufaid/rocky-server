@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const Faq = require('../models/Faq');
 const { FAQ_PAGES } = Faq;
+const { scheduleDocumentEmbedding } = require('../ai/embeddingService');
 
 const FAQ_PAGE_VALUES = Object.values(FAQ_PAGES);
 
@@ -31,6 +32,8 @@ const createFaq = async (req, res) => {
       order: order ?? 0,
       isActive: isActive !== undefined ? isActive : true,
     });
+
+    scheduleDocumentEmbedding('faq', faq._id);
 
     return res.status(201).json({
       success: true,
@@ -158,6 +161,8 @@ const updateFaq = async (req, res) => {
         message: 'FAQ not found',
       });
     }
+
+    scheduleDocumentEmbedding('faq', updated._id);
 
     return res.status(200).json({
       success: true,

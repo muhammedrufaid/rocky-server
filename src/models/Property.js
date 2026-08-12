@@ -32,11 +32,30 @@ const propertySchema = new mongoose.Schema(
     features: [String],
     portals: [String],
     images: [String],
+
+    // AI embedding — excluded from normal API responses (select: false)
+    embedding: {
+      type: [Number],
+      select: false,
+    },
+    embeddingHash: {
+      type: String,
+      select: false,
+    },
   },
   { timestamps: false, versionKey: false }
 );
 
 propertySchema.index({ propertyRefNo: 1 }, { unique: true });
+
+const stripEmbeddingFields = (_doc, ret) => {
+  delete ret.embedding;
+  delete ret.embeddingHash;
+  return ret;
+};
+
+propertySchema.set('toJSON', { transform: stripEmbeddingFields });
+propertySchema.set('toObject', { transform: stripEmbeddingFields });
 
 module.exports = mongoose.model('Property', propertySchema);
 
