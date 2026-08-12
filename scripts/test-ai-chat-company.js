@@ -8,7 +8,8 @@
  * Does NOT query confidential MongoDB collections.
  */
 require('dotenv').config();
-const { handleChat, UNSUPPORTED_REPLY } = require('../src/ai/orchestrator/aiOrchestrator');
+const mongoose = require('mongoose');
+const { handleChat } = require('../src/ai/orchestrator/aiOrchestrator');
 const { CONFIDENTIAL_REFUSAL } = require('../src/ai/security/confidentialGuard');
 const { getReasoningEffort } = require('../src/services/openaiService');
 
@@ -72,10 +73,10 @@ const TESTS = [
   {
     id: 10,
     message: 'What is the price of a Dubai Marina apartment?',
-    expectRoute: 'UNSUPPORTED',
-    exactReply: UNSUPPORTED_REPLY,
-    mustNotInventPrice: true,
-    mustNotQueryMongo: true,
+    // Phase 3: property price questions use public MongoDB listings (not Blog RAG)
+    expectRoute: 'PROPERTY_SEARCH',
+    answerIncludesAny: ['marina', 'apartment', 'aed', 'price', 'no matching', 'no public', 'found'],
+    mustNotQueryForbidden: true,
   },
 ];
 
@@ -94,6 +95,8 @@ const hasCurrencyAmount = (answer) =>
   console.log('Reasoning effort:', getReasoningEffort());
   console.log('Blog RAG used as fallback: NO');
   console.log('');
+
+  await mongoose.connect(process.env.MONGO_URI);
 
   const outcomes = [];
 
@@ -130,9 +133,23 @@ const hasCurrencyAmount = (answer) =>
       issues.push('answer appears to invent a price');
     }
 
-    // Phase 1 company/confidential/unsupported paths must never touch Mongo
-    if (result.mongoQueried || (result.collectionsAccessed || []).length > 0) {
-      issues.push('MongoDB access is not allowed in Phase 1 chat routes');
+    const accessed = result.collectionsAccessed || [];
+    const forbidden = ['areaguideleads', 'contacts', 'users', 'propertymanagementleads'];
+    if (accessed.some((c) => forbidden.includes(c))) {
+      issues.push(`forbidden collection accessed: ${accessed.join(', ')}`);
+    }
+
+    // Phase 1 company/confidential paths must not touch Mongo (property search may use properties)
+    if (
+      test.expectRoute !== 'PROPERTY_SEARCH' &&
+      (result.mongoQueried || accessed.length > 0)
+    ) {
+      issues.push('MongoDB access is not allowed for this Phase 1 route');
+    }
+
+    if (test.expectRoute === 'PROPERTY_SEARCH') {
+      const unexpected = accessed.filter((c) => c !== 'properties');
+      if (unexpected.length) issues.push(`unexpected collections: ${unexpected.join(', ')}`);
     }
 
     const pass = issues.length === 0;
@@ -174,16 +191,24 @@ const hasCurrencyAmount = (answer) =>
   });
 
   console.log('\nblogRagService changed: NO');
-  console.log('MongoDB queried: NO');
-  console.log('Collections accessed: NONE');
+  console.log(
+    'Collections accessed (property search only if any):',
+    [...new Set(outcomes.flatMap((o) => (o.route === 'PROPERTY_SEARCH' ? ['properties'] : [])))]
+  );
   console.log('\nOverall:', allPass ? 'PASS' : 'FAIL');
 
+  await mongoose.disconnect();
   process.exit(allPass ? 0 : 1);
-})().catch((error) => {
+})().catch(async (error) => {
   console.error('Test failed:', {
     name: error?.name,
     category: error?.category,
     message: error?.message,
   });
+  try {
+    await mongoose.disconnect();
+  } catch (_) {
+    // ignore
+  }
   process.exit(1);
 });

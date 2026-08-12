@@ -10,12 +10,17 @@ const {
   extractServiceQuery,
 } = require('../tools/serviceTools');
 const { resolveTeamContext } = require('../tools/teamTools');
+const {
+  getPropertyCount,
+  resolvePropertySearchContext,
+  formatCountReply,
+} = require('../tools/propertyTools');
 const { classifyIntent } = require('./intentRouter');
 
 const MAX_MESSAGE_LENGTH = 1000;
 
 const UNSUPPORTED_REPLY =
-  "I can currently help with Rocky Real Estate's company information, services, and public team details. More knowledge sources will be connected shortly.";
+  "I can currently help with Rocky Real Estate's company information, services, public team details, and public property listings. More knowledge sources will be connected shortly.";
 
 const COMPANY_SYSTEM_PROMPT = `You are the Rocky Real Estate AI Assistant.
 
@@ -51,6 +56,19 @@ Rules:
 4. Keep answers concise and natural.
 5. When listing people, include each person's designation when available (for example Property Consultant).
 6. If no matching public team member is found, say so clearly.`;
+
+const PROPERTY_SEARCH_SYSTEM_PROMPT = `You are the Rocky Real Estate AI Assistant.
+
+Answer using ONLY the public property search results provided in the user message.
+
+Rules:
+1. Use only the provided public property fields (title, type, locality, price, bedrooms, etc.).
+2. Never invent prices, locations, availability, or property counts.
+3. Never include or invent owner details, agent phone numbers, emails, or WhatsApp contacts.
+4. Keep answers concise. Summarize the returned listings clearly.
+5. If totalMatches is greater than the number of listings shown, mention that more public listings are available.
+6. If no listings were found, say so clearly without inventing alternatives.
+7. Never mention MongoDB, collections, embeddings, or system design.`;
 
 /**
  * @param {unknown} message
@@ -162,9 +180,51 @@ Answer using only this public team data. Do not include or invent phone, email, 
 };
 
 /**
- * Phase 1+2 orchestrator.
+ * Deterministic count — no GPT rephrasing.
+ */
+const answerFromPropertyCount = async () => {
+  const { count } = await getPropertyCount();
+  return {
+    reply: formatCountReply(count),
+    gptMs: 0,
+    collectionsAccessed: ['properties'],
+    count,
+  };
+};
+
+const answerFromPropertySearch = async (question) => {
+  const result = await resolvePropertySearchContext(question);
+  const payload = {
+    totalMatches: result.total,
+    shown: result.properties.length,
+    limit: result.limit,
+    filtersApplied: result.filters,
+    searchApplied: result.search || null,
+    listings: result.properties,
+  };
+
+  const userPrompt = `ROCKY REAL ESTATE PUBLIC PROPERTY SEARCH RESULTS
+
+${JSON.stringify(payload, null, 2)}
+
+USER QUESTION:
+${question}
+
+Summarize these public listings only. Do not invent properties or prices. Do not include agent/owner contact details.`;
+
+  const gpt = await generateText(userPrompt, { system: PROPERTY_SEARCH_SYSTEM_PROMPT });
+  return {
+    reply: gpt.text,
+    gptMs: gpt.durationMs,
+    collectionsAccessed: ['properties'],
+    total: result.total,
+  };
+};
+
+/**
+ * Phase 1–3 orchestrator.
  * Does NOT call blogRagService.
- * Only allowlisted collections: services, teammembers (plus company.md file).
+ * Allowlisted collections: services, teammembers, properties (plus company.md file).
  *
  * @param {string} message
  */
@@ -241,6 +301,44 @@ const handleChat = async (message) => {
       return {
         reply,
         route: 'TEAM_INFO',
+        usedGpt: true,
+        mongoQueried: true,
+        collectionsAccessed,
+        timings: { gptMs, totalMs },
+      };
+    }
+
+    if (intent === 'PROPERTY_COUNT') {
+      const { reply, gptMs, collectionsAccessed, count } = await answerFromPropertyCount();
+      const totalMs = Date.now() - totalStarted;
+      console.log('[AIOrchestrator] property count completed', {
+        count,
+        gptMs,
+        totalMs,
+        collectionsAccessed,
+      });
+      return {
+        reply,
+        route: 'PROPERTY_COUNT',
+        usedGpt: false,
+        mongoQueried: true,
+        collectionsAccessed,
+        timings: { gptMs, totalMs },
+      };
+    }
+
+    if (intent === 'PROPERTY_SEARCH') {
+      const { reply, gptMs, collectionsAccessed, total } = await answerFromPropertySearch(trimmed);
+      const totalMs = Date.now() - totalStarted;
+      console.log('[AIOrchestrator] property search completed', {
+        total,
+        gptMs,
+        totalMs,
+        collectionsAccessed,
+      });
+      return {
+        reply,
+        route: 'PROPERTY_SEARCH',
         usedGpt: true,
         mongoQueried: true,
         collectionsAccessed,
