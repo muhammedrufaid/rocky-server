@@ -159,6 +159,8 @@ const generateText = async (message) => {
 
 module.exports = {
   generateText,
+  getClient,
+  mapOpenAIError,
   OpenAIServiceError,
   DEFAULT_MODEL,
 };
