@@ -1,6 +1,8 @@
 const OpenAI = require('openai');
 
 const DEFAULT_MODEL = 'gpt-5-nano';
+const DEFAULT_REASONING_EFFORT = 'low';
+const ALLOWED_REASONING_EFFORTS = new Set(['minimal', 'low', 'medium', 'high']);
 
 /**
  * Typed error for AI/OpenAI failures so the controller can map to safe HTTP responses.
@@ -34,6 +36,22 @@ const getModel = () => {
     return DEFAULT_MODEL;
   }
   return model.trim();
+};
+
+/**
+ * GPT-5 reasoning effort for Chat Completions (`reasoning_effort`).
+ * @returns {'minimal'|'low'|'medium'|'high'}
+ */
+const getReasoningEffort = () => {
+  const raw = process.env.OPENAI_REASONING_EFFORT;
+  if (!raw || typeof raw !== 'string' || !raw.trim()) {
+    return DEFAULT_REASONING_EFFORT;
+  }
+  const value = raw.trim().toLowerCase();
+  if (!ALLOWED_REASONING_EFFORTS.has(value)) {
+    return DEFAULT_REASONING_EFFORT;
+  }
+  return value;
 };
 
 /**
@@ -105,24 +123,51 @@ const mapOpenAIError = (error) => {
 };
 
 /**
- * Send a user message to OpenAI and return the generated text.
+ * Send a chat completion to OpenAI and return the generated text.
  * Independent of Express / MongoDB.
  *
- * @param {string} message
- * @returns {Promise<string>}
+ * Uses Chat Completions API with GPT-5 `reasoning_effort`.
+ *
+ * @param {string} message - User message
+ * @param {{ system?: string, model?: string, reasoningEffort?: string }} [options]
+ * @returns {Promise<{ text: string, model: string, durationMs: number, reasoningEffort: string }>}
  */
-const generateText = async (message) => {
+const generateText = async (message, options = {}) => {
   const startedAt = Date.now();
-  const model = getModel();
+  const model = options.model || getModel();
+  const system = typeof options.system === 'string' ? options.system.trim() : '';
+  const reasoningEffort =
+    typeof options.reasoningEffort === 'string' &&
+    ALLOWED_REASONING_EFFORTS.has(options.reasoningEffort.trim().toLowerCase())
+      ? options.reasoningEffort.trim().toLowerCase()
+      : getReasoningEffort();
 
-  console.log('[OpenAI] request started', { model });
+  if (!message || typeof message !== 'string' || !message.trim()) {
+    throw new OpenAIServiceError('Message is required.', {
+      statusCode: 400,
+      category: 'invalid_request',
+    });
+  }
+
+  console.log('[OpenAI] request started', {
+    model,
+    reasoningEffort,
+    hasSystem: Boolean(system),
+  });
 
   try {
     const openai = getClient();
 
+    const messages = [];
+    if (system) {
+      messages.push({ role: 'system', content: system });
+    }
+    messages.push({ role: 'user', content: message.trim() });
+
     const completion = await openai.chat.completions.create({
       model,
-      messages: [{ role: 'user', content: message }],
+      messages,
+      reasoning_effort: reasoningEffort,
     });
 
     const reply = completion?.choices?.[0]?.message?.content;
@@ -137,21 +182,51 @@ const generateText = async (message) => {
     const durationMs = Date.now() - startedAt;
     console.log('[OpenAI] request completed', {
       model,
+      reasoningEffort,
       durationMs,
       category: 'success',
     });
 
-    return reply.trim();
+    return {
+      text: reply.trim(),
+      model,
+      durationMs,
+      reasoningEffort,
+    };
   } catch (error) {
     const mapped = mapOpenAIError(error);
     const durationMs = Date.now() - startedAt;
 
+    // Surface API/model compatibility issues clearly (do not silently drop reasoning_effort)
+    const providerMessage =
+      typeof error?.message === 'string' ? error.message.replace(/sk-[^\s]+/gi, '[redacted]') : '';
+    const looksLikeReasoningCompat =
+      /reasoning[_ ]?effort|unsupported_parameter|unrecognized_request|unknown_parameter/i.test(
+        providerMessage
+      );
+
     console.error('[OpenAI] request failed', {
       model,
+      reasoningEffort,
       durationMs,
-      category: mapped.category,
+      category: looksLikeReasoningCompat
+        ? 'reasoning_effort_compatibility'
+        : mapped.category,
       statusCode: mapped.statusCode,
+      providerHint: looksLikeReasoningCompat
+        ? providerMessage.slice(0, 240)
+        : undefined,
     });
+
+    if (looksLikeReasoningCompat) {
+      throw new OpenAIServiceError(
+        'OpenAI rejected the configured reasoning_effort for this model/API.',
+        {
+          statusCode: 502,
+          category: 'reasoning_effort_compatibility',
+        }
+      );
+    }
 
     throw mapped;
   }
@@ -160,7 +235,9 @@ const generateText = async (message) => {
 module.exports = {
   generateText,
   getClient,
+  getReasoningEffort,
   mapOpenAIError,
   OpenAIServiceError,
   DEFAULT_MODEL,
+  DEFAULT_REASONING_EFFORT,
 };

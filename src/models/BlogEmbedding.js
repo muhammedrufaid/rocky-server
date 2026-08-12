@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 /**
  * Dedicated collection for public blog chunk embeddings.
  * Does NOT modify the blogs collection.
- * Vector Search indexes are intentionally NOT created here (Step 5).
+ * Atlas Vector Search index: blog_vector_index (path: embedding, 1536, cosine).
  */
 const blogEmbeddingSchema = new mongoose.Schema(
   {
