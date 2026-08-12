@@ -3,9 +3,15 @@
  *
  * Flow: confidential → intent → structured tools OR ragService
  * Knowledge RAG uses ONLY src/ai/ragService.js (unified ai_knowledge path).
+ *
+ * Streaming reuses the same retrieval/prompts; only final GPT tokens stream.
  */
 
-const { generateText, OpenAIServiceError } = require('../../services/openaiService');
+const {
+  generateText,
+  generateTextStream,
+  OpenAIServiceError,
+} = require('../../services/openaiService');
 const {
   detectConfidentialRequest,
   CONFIDENTIAL_REFUSAL,
@@ -17,10 +23,27 @@ const {
   formatCountReply,
 } = require('../tools/propertyTools');
 const { resolveTeamContext } = require('../tools/teamTools');
-const { generateRagAnswer, RagServiceError } = require('../ragService');
+const {
+  generateRagAnswer,
+  prepareRagContext,
+  RagServiceError,
+} = require('../ragService');
 const { classifyIntent } = require('./intentRouter');
 
 const MAX_MESSAGE_LENGTH = 1000;
+const DEFAULT_STREAM_TIMEOUT_MS = 60000;
+
+const getStreamTimeoutMs = () => {
+  const raw = process.env.AI_STREAM_TIMEOUT_MS;
+  if (!raw || typeof raw !== 'string' || !raw.trim()) {
+    return DEFAULT_STREAM_TIMEOUT_MS;
+  }
+  const n = Number.parseInt(raw.trim(), 10);
+  if (!Number.isFinite(n) || n < 1000) {
+    return DEFAULT_STREAM_TIMEOUT_MS;
+  }
+  return n;
+};
 
 const UNSUPPORTED_REPLY =
   "I don't have enough information in my current knowledge base to answer that accurately. I can help with company info, services, team, properties, blogs, area guides, and FAQs.";
@@ -93,30 +116,65 @@ const assertValidMessage = (message) => {
   return trimmed;
 };
 
-const handleCompany = async (question) => {
+const buildCompanyPrepared = (question) => {
   const knowledge = getCompanyKnowledgeText();
-  const userPrompt = `ROCKY REAL ESTATE COMPANY KNOWLEDGE
+  return {
+    mode: 'gpt',
+    system: COMPANY_SYSTEM_PROMPT,
+    userPrompt: `ROCKY REAL ESTATE COMPANY KNOWLEDGE
 
 ${knowledge}
 
 USER QUESTION:
-${question}`;
-
-  const result = await generateText(userPrompt, { system: COMPANY_SYSTEM_PROMPT });
-  return { reply: result.text, openaiCalls: 1 };
+${question}`,
+    sources: [],
+  };
 };
 
-const handleTeam = async (question) => {
+const buildTeamPrepared = async (question) => {
   const team = await resolveTeamContext(question);
   const payload = Array.isArray(team.data) ? team.data : [];
-  const userPrompt = `ROCKY REAL ESTATE PUBLIC TEAM DATA
+  return {
+    mode: 'gpt',
+    system: TEAM_SYSTEM_PROMPT,
+    userPrompt: `ROCKY REAL ESTATE PUBLIC TEAM DATA
 
 ${JSON.stringify(payload, null, 2)}
 
 USER QUESTION:
-${question}`;
+${question}`,
+    sources: [],
+  };
+};
 
-  const result = await generateText(userPrompt, { system: TEAM_SYSTEM_PROMPT });
+const buildPropertySearchPrepared = async (question) => {
+  const prepared = await resolvePropertySearchContext(question);
+  return {
+    mode: 'gpt',
+    system: PROPERTY_SEARCH_SYSTEM_PROMPT,
+    userPrompt: `ROCKY REAL ESTATE PUBLIC PROPERTY SEARCH RESULTS
+
+${JSON.stringify(prepared, null, 2)}
+
+USER QUESTION:
+${question}`,
+    sources: [],
+  };
+};
+
+const handleCompany = async (question) => {
+  const prepared = buildCompanyPrepared(question);
+  const result = await generateText(prepared.userPrompt, {
+    system: prepared.system,
+  });
+  return { reply: result.text, openaiCalls: 1 };
+};
+
+const handleTeam = async (question) => {
+  const prepared = await buildTeamPrepared(question);
+  const result = await generateText(prepared.userPrompt, {
+    system: prepared.system,
+  });
   return { reply: result.text, openaiCalls: 1 };
 };
 
@@ -129,16 +187,9 @@ const handlePropertyCount = async () => {
 };
 
 const handlePropertySearch = async (question) => {
-  const prepared = await resolvePropertySearchContext(question);
-  const userPrompt = `ROCKY REAL ESTATE PUBLIC PROPERTY SEARCH RESULTS
-
-${JSON.stringify(prepared, null, 2)}
-
-USER QUESTION:
-${question}`;
-
-  const result = await generateText(userPrompt, {
-    system: PROPERTY_SEARCH_SYSTEM_PROMPT,
+  const prepared = await buildPropertySearchPrepared(question);
+  const result = await generateText(prepared.userPrompt, {
+    system: prepared.system,
   });
   return { reply: result.text, openaiCalls: 1 };
 };
@@ -158,8 +209,95 @@ const handleKnowledgeRag = async (question, sourceTypes) => {
   return {
     reply: result.reply,
     sources: Array.isArray(result.sources) ? result.sources : [],
-    // query embedding + GPT generation inside ragService
     openaiCalls: 2,
+  };
+};
+
+/**
+ * Resolve retrieval/prompt plan without GPT (for streaming).
+ * @param {string} trimmed
+ */
+const resolveStreamPlan = async (trimmed) => {
+  const intent = classifyIntent(trimmed);
+  console.log('[AIOrchestrator] stream intent', { intent });
+
+  if (intent === 'PROPERTY_COUNT') {
+    const { count } = await getPropertyCount({});
+    return {
+      route: 'PROPERTY_COUNT',
+      prepared: {
+        mode: 'immediate',
+        reply: formatCountReply(count),
+        sources: [],
+      },
+    };
+  }
+
+  if (intent === 'PROPERTY_SEARCH') {
+    return {
+      route: 'PROPERTY_SEARCH',
+      prepared: await buildPropertySearchPrepared(trimmed),
+    };
+  }
+
+  if (intent === 'COMPANY_INFO') {
+    return {
+      route: 'COMPANY_INFO',
+      prepared: buildCompanyPrepared(trimmed),
+    };
+  }
+
+  if (intent === 'SERVICE_INFO') {
+    return {
+      route: 'SERVICE_INFO',
+      prepared: await prepareRagContext(trimmed, { sourceTypes: ['service'] }),
+    };
+  }
+
+  if (intent === 'TEAM_INFO') {
+    return {
+      route: 'TEAM_INFO',
+      prepared: await buildTeamPrepared(trimmed),
+    };
+  }
+
+  if (intent === 'BLOG') {
+    return {
+      route: 'BLOG',
+      prepared: await prepareRagContext(trimmed, { sourceTypes: ['blog'] }),
+    };
+  }
+
+  if (intent === 'AREA_GUIDE') {
+    return {
+      route: 'AREA_GUIDE',
+      prepared: await prepareRagContext(trimmed, {
+        sourceTypes: ['areaGuide'],
+      }),
+    };
+  }
+
+  if (intent === 'FAQ') {
+    return {
+      route: 'FAQ',
+      prepared: await prepareRagContext(trimmed, { sourceTypes: ['faq'] }),
+    };
+  }
+
+  if (intent === 'KNOWLEDGE_BOTH') {
+    return {
+      route: 'KNOWLEDGE_BOTH',
+      prepared: await prepareRagContext(trimmed, {}),
+    };
+  }
+
+  return {
+    route: 'UNSUPPORTED',
+    prepared: {
+      mode: 'immediate',
+      reply: UNSUPPORTED_REPLY,
+      sources: [],
+    },
   };
 };
 
@@ -242,8 +380,103 @@ const handleChat = async (message) => {
   }
 };
 
+/**
+ * Streaming chat orchestration.
+ * Yields SSE-ready events: start → delta* → sources? → done | error
+ *
+ * @param {string} message
+ * @param {{ signal?: AbortSignal }} [options]
+ * @returns {AsyncGenerator<{ event: string, data: object }>}
+ */
+async function* handleChatStream(message, options = {}) {
+  const signal = options.signal;
+
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      throw new OpenAIServiceError('AI request was cancelled.', {
+        statusCode: 499,
+        category: 'aborted',
+      });
+    }
+  };
+
+  let trimmed;
+  try {
+    trimmed = assertValidMessage(message);
+  } catch (error) {
+    yield {
+      event: 'error',
+      data: { message: error?.message || 'Unable to generate a response.' },
+    };
+    return;
+  }
+
+  yield { event: 'start', data: { success: true } };
+
+  try {
+    throwIfAborted();
+
+    const confidential = detectConfidentialRequest(trimmed);
+    if (confidential.blocked) {
+      yield { event: 'delta', data: { text: CONFIDENTIAL_REFUSAL } };
+      yield { event: 'done', data: {} };
+      return;
+    }
+
+    throwIfAborted();
+    const { route, prepared } = await resolveStreamPlan(trimmed);
+    throwIfAborted();
+
+    if (prepared.mode === 'immediate') {
+      if (prepared.reply) {
+        yield { event: 'delta', data: { text: prepared.reply } };
+      }
+      if (Array.isArray(prepared.sources) && prepared.sources.length) {
+        yield { event: 'sources', data: { sources: prepared.sources } };
+      }
+      yield { event: 'done', data: {} };
+      return;
+    }
+
+    for await (const chunk of generateTextStream(prepared.userPrompt, {
+      system: prepared.system,
+      signal,
+    })) {
+      throwIfAborted();
+      if (chunk?.text) {
+        yield { event: 'delta', data: { text: chunk.text } };
+      }
+    }
+
+    if (Array.isArray(prepared.sources) && prepared.sources.length) {
+      yield { event: 'sources', data: { sources: prepared.sources } };
+    }
+
+    console.log('[AIOrchestrator] stream completed', { route });
+    yield { event: 'done', data: {} };
+  } catch (error) {
+    if (error?.category === 'aborted' || signal?.aborted) {
+      return;
+    }
+
+    const safeMessage =
+      error instanceof OpenAIServiceError || error instanceof RagServiceError
+        ? error.message
+        : 'AI chat is temporarily unavailable.';
+
+    console.error('[AIOrchestrator] stream error', {
+      category: error?.category || 'unexpected_error',
+      name: error?.name,
+    });
+
+    yield { event: 'error', data: { message: safeMessage } };
+  }
+}
+
 module.exports = {
   handleChat,
+  handleChatStream,
+  getStreamTimeoutMs,
   MAX_MESSAGE_LENGTH,
   UNSUPPORTED_REPLY,
 };
