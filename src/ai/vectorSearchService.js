@@ -174,42 +174,50 @@ const searchKnowledge = async (query, options = {}) => {
   }
 
   /** @type {Record<string, unknown>} */
+  // Prefer a larger candidate pool when sourceType filtering is applied in-app.
+  // (Atlas filter on sourceType requires a filter-indexed field; post-filter is safe on M0.)
+  const vectorLimit = sourceTypes?.length
+    ? Math.min(Math.max(limit * 25, numCandidates), MAX_NUM_CANDIDATES)
+    : limit;
+
   const vectorSearchStage = {
     index: VECTOR_INDEX_NAME,
     path: 'embedding',
     queryVector,
-    numCandidates,
-    limit,
+    numCandidates: Math.max(numCandidates, vectorLimit),
+    limit: vectorLimit,
   };
 
-  if (sourceTypes?.length === 1) {
-    vectorSearchStage.filter = {
-      sourceType: { $eq: sourceTypes[0] },
-    };
-  } else if (sourceTypes?.length > 1) {
-    vectorSearchStage.filter = {
-      sourceType: { $in: sourceTypes },
-    };
+  const pipeline = [
+    { $vectorSearch: vectorSearchStage },
+    {
+      $project: {
+        _id: 0,
+        sourceType: 1,
+        sourceId: 1,
+        title: 1,
+        slug: 1,
+        content: 1,
+        metadata: 1,
+        score: { $meta: 'vectorSearchScore' },
+        // Explicitly never project embedding / embeddingHash
+      },
+    },
+  ];
+
+  if (sourceTypes?.length) {
+    pipeline.push({
+      $match: {
+        sourceType: { $in: sourceTypes },
+      },
+    });
   }
+
+  pipeline.push({ $limit: limit });
 
   let rows;
   try {
-    rows = await AiKnowledge.aggregate([
-      { $vectorSearch: vectorSearchStage },
-      {
-        $project: {
-          _id: 0,
-          sourceType: 1,
-          sourceId: 1,
-          title: 1,
-          slug: 1,
-          content: 1,
-          metadata: 1,
-          score: { $meta: 'vectorSearchScore' },
-          // Explicitly never project embedding / embeddingHash
-        },
-      },
-    ]);
+    rows = await AiKnowledge.aggregate(pipeline);
   } catch (error) {
     throw new VectorSearchError(
       error?.message || 'Atlas vector search aggregation failed.',
