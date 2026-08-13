@@ -115,16 +115,25 @@ const assertNoPrivatePropertyFields = (data) => {
 };
 
 /**
- * Fixed tool: total public property inventory count.
- * Uses existing propertyDbService filters (same as frontend APIs).
- * @param {object} [filters]
- * @returns {Promise<{ count: number, collection: string, filters: object }>}
+ * Fixed tool: public property inventory count with optional filters/search.
+ * Uses the same propertyDbService filtering as property search / frontend APIs.
+ * @param {object} [opts]
+ * @param {object} [opts.filters]
+ * @param {string} [opts.search]
+ * @returns {Promise<{ count: number, collection: string, filters: object, search: string }>}
  */
-const getPropertyCount = async (filters = {}) => {
-  const safeFilters = pickApprovedFilters(filters);
+const getPropertyCount = async (opts = {}) => {
+  const hasOptsShape =
+    Object.prototype.hasOwnProperty.call(opts, 'filters') ||
+    Object.prototype.hasOwnProperty.call(opts, 'search');
+  const rawFilters = hasOptsShape ? opts.filters || {} : opts;
+  const search = hasOptsShape && typeof opts.search === 'string' ? opts.search.trim() : '';
+  const safeFilters = pickApprovedFilters(rawFilters);
+
   const { total } = await propertyDbService.fetchAllProperties({
     page: 1,
     limit: 1,
+    search,
     filters: safeFilters,
   });
 
@@ -132,7 +141,22 @@ const getPropertyCount = async (filters = {}) => {
     count: total || 0,
     collection: 'properties',
     filters: safeFilters,
+    search,
   };
+};
+
+/**
+ * Resolve property count using the same NL → filter/search parsing as property search.
+ * Count always comes from MongoDB via propertyDbService (never RAG / LLM estimates).
+ * @param {string} message
+ * @returns {Promise<{ count: number, collection: string, filters: object, search: string }>}
+ */
+const resolvePropertyCountContext = async (message) => {
+  const query = extractPropertySearchQuery(message);
+  return getPropertyCount({
+    filters: query.filters,
+    search: query.search,
+  });
 };
 
 /**
@@ -364,9 +388,21 @@ const resolvePropertySearchContext = async (message) => {
   });
 };
 
-const formatCountReply = (count) => {
+/**
+ * @param {number} count
+ * @param {{ filters?: object, search?: string }} [meta]
+ */
+const formatCountReply = (count, meta = {}) => {
   const formatted = Number(count || 0).toLocaleString('en-US');
-  return `There are currently ${formatted} properties in the public property inventory.`;
+  const hasFilter =
+    (typeof meta.search === 'string' && meta.search.trim()) ||
+    (meta.filters && Object.keys(meta.filters).length > 0);
+
+  if (!hasFilter) {
+    return `There are currently ${formatted} properties in the public property inventory.`;
+  }
+
+  return `There are currently ${formatted} matching properties in the public property inventory.`;
 };
 
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -375,6 +411,7 @@ module.exports = {
   getPropertyCount,
   searchPublicProperties,
   resolvePropertySearchContext,
+  resolvePropertyCountContext,
   extractPropertySearchQuery,
   sanitizePublicProperty,
   formatCountReply,

@@ -18,7 +18,7 @@ const {
 } = require('../security/confidentialGuard');
 const { getCompanyKnowledgeText } = require('../tools/companyKnowledge');
 const {
-  getPropertyCount,
+  resolvePropertyCountContext,
   resolvePropertySearchContext,
   formatCountReply,
 } = require('../tools/propertyTools');
@@ -178,10 +178,10 @@ const handleTeam = async (question) => {
   return { reply: result.text, openaiCalls: 1 };
 };
 
-const handlePropertyCount = async () => {
-  const { count } = await getPropertyCount({});
+const handlePropertyCount = async (question) => {
+  const counted = await resolvePropertyCountContext(question);
   return {
-    reply: formatCountReply(count),
+    reply: formatCountReply(counted.count, counted),
     openaiCalls: 0,
   };
 };
@@ -222,12 +222,12 @@ const resolveStreamPlan = async (trimmed) => {
   console.log('[AIOrchestrator] stream intent', { intent });
 
   if (intent === 'PROPERTY_COUNT') {
-    const { count } = await getPropertyCount({});
+    const counted = await resolvePropertyCountContext(trimmed);
     return {
       route: 'PROPERTY_COUNT',
       prepared: {
         mode: 'immediate',
-        reply: formatCountReply(count),
+        reply: formatCountReply(counted.count, counted),
         sources: [],
       },
     };
@@ -323,7 +323,7 @@ const handleChat = async (message) => {
 
   try {
     if (intent === 'PROPERTY_COUNT') {
-      const result = await handlePropertyCount();
+      const result = await handlePropertyCount(trimmed);
       return { ...result, route: 'PROPERTY_COUNT' };
     }
 

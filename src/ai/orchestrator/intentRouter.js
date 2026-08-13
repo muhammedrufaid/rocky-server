@@ -40,11 +40,14 @@ const TEAM_PATTERNS = [
   /\b(ceo|general\s+manager)\b/i,
 ];
 
+const PROPERTY_COUNT_TYPE =
+  'properties|listings|homes|units|apartments?|villas?|townhouses?|penthouses?|offices?';
+
 const PROPERTY_COUNT_PATTERNS = [
-  /\bhow\s+many\s+(properties|listings|homes|units)\b/i,
-  /\bhow\s+many\s+.{0,40}\b(properties|listings)\b/i,
+  new RegExp(`\\bhow\\s+many\\s+(${PROPERTY_COUNT_TYPE})\\b`, 'i'),
+  new RegExp(`\\bhow\\s+many\\s+.{0,40}\\b(${PROPERTY_COUNT_TYPE})\\b`, 'i'),
   /\b(property|listing)\s+count\b/i,
-  /\bnumber\s+of\s+(properties|listings)\b/i,
+  new RegExp(`\\bnumber\\s+of\\s+(${PROPERTY_COUNT_TYPE})\\b`, 'i'),
 ];
 
 const PROPERTY_SEARCH_PATTERNS = [
