@@ -7,22 +7,49 @@ const {
 } = require('../ai/orchestrator/aiOrchestrator');
 
 /**
+ * Pick structured optional fields for the JSON chat response.
+ * @param {object} result
+ */
+const pickStructuredData = (result) => {
+  const data = {
+    reply: result.reply,
+  };
+
+  if (Array.isArray(result.sources) && result.sources.length) {
+    data.sources = result.sources;
+  }
+  if (result.context) {
+    data.context = result.context;
+  }
+  if (result.quick_actions) {
+    data.quick_actions = result.quick_actions;
+  }
+  if (result.property_results) {
+    data.property_results = result.property_results;
+  }
+  if (result.service_action) {
+    data.service_action = result.service_action;
+  }
+  if (result.contact_action) {
+    data.contact_action = result.contact_action;
+  }
+
+  return data;
+};
+
+/**
  * POST /api/ai/chat
  * Confidential → intent → structured tools or unified ragService.
+ * Optional body.context is client-echoed multi-turn state (not server-persisted).
  */
 const chatHandler = async (req, res) => {
   try {
-    const { message } = req.body || {};
-    const result = await handleChat(message);
+    const { message, context } = req.body || {};
+    const result = await handleChat(message, { context });
 
     return res.status(200).json({
       success: true,
-      data: {
-        reply: result.reply,
-        ...(Array.isArray(result.sources) && result.sources.length
-          ? { sources: result.sources }
-          : {}),
-      },
+      data: pickStructuredData(result),
     });
   } catch (error) {
     if (error instanceof OpenAIServiceError || error instanceof RagServiceError) {
@@ -64,10 +91,10 @@ const writeSse = (res, event, data) => {
 
 /**
  * POST /api/ai/chat/stream
- * Same orchestration as /chat; SSE delivery of answer tokens.
+ * Same orchestration as /chat; SSE delivery of answer tokens + structured events.
  */
 const chatStreamHandler = async (req, res) => {
-  const { message } = req.body || {};
+  const { message, context } = req.body || {};
 
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -99,6 +126,7 @@ const chatStreamHandler = async (req, res) => {
   try {
     for await (const evt of handleChatStream(message, {
       signal: abortController.signal,
+      context,
     })) {
       if (res.writableEnded || abortController.signal.aborted) break;
       writeSse(res, evt.event, evt.data);

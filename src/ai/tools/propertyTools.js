@@ -4,6 +4,11 @@
  */
 
 const propertyDbService = require('../../services/propertyDbService');
+const { buildPropertyPublicUrl } = require('./knownLinks');
+const {
+  listingTypeQuickActions,
+  bedroomQuickActions,
+} = require('./quickActions');
 
 const PUBLIC_PROPERTY_FIELDS = [
   'propertyRefNo',
@@ -226,14 +231,85 @@ const pickApprovedFilters = (filters) => {
 };
 
 /**
+ * Detect buy / rent / off-plan from natural language.
+ * @param {string} message
+ * @returns {'buy'|'rent'|'off-plan'|null}
+ */
+const detectListingType = (message) => {
+  const text = String(message || '').trim();
+  if (!text) return null;
+
+  const lower = text.toLowerCase();
+  // Exact quick-action values first
+  if (lower === 'buy' || lower === 'sale' || lower === 'for sale') return 'buy';
+  if (lower === 'rent' || lower === 'for rent') return 'rent';
+  if (lower === 'off-plan' || lower === 'off plan' || lower === 'offplan') {
+    return 'off-plan';
+  }
+
+  if (/\boff[\s-]?plan\b/i.test(text)) return 'off-plan';
+  if (
+    /\b(for\s+rent|to\s+rent|want\s+to\s+rent|looking\s+to\s+rent|rentals?)\b/i.test(
+      text
+    )
+  ) {
+    return 'rent';
+  }
+  // Standalone "rent" as a short selection (already handled), or "rent a ..."
+  if (/^\s*rent\b/i.test(text) || /\brent\s+a\b/i.test(text)) return 'rent';
+  if (
+    /\b(for\s+sale|to\s+buy|want\s+to\s+buy|looking\s+to\s+buy|purchase)\b/i.test(
+      text
+    )
+  ) {
+    return 'buy';
+  }
+  if (/\bbuy\s+a\b/i.test(text) || /^\s*buy\b/i.test(text)) return 'buy';
+
+  return null;
+};
+
+/**
+ * Parse bedroom quick-action / short reply.
+ * @param {string} message
+ * @returns {string|null} bedrooms filter value
+ */
+const parseBedroomSelection = (message) => {
+  const text = String(message || '').trim().toLowerCase();
+  if (!text) return null;
+
+  if (text === 'studio' || text === '0') return '0';
+  if (text === '1' || text === '1 bed' || text === '1 bedroom') return '1';
+  if (text === '2' || text === '2 bed' || text === '2 bedroom') return '2';
+  if (
+    text === '3' ||
+    text === '3+' ||
+    text === '3 bed' ||
+    text === '3 bedroom' ||
+    text === '3 bedrooms'
+  ) {
+    return '3';
+  }
+
+  const bedMatch = text.match(/\b(\d+)\s*(?:bed(?:room)?s?|br)\b/i);
+  if (bedMatch) return bedMatch[1];
+
+  if (/^\d+$/.test(text)) return text;
+  if (/\bstudio\b/i.test(text)) return '0';
+
+  return null;
+};
+
+/**
  * Parse a natural-language property search into approved filters + search text.
  * @param {string} message
- * @returns {{ filters: object, search: string }}
+ * @returns {{ filters: object, search: string, listingType: ('buy'|'rent'|'off-plan'|null) }}
  */
 const extractPropertySearchQuery = (message) => {
   const text = String(message || '').trim();
   const filters = {};
   let search = '';
+  const listingType = detectListingType(text);
 
   // Property type
   for (const type of KNOWN_PROPERTY_TYPES) {
@@ -249,13 +325,8 @@ const extractPropertySearchQuery = (message) => {
   if (!filters.propertyType && /\bvillas?\b/i.test(text)) {
     filters.propertyType = 'Villa';
   }
-
-  // Purpose
-  if (/\bfor\s+rent\b|\bto\s+rent\b|\brentals?\b/i.test(text)) {
-    // propertyPurpose is applied via dedicated service methods in public API;
-    // propertyDbService also accepts it as a forced match in buy/rent helpers.
-    // buildCommonPipeline does not treat propertyPurpose as a list filter unless forced.
-    // Use search hint only if needed — prefer dedicated fetch when purpose-only.
+  if (!filters.propertyType && /\btownhouses?\b/i.test(text)) {
+    filters.propertyType = 'Townhouse';
   }
 
   // Price: under / below / less than AED X (million supported)
@@ -285,6 +356,8 @@ const extractPropertySearchQuery = (message) => {
   const bedMatch = text.match(/\b(\d+)\s*(?:bed(?:room)?s?|br)\b/i);
   if (bedMatch) {
     filters.bedrooms = bedMatch[1];
+  } else if (/\bstudio\b/i.test(text)) {
+    filters.bedrooms = '0';
   }
 
   // Location: "in/at/around/near <area>"
@@ -330,54 +403,288 @@ const extractPropertySearchQuery = (message) => {
     }
   }
 
-  return { filters: pickApprovedFilters(filters), search };
+  return {
+    filters: pickApprovedFilters(filters),
+    search,
+    listingType,
+  };
+};
+
+/**
+ * Merge extracted query with prior conversation context.
+ * @param {string} message
+ * @param {object|null} context
+ */
+const mergePropertySearchState = (message, context = null) => {
+  const extracted = extractPropertySearchQuery(message);
+  const prevFilters =
+    context && context.filters && typeof context.filters === 'object'
+      ? pickApprovedFilters(context.filters)
+      : {};
+
+  const filters = pickApprovedFilters({
+    ...prevFilters,
+    ...extracted.filters,
+  });
+
+  // Short bedroom-only replies during clarification
+  if (
+    context?.pendingClarification === 'bedrooms' &&
+    extracted.filters.bedrooms === undefined
+  ) {
+    const bed = parseBedroomSelection(message);
+    if (bed !== null) filters.bedrooms = bed;
+  }
+
+  let listingType =
+    detectListingType(message) ||
+    extracted.listingType ||
+    (context && context.listingType) ||
+    null;
+
+  if (context?.pendingClarification === 'listingType') {
+    const selected = detectListingType(message);
+    if (selected) listingType = selected;
+  }
+
+  const search =
+    (extracted.search && extracted.search.trim()) ||
+    (context && typeof context.search === 'string' && context.search.trim()) ||
+    '';
+
+  return { filters, search, listingType };
+};
+
+/**
+ * Map a sanitized public property to a safe property-card payload.
+ * @param {object} sanitized
+ * @param {'buy'|'rent'|'off-plan'} listingType
+ */
+const toPropertyCard = (sanitized, listingType) => {
+  if (!sanitized || typeof sanitized !== 'object') return null;
+  const ref = sanitized.propertyRefNo || null;
+  const url = buildPropertyPublicUrl(listingType, ref);
+
+  let pricePeriod = null;
+  if (listingType === 'rent') {
+    pricePeriod = sanitized.rentFrequency || 'year';
+  }
+
+  const card = {
+    id: ref,
+    title: sanitized.propertyTitle || null,
+    building: sanitized.towerName || null,
+    locality: sanitized.locality || null,
+    subLocality: sanitized.subLocality || null,
+    propertyType: sanitized.propertyType || null,
+    bedrooms: sanitized.bedrooms || null,
+    bathrooms: sanitized.bathrooms || null,
+    size: sanitized.propertySize || null,
+    price: sanitized.price || null,
+    pricePeriod,
+    listingType,
+    url,
+    image: sanitized.image || null,
+  };
+
+  assertNoPrivatePropertyFields(card);
+  return card;
+};
+
+/**
+ * Fetch properties for an explicit listing type using existing DbService helpers.
+ * @param {{ listingType: string, filters: object, search: string, limit?: number }} opts
+ */
+const searchByListingType = async (opts) => {
+  const listingType = opts.listingType;
+  const limit = Math.min(Math.max(parseInt(opts.limit, 10) || getSearchLimit(), 1), 20);
+  const search = typeof opts.search === 'string' ? opts.search.trim() : '';
+  const safeFilters = pickApprovedFilters(opts.filters || {});
+
+  let result;
+  if (listingType === 'rent') {
+    result = await propertyDbService.fetchRentProperties({
+      page: 1,
+      limit,
+      search,
+      filters: safeFilters,
+    });
+  } else if (listingType === 'off-plan') {
+    result = await propertyDbService.fetchOffPlanProperties({
+      page: 1,
+      limit,
+      search,
+      filters: safeFilters,
+    });
+  } else if (listingType === 'buy') {
+    result = await propertyDbService.fetchBuyProperties({
+      page: 1,
+      limit,
+      search,
+      filters: safeFilters,
+    });
+  } else {
+    result = await propertyDbService.fetchAllProperties({
+      page: 1,
+      limit,
+      search,
+      filters: safeFilters,
+    });
+  }
+
+  const sanitized = (result.properties || []).map(sanitizePublicProperty).filter(Boolean);
+  assertNoPrivatePropertyFields(sanitized);
+
+  const cards = sanitized
+    .map((p) => toPropertyCard(p, listingType))
+    .filter(Boolean);
+
+  return {
+    properties: cards,
+    sanitized,
+    total: result.total || 0,
+    limit,
+    collection: 'properties',
+    filters: safeFilters,
+    search,
+    listingType,
+  };
+};
+
+/**
+ * Concise human reply for structured property results (no GPT listing text).
+ * @param {{ properties: object[], total: number, listingType: string, filters: object, search: string }} result
+ */
+const formatPropertySearchReply = (result) => {
+  const shown = Array.isArray(result.properties) ? result.properties.length : 0;
+  const total = result.total || 0;
+  if (total === 0 || shown === 0) {
+    return 'I could not find matching public listings for those filters. Try adjusting the location, bedrooms, or listing type.';
+  }
+
+  const type = result.filters?.propertyType
+    ? String(result.filters.propertyType).toLowerCase()
+    : 'propert';
+  const typeLabel =
+    type === 'propert' ? 'properties' : type.endsWith('s') ? type : `${type}s`;
+
+  const beds = result.filters?.bedrooms;
+  const bedLabel =
+    beds === '0' || beds === 0
+      ? 'studio '
+      : beds
+        ? `${beds}-bedroom `
+        : '';
+
+  const area = result.search ? ` in ${result.search}` : '';
+  const listing =
+    result.listingType === 'rent'
+      ? 'rental '
+      : result.listingType === 'off-plan'
+        ? 'off-plan '
+        : result.listingType === 'buy'
+          ? ''
+          : '';
+
+  const n = Math.min(shown, total);
+  return `I found ${n} matching ${bedLabel}${listing}${typeLabel}${area}.`;
+};
+
+/**
+ * Conversational property search: clarify listing type / bedrooms, then structured results.
+ * Does not guess buy/rent/off-plan.
+ * @param {string} message
+ * @param {object|null} [context]
+ */
+const resolveConversationalPropertySearch = async (message, context = null) => {
+  const state = mergePropertySearchState(message, context);
+  const { filters, search, listingType } = state;
+
+  if (!listingType) {
+    const quick_actions = listingTypeQuickActions();
+    return {
+      kind: 'clarification',
+      reply: `Sure! ${quick_actions.question}`,
+      quick_actions,
+      context: {
+        flow: 'property_search',
+        listingType: null,
+        filters,
+        search,
+        pendingClarification: 'listingType',
+      },
+      openaiCalls: 0,
+    };
+  }
+
+  if (filters.bedrooms === undefined || filters.bedrooms === null || filters.bedrooms === '') {
+    // Ask bedrooms once listing type is known (unless user already provided them).
+    const quick_actions = bedroomQuickActions();
+    return {
+      kind: 'clarification',
+      reply: quick_actions.question,
+      quick_actions,
+      context: {
+        flow: 'property_search',
+        listingType,
+        filters,
+        search,
+        pendingClarification: 'bedrooms',
+      },
+      openaiCalls: 0,
+    };
+  }
+
+  const result = await searchByListingType({
+    listingType,
+    filters,
+    search,
+  });
+
+  return {
+    kind: 'results',
+    reply: formatPropertySearchReply(result),
+    property_results: {
+      properties: result.properties,
+      total: result.total,
+    },
+    context: {
+      flow: 'property_search',
+      listingType,
+      filters,
+      search,
+      pendingClarification: null,
+    },
+    openaiCalls: 0,
+  };
 };
 
 /**
  * Resolve property search context for PROPERTY_SEARCH intent.
- * Uses existing buy/rent helpers when purpose is explicit; otherwise general search.
+ * Uses existing buy/rent/off-plan helpers when purpose is explicit; otherwise general search.
  * @param {string} message
  */
 const resolvePropertySearchContext = async (message) => {
   const query = extractPropertySearchQuery(message);
-  const text = String(message || '');
+  const listingType = query.listingType;
   const limit = getSearchLimit();
 
-  if (/\bfor\s+rent\b|\bto\s+rent\b/i.test(text)) {
-    const rent = await propertyDbService.fetchRentProperties({
-      page: 1,
-      limit,
-      search: query.search,
+  if (listingType === 'rent' || listingType === 'buy' || listingType === 'off-plan') {
+    const result = await searchByListingType({
+      listingType,
       filters: query.filters,
-    });
-    const sanitized = (rent.properties || []).map(sanitizePublicProperty).filter(Boolean);
-    assertNoPrivatePropertyFields(sanitized);
-    return {
-      properties: sanitized,
-      total: rent.total || 0,
+      search: query.search,
       limit,
+    });
+    return {
+      properties: result.sanitized,
+      total: result.total,
+      limit: result.limit,
       collection: 'properties',
       filters: query.filters,
       search: query.search,
-    };
-  }
-
-  if (/\bfor\s+sale\b|\bto\s+buy\b/i.test(text)) {
-    const buy = await propertyDbService.fetchBuyProperties({
-      page: 1,
-      limit,
-      search: query.search,
-      filters: query.filters,
-    });
-    const sanitized = (buy.properties || []).map(sanitizePublicProperty).filter(Boolean);
-    assertNoPrivatePropertyFields(sanitized);
-    return {
-      properties: sanitized,
-      total: buy.total || 0,
-      limit,
-      collection: 'properties',
-      filters: query.filters,
-      search: query.search,
+      listingType,
+      cards: result.properties,
     };
   }
 
@@ -412,8 +719,15 @@ module.exports = {
   searchPublicProperties,
   resolvePropertySearchContext,
   resolvePropertyCountContext,
+  resolveConversationalPropertySearch,
   extractPropertySearchQuery,
+  mergePropertySearchState,
+  detectListingType,
+  parseBedroomSelection,
   sanitizePublicProperty,
+  toPropertyCard,
+  searchByListingType,
+  formatPropertySearchReply,
   formatCountReply,
   getSearchLimit,
   PUBLIC_PROPERTY_FIELDS,

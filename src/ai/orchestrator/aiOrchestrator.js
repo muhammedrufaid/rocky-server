@@ -5,6 +5,7 @@
  * Knowledge RAG uses ONLY src/ai/ragService.js (unified ai_knowledge path).
  *
  * Streaming reuses the same retrieval/prompts; only final GPT tokens stream.
+ * Structured events (property_results, quick_actions, …) are emitted after deltas.
  */
 
 const {
@@ -19,7 +20,7 @@ const {
 const { getCompanyKnowledgeText } = require('../tools/companyKnowledge');
 const {
   resolvePropertyCountContext,
-  resolvePropertySearchContext,
+  resolveConversationalPropertySearch,
   formatCountReply,
 } = require('../tools/propertyTools');
 const { resolveTeamContext } = require('../tools/teamTools');
@@ -29,9 +30,18 @@ const {
   RagServiceError,
 } = require('../ragService');
 const { classifyIntent } = require('./intentRouter');
+const {
+  sanitizeIncomingContext,
+  hasActivePropertyFlow,
+  hasActiveSellFlow,
+} = require('../tools/conversationContext');
+const { resolveServiceActions } = require('../tools/serviceActions');
+const { resolveSellPropertyTurn } = require('../tools/sellPropertyFlow');
 
 const MAX_MESSAGE_LENGTH = 1000;
 const DEFAULT_STREAM_TIMEOUT_MS = 60000;
+
+const GREETING_REPLY = "Hi! 👋 I'm Rocky AI. How can I help you today?";
 
 const getStreamTimeoutMs = () => {
   const raw = process.env.AI_STREAM_TIMEOUT_MS;
@@ -69,18 +79,6 @@ Rules:
 3. Keep answers concise and natural.
 4. If the person or role is not in the data, say you don't have that public team information.
 5. Never mention MongoDB, collections, internal IDs, or system design.`;
-
-const PROPERTY_SEARCH_SYSTEM_PROMPT = `You are the Rocky Real Estate AI Assistant.
-
-Answer using ONLY the public property search results provided in the user message.
-
-Rules:
-1. Use only the provided property results for listings, prices, and counts.
-2. Do not invent properties, prices, or availability.
-3. Never invent or include agent phone numbers, emails, or owner details.
-4. Keep answers concise and natural.
-5. If results are empty, say no matching public listings were found.
-6. Never mention MongoDB, embeddings, or system design.`;
 
 /**
  * @param {string} message
@@ -147,19 +145,73 @@ ${question}`,
   };
 };
 
-const buildPropertySearchPrepared = async (question) => {
-  const prepared = await resolvePropertySearchContext(question);
+/**
+ * Attach optional structured payload fields onto a chat result.
+ * @param {object} base
+ * @param {object} extra
+ */
+const withStructured = (base, extra = {}) => {
+  const out = { ...base };
+  for (const key of [
+    'context',
+    'quick_actions',
+    'property_results',
+    'service_action',
+    'contact_action',
+    'sources',
+  ]) {
+    if (extra[key] !== undefined && extra[key] !== null) {
+      out[key] = extra[key];
+    }
+  }
+  return out;
+};
+
+const handleGreeting = () =>
+  withStructured(
+    { reply: GREETING_REPLY, openaiCalls: 0, route: 'GREETING' },
+    { context: null }
+  );
+
+const handlePropertyCount = async (question) => {
+  const counted = await resolvePropertyCountContext(question);
   return {
-    mode: 'gpt',
-    system: PROPERTY_SEARCH_SYSTEM_PROMPT,
-    userPrompt: `ROCKY REAL ESTATE PUBLIC PROPERTY SEARCH RESULTS
-
-${JSON.stringify(prepared, null, 2)}
-
-USER QUESTION:
-${question}`,
-    sources: [],
+    reply: formatCountReply(counted.count, counted),
+    openaiCalls: 0,
+    route: 'PROPERTY_COUNT',
   };
+};
+
+const handlePropertySearchFlow = async (question, context) => {
+  const result = await resolveConversationalPropertySearch(question, context);
+  return withStructured(
+    {
+      reply: result.reply,
+      openaiCalls: result.openaiCalls || 0,
+      route: 'PROPERTY_SEARCH',
+    },
+    {
+      context: result.context || null,
+      quick_actions: result.quick_actions,
+      property_results: result.property_results,
+    }
+  );
+};
+
+const handleSellFlow = (question, context) => {
+  const result = resolveSellPropertyTurn(question, context);
+  return withStructured(
+    {
+      reply: result.reply,
+      openaiCalls: result.openaiCalls || 0,
+      route: 'SELL_PROPERTY',
+    },
+    {
+      context: result.context || null,
+      quick_actions: result.quick_actions,
+      contact_action: result.contact_action,
+    }
+  );
 };
 
 const handleCompany = async (question) => {
@@ -167,7 +219,7 @@ const handleCompany = async (question) => {
   const result = await generateText(prepared.userPrompt, {
     system: prepared.system,
   });
-  return { reply: result.text, openaiCalls: 1 };
+  return { reply: result.text, openaiCalls: 1, route: 'COMPANY_INFO' };
 };
 
 const handleTeam = async (question) => {
@@ -175,69 +227,88 @@ const handleTeam = async (question) => {
   const result = await generateText(prepared.userPrompt, {
     system: prepared.system,
   });
-  return { reply: result.text, openaiCalls: 1 };
-};
-
-const handlePropertyCount = async (question) => {
-  const counted = await resolvePropertyCountContext(question);
-  return {
-    reply: formatCountReply(counted.count, counted),
-    openaiCalls: 0,
-  };
-};
-
-const handlePropertySearch = async (question) => {
-  const prepared = await buildPropertySearchPrepared(question);
-  const result = await generateText(prepared.userPrompt, {
-    system: prepared.system,
-  });
-  return { reply: result.text, openaiCalls: 1 };
+  return { reply: result.text, openaiCalls: 1, route: 'TEAM_INFO' };
 };
 
 /**
  * Unified knowledge RAG via ragService → vectorSearchService → ai_knowledge.
  * @param {string} question
  * @param {string[]|undefined} sourceTypes
+ * @param {string} route
  */
-const handleKnowledgeRag = async (question, sourceTypes) => {
+const handleKnowledgeRag = async (question, sourceTypes, route) => {
   const options = {};
   if (Array.isArray(sourceTypes) && sourceTypes.length) {
     options.sourceTypes = sourceTypes;
   }
 
   const result = await generateRagAnswer(question, options);
-  return {
+  const base = {
     reply: result.reply,
     sources: Array.isArray(result.sources) ? result.sources : [],
     openaiCalls: 2,
+    route,
   };
+
+  if (route === 'SERVICE_INFO') {
+    return withStructured(base, resolveServiceActions(question));
+  }
+  return base;
 };
+
+/**
+ * Build an immediate stream plan from a handleChat-style result.
+ * @param {object} result
+ * @param {string} route
+ */
+const toImmediatePrepared = (result, route) => ({
+  route,
+  prepared: {
+    mode: 'immediate',
+    reply: result.reply,
+    sources: Array.isArray(result.sources) ? result.sources : [],
+    context: result.context,
+    quick_actions: result.quick_actions,
+    property_results: result.property_results,
+    service_action: result.service_action,
+    contact_action: result.contact_action,
+  },
+});
 
 /**
  * Resolve retrieval/prompt plan without GPT (for streaming).
  * @param {string} trimmed
+ * @param {object|null} context
  */
-const resolveStreamPlan = async (trimmed) => {
+const resolveStreamPlan = async (trimmed, context = null) => {
+  // Active multi-turn flows take priority over fresh intent classification
+  if (hasActiveSellFlow(context) && context.pendingClarification) {
+    return toImmediatePrepared(handleSellFlow(trimmed, context), 'SELL_PROPERTY');
+  }
+  if (hasActivePropertyFlow(context) && context.pendingClarification) {
+    const result = await handlePropertySearchFlow(trimmed, context);
+    return toImmediatePrepared(result, 'PROPERTY_SEARCH');
+  }
+
   const intent = classifyIntent(trimmed);
   console.log('[AIOrchestrator] stream intent', { intent });
 
+  if (intent === 'GREETING') {
+    return toImmediatePrepared(handleGreeting(), 'GREETING');
+  }
+
   if (intent === 'PROPERTY_COUNT') {
-    const counted = await resolvePropertyCountContext(trimmed);
-    return {
-      route: 'PROPERTY_COUNT',
-      prepared: {
-        mode: 'immediate',
-        reply: formatCountReply(counted.count, counted),
-        sources: [],
-      },
-    };
+    const result = await handlePropertyCount(trimmed);
+    return toImmediatePrepared(result, 'PROPERTY_COUNT');
+  }
+
+  if (intent === 'SELL_PROPERTY') {
+    return toImmediatePrepared(handleSellFlow(trimmed, context), 'SELL_PROPERTY');
   }
 
   if (intent === 'PROPERTY_SEARCH') {
-    return {
-      route: 'PROPERTY_SEARCH',
-      prepared: await buildPropertySearchPrepared(trimmed),
-    };
+    const result = await handlePropertySearchFlow(trimmed, context);
+    return toImmediatePrepared(result, 'PROPERTY_SEARCH');
   }
 
   if (intent === 'COMPANY_INFO') {
@@ -248,9 +319,13 @@ const resolveStreamPlan = async (trimmed) => {
   }
 
   if (intent === 'SERVICE_INFO') {
+    const prepared = await prepareRagContext(trimmed, {
+      sourceTypes: ['service'],
+    });
+    const actions = resolveServiceActions(trimmed);
     return {
       route: 'SERVICE_INFO',
-      prepared: await prepareRagContext(trimmed, { sourceTypes: ['service'] }),
+      prepared: { ...prepared, ...actions },
     };
   }
 
@@ -302,12 +377,36 @@ const resolveStreamPlan = async (trimmed) => {
 };
 
 /**
+ * Yield optional structured SSE events after text deltas.
+ * @param {object} prepared
+ */
+function* yieldStructuredEvents(prepared) {
+  if (prepared.quick_actions) {
+    yield { event: 'quick_actions', data: prepared.quick_actions };
+  }
+  if (prepared.property_results) {
+    yield { event: 'property_results', data: prepared.property_results };
+  }
+  if (prepared.service_action) {
+    yield { event: 'service_action', data: prepared.service_action };
+  }
+  if (prepared.contact_action) {
+    yield { event: 'contact_action', data: prepared.contact_action };
+  }
+  if (prepared.context) {
+    yield { event: 'context', data: { context: prepared.context } };
+  }
+}
+
+/**
  * Non-streaming chat orchestration.
  * @param {string} message
- * @returns {Promise<{ reply: string, sources?: object[], route: string, openaiCalls: number }>}
+ * @param {{ context?: object }} [options]
+ * @returns {Promise<object>}
  */
-const handleChat = async (message) => {
+const handleChat = async (message, options = {}) => {
   const trimmed = assertValidMessage(message);
+  const context = sanitizeIncomingContext(options.context);
 
   const confidential = detectConfidentialRequest(trimmed);
   if (confidential.blocked) {
@@ -318,53 +417,59 @@ const handleChat = async (message) => {
     };
   }
 
-  const intent = classifyIntent(trimmed);
-  console.log('[AIOrchestrator] intent', { intent });
-
   try {
+    if (hasActiveSellFlow(context) && context.pendingClarification) {
+      return handleSellFlow(trimmed, context);
+    }
+    if (hasActivePropertyFlow(context) && context.pendingClarification) {
+      return handlePropertySearchFlow(trimmed, context);
+    }
+
+    const intent = classifyIntent(trimmed);
+    console.log('[AIOrchestrator] intent', { intent });
+
+    if (intent === 'GREETING') {
+      return handleGreeting();
+    }
+
     if (intent === 'PROPERTY_COUNT') {
-      const result = await handlePropertyCount(trimmed);
-      return { ...result, route: 'PROPERTY_COUNT' };
+      return handlePropertyCount(trimmed);
+    }
+
+    if (intent === 'SELL_PROPERTY') {
+      return handleSellFlow(trimmed, context);
     }
 
     if (intent === 'PROPERTY_SEARCH') {
-      const result = await handlePropertySearch(trimmed);
-      return { ...result, route: 'PROPERTY_SEARCH' };
+      return handlePropertySearchFlow(trimmed, context);
     }
 
     if (intent === 'COMPANY_INFO') {
-      const result = await handleCompany(trimmed);
-      return { ...result, route: 'COMPANY_INFO' };
+      return handleCompany(trimmed);
     }
 
     if (intent === 'SERVICE_INFO') {
-      const result = await handleKnowledgeRag(trimmed, ['service']);
-      return { ...result, route: 'SERVICE_INFO' };
+      return handleKnowledgeRag(trimmed, ['service'], 'SERVICE_INFO');
     }
 
     if (intent === 'TEAM_INFO') {
-      const result = await handleTeam(trimmed);
-      return { ...result, route: 'TEAM_INFO' };
+      return handleTeam(trimmed);
     }
 
     if (intent === 'BLOG') {
-      const result = await handleKnowledgeRag(trimmed, ['blog']);
-      return { ...result, route: 'BLOG' };
+      return handleKnowledgeRag(trimmed, ['blog'], 'BLOG');
     }
 
     if (intent === 'AREA_GUIDE') {
-      const result = await handleKnowledgeRag(trimmed, ['areaGuide']);
-      return { ...result, route: 'AREA_GUIDE' };
+      return handleKnowledgeRag(trimmed, ['areaGuide'], 'AREA_GUIDE');
     }
 
     if (intent === 'FAQ') {
-      const result = await handleKnowledgeRag(trimmed, ['faq']);
-      return { ...result, route: 'FAQ' };
+      return handleKnowledgeRag(trimmed, ['faq'], 'FAQ');
     }
 
     if (intent === 'KNOWLEDGE_BOTH') {
-      const result = await handleKnowledgeRag(trimmed, undefined);
-      return { ...result, route: 'KNOWLEDGE_BOTH' };
+      return handleKnowledgeRag(trimmed, undefined, 'KNOWLEDGE_BOTH');
     }
 
     return {
@@ -382,14 +487,16 @@ const handleChat = async (message) => {
 
 /**
  * Streaming chat orchestration.
- * Yields SSE-ready events: start → delta* → sources? → done | error
+ * Yields SSE-ready events:
+ * start → delta* → (property_results|quick_actions|service_action|contact_action|context)? → sources? → done | error
  *
  * @param {string} message
- * @param {{ signal?: AbortSignal }} [options]
+ * @param {{ signal?: AbortSignal, context?: object }} [options]
  * @returns {AsyncGenerator<{ event: string, data: object }>}
  */
 async function* handleChatStream(message, options = {}) {
   const signal = options.signal;
+  const context = sanitizeIncomingContext(options.context);
 
   const throwIfAborted = () => {
     if (signal?.aborted) {
@@ -424,13 +531,14 @@ async function* handleChatStream(message, options = {}) {
     }
 
     throwIfAborted();
-    const { route, prepared } = await resolveStreamPlan(trimmed);
+    const { route, prepared } = await resolveStreamPlan(trimmed, context);
     throwIfAborted();
 
     if (prepared.mode === 'immediate') {
       if (prepared.reply) {
         yield { event: 'delta', data: { text: prepared.reply } };
       }
+      yield* yieldStructuredEvents(prepared);
       if (Array.isArray(prepared.sources) && prepared.sources.length) {
         yield { event: 'sources', data: { sources: prepared.sources } };
       }
@@ -447,6 +555,8 @@ async function* handleChatStream(message, options = {}) {
         yield { event: 'delta', data: { text: chunk.text } };
       }
     }
+
+    yield* yieldStructuredEvents(prepared);
 
     if (Array.isArray(prepared.sources) && prepared.sources.length) {
       yield { event: 'sources', data: { sources: prepared.sources } };
@@ -479,4 +589,5 @@ module.exports = {
   getStreamTimeoutMs,
   MAX_MESSAGE_LENGTH,
   UNSUPPORTED_REPLY,
+  GREETING_REPLY,
 };

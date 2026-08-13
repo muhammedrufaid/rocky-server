@@ -2,7 +2,7 @@
  * Intent router (rules only).
  *
  * Priority (after confidential guard):
- * PROPERTY_COUNT → PROPERTY_SEARCH → COMPANY → SERVICES → TEAM
+ * GREETING → PROPERTY_COUNT → SELL_PROPERTY → PROPERTY_SEARCH → COMPANY → SERVICES → TEAM
  * → BLOG → AREA_GUIDE / FAQ / KNOWLEDGE_BOTH → UNSUPPORTED
  */
 
@@ -60,6 +60,14 @@ const PROPERTY_SEARCH_PATTERNS = [
   /\b(apartment|villa|property)\s+(?:current\s+)?price\b/i,
   /\bhow\s+much\s+(?:is|for|does)\b.{0,40}\b(apartment|villa|property)\b/i,
   /\b\d[\d\s-]*bedroom/i,
+  /\b(want\s+to|looking\s+to|i\s+want\s+to)\s+(rent|buy)\b/i,
+  /\b(rent|buy)\s+a\s+(apartment|villa|townhouse|property|penthouse)\b/i,
+];
+
+const SELL_PROPERTY_PATTERNS = [
+  /\b(i\s+want\s+to\s+sell|looking\s+to\s+sell|want\s+to\s+sell)\b/i,
+  /\bsell\s+my\s+(apartment|villa|townhouse|property|home|office|penthouse)\b/i,
+  /\b(list|listing)\s+my\s+(apartment|villa|townhouse|property|home)\b/i,
 ];
 
 const BLOG_PATTERNS = [
@@ -99,6 +107,18 @@ const KNOWLEDGE_BOTH_PATTERNS = [
 const matchesAny = (text, patterns) => patterns.some((re) => re.test(text));
 
 /**
+ * Greeting-only messages (no RAG / property / OpenAI).
+ * @param {string} text
+ */
+const isGreetingMessage = (text) => {
+  const t = String(text || '').trim();
+  if (!t || t.length > 40) return false;
+  return /^(hi|hello|hey|hi\s+there|hey\s+there|good\s+morning|good\s+afternoon|good\s+evening)([\s,!.?]*)$/i.test(
+    t
+  );
+};
+
+/**
  * @param {string} message
  * @returns {string}
  */
@@ -106,7 +126,10 @@ const classifyIntent = (message) => {
   const text = String(message || '').trim();
   if (!text) return 'UNSUPPORTED';
 
+  if (isGreetingMessage(text)) return 'GREETING';
   if (matchesAny(text, PROPERTY_COUNT_PATTERNS)) return 'PROPERTY_COUNT';
+  // Sell before property search so "sell my apartment in X" is not misrouted
+  if (matchesAny(text, SELL_PROPERTY_PATTERNS)) return 'SELL_PROPERTY';
   if (matchesAny(text, PROPERTY_SEARCH_PATTERNS)) return 'PROPERTY_SEARCH';
   if (matchesAny(text, COMPANY_PATTERNS)) return 'COMPANY_INFO';
   if (matchesAny(text, SERVICE_PATTERNS)) return 'SERVICE_INFO';
@@ -125,4 +148,5 @@ const classifyIntent = (message) => {
 
 module.exports = {
   classifyIntent,
+  isGreetingMessage,
 };

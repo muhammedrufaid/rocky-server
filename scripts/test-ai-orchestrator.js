@@ -48,10 +48,17 @@ const cases = [
   },
   {
     name: 'Property search',
-    message: 'Show me 2 bedroom apartments in Dubai Marina',
+    message: 'I want to rent a 2 bedroom apartment in Dubai Marina',
     expectRoute: 'PROPERTY_SEARCH',
     expectSources: false,
-    minOpenAI: 1,
+    exactOpenAI: 0,
+  },
+  {
+    name: 'Greeting',
+    message: 'Hi',
+    expectRoute: 'GREETING',
+    expectSources: false,
+    exactOpenAI: 0,
   },
   {
     name: 'Blog question',

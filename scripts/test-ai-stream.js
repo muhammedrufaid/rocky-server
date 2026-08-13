@@ -63,10 +63,19 @@ const cases = [
   },
   {
     name: 'Property search',
-    message: 'Show me 2 bedroom apartments in Dubai Marina',
+    message: 'I want to rent a 2 bedroom apartment in Dubai Marina',
     expectDeltas: true,
     expectSources: false,
-    expectImmediate: false,
+    expectImmediate: true,
+    expectEvents: ['property_results'],
+  },
+  {
+    name: 'Greeting',
+    message: 'Hi',
+    expectDeltas: true,
+    expectSources: false,
+    expectImmediate: true,
+    expectTextIncludes: 'Rocky AI',
   },
   {
     name: 'Property count',
@@ -262,6 +271,14 @@ const main = async () => {
         !text.includes(testCase.expectTextIncludes)
       ) {
         errors.push('reply text mismatch');
+      }
+
+      if (Array.isArray(testCase.expectEvents)) {
+        for (const ev of testCase.expectEvents) {
+          if (!events.includes(ev)) {
+            errors.push(`missing event ${ev}`);
+          }
+        }
       }
 
       const ok = errors.length === 0 && !errorEv;
