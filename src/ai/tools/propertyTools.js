@@ -7,7 +7,10 @@ const propertyDbService = require('../../services/propertyDbService');
 const { buildPropertyPublicUrl } = require('./knownLinks');
 const {
   listingTypeQuickActions,
+  propertyTypeQuickActions,
+  locationQuickActions,
   bedroomQuickActions,
+  afterResultsQuickActions,
 } = require('./quickActions');
 
 const PUBLIC_PROPERTY_FIELDS = [
@@ -240,10 +243,29 @@ const detectListingType = (message) => {
   if (!text) return null;
 
   const lower = text.toLowerCase();
-  // Exact quick-action values first
-  if (lower === 'buy' || lower === 'sale' || lower === 'for sale') return 'buy';
-  if (lower === 'rent' || lower === 'for rent') return 'rent';
-  if (lower === 'off-plan' || lower === 'off plan' || lower === 'offplan') {
+  // Exact quick-action / starter values first
+  if (
+    lower === 'buy' ||
+    lower === 'sale' ||
+    lower === 'for sale' ||
+    lower === 'buy a property'
+  ) {
+    return 'buy';
+  }
+  if (
+    lower === 'rent' ||
+    lower === 'for rent' ||
+    lower === 'rent a property'
+  ) {
+    return 'rent';
+  }
+  if (
+    lower === 'off-plan' ||
+    lower === 'off plan' ||
+    lower === 'offplan' ||
+    lower === 'off-plan properties' ||
+    lower === 'off plan properties'
+  ) {
     return 'off-plan';
   }
 
@@ -266,6 +288,77 @@ const detectListingType = (message) => {
   }
   if (/\bbuy\s+a\b/i.test(text) || /^\s*buy\b/i.test(text)) return 'buy';
 
+  return null;
+};
+
+/**
+ * Parse property-type quick action / short reply.
+ * @param {string} message
+ * @returns {string|null}
+ */
+const parsePropertyTypeSelection = (message) => {
+  const text = String(message || '').trim();
+  if (!text) return null;
+  const lower = text.toLowerCase();
+
+  const map = {
+    apartment: 'Apartment',
+    apartments: 'Apartment',
+    villa: 'Villa',
+    villas: 'Villa',
+    townhouse: 'Townhouse',
+    townhouses: 'Townhouse',
+    penthouse: 'Penthouse',
+    penthouses: 'Penthouse',
+    commercial: 'Commercial',
+  };
+  if (map[lower]) return map[lower];
+
+  for (const type of KNOWN_PROPERTY_TYPES) {
+    const re = new RegExp(`\\b${escapeRegex(type)}s?\\b`, 'i');
+    if (re.test(text)) return type;
+  }
+  if (/\bapartments?\b/i.test(text)) return 'Apartment';
+  if (/\bvillas?\b/i.test(text)) return 'Villa';
+  if (/\btownhouses?\b/i.test(text)) return 'Townhouse';
+  if (/\bpenthouses?\b/i.test(text)) return 'Penthouse';
+  if (/\bcommercial\b/i.test(text)) return 'Commercial';
+  return null;
+};
+
+/**
+ * Parse location quick action / free-text area.
+ * @param {string} message
+ * @returns {string|null}
+ */
+const parseLocationSelection = (message) => {
+  const text = String(message || '').trim();
+  if (!text) return null;
+  if (/^other\s+area$/i.test(text)) return null;
+
+  const knownAreas = [
+    'Dubai Marina',
+    'Downtown Dubai',
+    'Business Bay',
+    'Dubai South',
+    'Arabian Ranches',
+    'Palm Jumeirah',
+    'Jumeirah Village Circle',
+    'JVC',
+    'Dubai Hills',
+    'Jumeirah Lake Towers',
+    'JLT',
+    'Jebel Ali',
+  ];
+  for (const area of knownAreas) {
+    if (new RegExp(`^${escapeRegex(area)}$`, 'i').test(text)) return area;
+    if (new RegExp(`\\b${escapeRegex(area)}\\b`, 'i').test(text)) return area;
+  }
+
+  // Free-text area during location clarification (keep short)
+  if (text.length <= 60 && !/^(buy|rent|off-plan|studio|\d+)$/i.test(text)) {
+    return text;
+  }
   return null;
 };
 
@@ -436,6 +529,27 @@ const mergePropertySearchState = (message, context = null) => {
     if (bed !== null) filters.bedrooms = bed;
   }
 
+  // Property type quick-action replies
+  if (
+    context?.pendingClarification === 'propertyType' &&
+    !extracted.filters.propertyType
+  ) {
+    const type = parsePropertyTypeSelection(message);
+    if (type) filters.propertyType = type;
+  } else if (!filters.propertyType) {
+    const type = parsePropertyTypeSelection(message);
+    // Only apply short/exact type replies when already in a property flow
+    if (
+      type &&
+      (context?.flow === 'property_search' ||
+        /^(apartment|villa|townhouse|penthouse|commercial)s?$/i.test(
+          String(message || '').trim()
+        ))
+    ) {
+      filters.propertyType = type;
+    }
+  }
+
   let listingType =
     detectListingType(message) ||
     extracted.listingType ||
@@ -447,12 +561,89 @@ const mergePropertySearchState = (message, context = null) => {
     if (selected) listingType = selected;
   }
 
-  const search =
+  let search =
     (extracted.search && extracted.search.trim()) ||
     (context && typeof context.search === 'string' && context.search.trim()) ||
     '';
 
+  if (context?.pendingClarification === 'location' || context?.pendingClarification === 'otherArea') {
+    const loc = parseLocationSelection(message);
+    if (loc) search = loc;
+  } else if (!extracted.search) {
+    // Location-only quick actions while in property flow
+    const loc = parseLocationSelection(message);
+    if (
+      loc &&
+      context?.flow === 'property_search' &&
+      /^(dubai marina|downtown dubai|business bay|dubai south|arabian ranches|palm jumeirah|jvc|jlt|dubai hills|jebel ali)$/i.test(
+        String(message || '').trim()
+      )
+    ) {
+      search = loc;
+    }
+  }
+
+  // Change area / change budget intents clear the relevant field
+  const lower = String(message || '').trim().toLowerCase();
+  if (lower === 'change area') {
+    search = '';
+  }
+  if (lower === 'change budget') {
+    delete filters.priceMin;
+    delete filters.priceMax;
+  }
+  if (lower === 'change search') {
+    return {
+      filters: {},
+      search: '',
+      listingType: listingType || context?.listingType || null,
+      resetPending: true,
+    };
+  }
+
   return { filters, search, listingType };
+};
+
+/**
+ * Whether we have enough filters to run a property search without more questions.
+ * Requires listing type + location. Property type / bedrooms / budget are used when present.
+ * @param {{ listingType: string|null, filters: object, search: string }} state
+ */
+const hasEnoughToSearch = (state) => {
+  if (!state.listingType) return false;
+  if (!state.search || !String(state.search).trim()) return false;
+  // Prefer having property type for residential searches, but allow search if bedrooms given
+  if (state.filters?.propertyType) return true;
+  if (state.filters?.bedrooms !== undefined && state.filters?.bedrooms !== null) {
+    return true;
+  }
+  // listing + location alone is enough for conversion (avoid over-questioning)
+  return true;
+};
+
+/**
+ * Next missing clarification step for guided funnel.
+ * Order: listingType → propertyType → location → bedrooms (skip beds for commercial)
+ * @param {{ listingType: string|null, filters: object, search: string }} state
+ * @returns {string|null}
+ */
+const nextMissingClarification = (state) => {
+  if (!state.listingType) return 'listingType';
+  if (!state.filters?.propertyType) return 'propertyType';
+  if (!state.search || !String(state.search).trim()) return 'location';
+  const type = String(state.filters.propertyType || '');
+  const isCommercial = /commercial|office|shop|retail|warehouse|showroom|labour/i.test(
+    type
+  );
+  if (
+    !isCommercial &&
+    (state.filters.bedrooms === undefined ||
+      state.filters.bedrooms === null ||
+      state.filters.bedrooms === '')
+  ) {
+    return 'bedrooms';
+  }
+  return null;
 };
 
 /**
@@ -485,6 +676,7 @@ const toPropertyCard = (sanitized, listingType) => {
     listingType,
     url,
     image: sanitized.image || null,
+    ctaLabel: 'View Property',
   };
 
   assertNoPrivatePropertyFields(card);
@@ -562,85 +754,53 @@ const formatPropertySearchReply = (result) => {
     return 'I could not find matching public listings for those filters. Try adjusting the location, bedrooms, or listing type.';
   }
 
-  const type = result.filters?.propertyType
-    ? String(result.filters.propertyType).toLowerCase()
-    : 'propert';
-  const typeLabel =
-    type === 'propert' ? 'properties' : type.endsWith('s') ? type : `${type}s`;
-
-  const beds = result.filters?.bedrooms;
-  const bedLabel =
-    beds === '0' || beds === 0
-      ? 'studio '
-      : beds
-        ? `${beds}-bedroom `
-        : '';
-
-  const area = result.search ? ` in ${result.search}` : '';
-  const listing =
-    result.listingType === 'rent'
-      ? 'rental '
-      : result.listingType === 'off-plan'
-        ? 'off-plan '
-        : result.listingType === 'buy'
-          ? ''
-          : '';
-
-  const n = Math.min(shown, total);
-  return `I found ${n} matching ${bedLabel}${listing}${typeLabel}${area}.`;
+  const n = total > shown ? total : shown;
+  return `I found ${n} ${n === 1 ? 'property' : 'properties'} matching your requirements. Would you like to see more properties or speak with an agent?`;
 };
 
 /**
- * Conversational property search: clarify listing type / bedrooms, then structured results.
- * Does not guess buy/rent/off-plan.
- * @param {string} message
- * @param {object|null} [context]
+ * Build recent-properties summary for conversation context.
+ * @param {object[]} cards
  */
-const resolveConversationalPropertySearch = async (message, context = null) => {
-  const state = mergePropertySearchState(message, context);
-  const { filters, search, listingType } = state;
+const toRecentProperties = (cards) =>
+  (Array.isArray(cards) ? cards : []).slice(0, 5).map((p, index) => ({
+    id: p.id || null,
+    title: p.title || null,
+    url: p.url || null,
+    listingType: p.listingType || null,
+    index,
+  }));
 
-  if (!listingType) {
-    const quick_actions = listingTypeQuickActions();
-    return {
-      kind: 'clarification',
-      reply: `Sure! ${quick_actions.question}`,
-      quick_actions,
-      context: {
-        flow: 'property_search',
-        listingType: null,
-        filters,
-        search,
-        pendingClarification: 'listingType',
-      },
-      openaiCalls: 0,
-    };
-  }
+/**
+ * Clarification response helper.
+ * @param {string} reply
+ * @param {object} quick_actions
+ * @param {object} partial
+ */
+const clarificationResult = (reply, quick_actions, partial) => ({
+  kind: 'clarification',
+  reply,
+  quick_actions,
+  context: {
+    flow: 'property_search',
+    intent: 'PROPERTY_SEARCH',
+    conversionIntent: 'medium',
+    ...partial,
+  },
+  openaiCalls: 0,
+});
 
-  if (filters.bedrooms === undefined || filters.bedrooms === null || filters.bedrooms === '') {
-    // Ask bedrooms once listing type is known (unless user already provided them).
-    const quick_actions = bedroomQuickActions();
-    return {
-      kind: 'clarification',
-      reply: quick_actions.question,
-      quick_actions,
-      context: {
-        flow: 'property_search',
-        listingType,
-        filters,
-        search,
-        pendingClarification: 'bedrooms',
-      },
-      openaiCalls: 0,
-    };
-  }
-
+/**
+ * @param {object} state
+ * @param {object|null} context
+ */
+const buildResultsPayload = async (state, context = null) => {
   const result = await searchByListingType({
-    listingType,
-    filters,
-    search,
+    listingType: state.listingType,
+    filters: state.filters,
+    search: state.search,
   });
-
+  const recentProperties = toRecentProperties(result.properties);
   return {
     kind: 'results',
     reply: formatPropertySearchReply(result),
@@ -648,15 +808,159 @@ const resolveConversationalPropertySearch = async (message, context = null) => {
       properties: result.properties,
       total: result.total,
     },
+    quick_actions: afterResultsQuickActions(false),
     context: {
       flow: 'property_search',
-      listingType,
-      filters,
-      search,
+      intent: 'PROPERTY_SEARCH',
+      listingType: state.listingType,
+      filters: state.filters,
+      search: state.search,
       pendingClarification: null,
+      recentProperties,
+      selectedProperty: context?.selectedProperty || null,
+      conversionIntent: 'medium',
     },
     openaiCalls: 0,
   };
+};
+
+/**
+ * Conversational property search: only ask for missing filters, then structured results.
+ * Does not guess buy/rent/off-plan. Does not re-ask known fields.
+ * @param {string} message
+ * @param {object|null} [context]
+ */
+const resolveConversationalPropertySearch = async (message, context = null) => {
+  const lower = String(message || '').trim().toLowerCase();
+
+  // Change-area: keep filters/listing, clear location, re-ask
+  if (lower === 'change area' && context?.flow === 'property_search') {
+    const state = mergePropertySearchState(message, context);
+    const qa = locationQuickActions();
+    return clarificationResult(qa.question, qa, {
+      listingType: state.listingType,
+      filters: state.filters,
+      search: '',
+      pendingClarification: 'location',
+      recentProperties: context.recentProperties,
+      selectedProperty: context.selectedProperty,
+    });
+  }
+
+  // Change budget
+  if (lower === 'change budget' && context?.flow === 'property_search') {
+    const state = mergePropertySearchState(message, context);
+    return {
+      kind: 'clarification',
+      reply: 'What is your maximum budget in AED?',
+      context: {
+        flow: 'property_search',
+        intent: 'PROPERTY_SEARCH',
+        listingType: state.listingType,
+        filters: state.filters,
+        search: state.search,
+        pendingClarification: 'budget',
+        conversionIntent: 'medium',
+        recentProperties: context.recentProperties,
+      },
+      openaiCalls: 0,
+    };
+  }
+
+  // Change search: restart
+  if (lower === 'change search' && context?.flow === 'property_search') {
+    const qa = listingTypeQuickActions();
+    return clarificationResult(qa.question, qa, {
+      listingType: null,
+      filters: {},
+      search: '',
+      pendingClarification: 'listingType',
+    });
+  }
+
+  // Other Area → free text
+  if (
+    /^other\s+area$/i.test(String(message || '').trim()) &&
+    (context?.pendingClarification === 'location' ||
+      context?.flow === 'property_search')
+  ) {
+    return {
+      kind: 'clarification',
+      reply: 'Which area are you interested in?',
+      context: {
+        flow: 'property_search',
+        intent: 'PROPERTY_SEARCH',
+        listingType: context?.listingType || null,
+        filters: context?.filters || {},
+        search: '',
+        pendingClarification: 'otherArea',
+        conversionIntent: 'medium',
+      },
+      openaiCalls: 0,
+    };
+  }
+
+  // Budget clarification reply → search
+  if (context?.pendingClarification === 'budget') {
+    const state = mergePropertySearchState(message, context);
+    const budgetMatch = String(message || '').match(
+      /(?:aed\s*)?([\d,.]+)\s*(million|m)?/i
+    );
+    if (budgetMatch) {
+      let n = parseFloat(String(budgetMatch[1]).replace(/,/g, ''));
+      if (Number.isFinite(n)) {
+        if (budgetMatch[2]) n *= 1_000_000;
+        state.filters.priceMax = n;
+      }
+    }
+    if (state.listingType && state.search) {
+      return buildResultsPayload(state, context);
+    }
+  }
+
+  const state = mergePropertySearchState(message, context);
+  const { filters, search, listingType } = state;
+
+  // Guided funnel: ask only for the next missing field
+  const missing = nextMissingClarification(state);
+  if (missing === 'listingType') {
+    const qa = listingTypeQuickActions();
+    return clarificationResult(`Sure! ${qa.question}`, qa, {
+      listingType: null,
+      filters,
+      search,
+      pendingClarification: 'listingType',
+    });
+  }
+  if (missing === 'propertyType') {
+    const qa = propertyTypeQuickActions();
+    return clarificationResult(qa.question, qa, {
+      listingType,
+      filters,
+      search,
+      pendingClarification: 'propertyType',
+    });
+  }
+  if (missing === 'location') {
+    const qa = locationQuickActions();
+    return clarificationResult(qa.question, qa, {
+      listingType,
+      filters,
+      search: '',
+      pendingClarification: 'location',
+    });
+  }
+  if (missing === 'bedrooms') {
+    const qa = bedroomQuickActions();
+    return clarificationResult(qa.question, qa, {
+      listingType,
+      filters,
+      search,
+      pendingClarification: 'bedrooms',
+    });
+  }
+
+  return buildResultsPayload(state, context);
 };
 
 /**
@@ -724,6 +1028,9 @@ module.exports = {
   mergePropertySearchState,
   detectListingType,
   parseBedroomSelection,
+  parsePropertyTypeSelection,
+  parseLocationSelection,
+  nextMissingClarification,
   sanitizePublicProperty,
   toPropertyCard,
   searchByListingType,

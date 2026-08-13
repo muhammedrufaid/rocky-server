@@ -33,6 +33,9 @@ const pickStructuredData = (result) => {
   if (result.contact_action) {
     data.contact_action = result.contact_action;
   }
+  if (result.whatsapp_action) {
+    data.whatsapp_action = result.whatsapp_action;
+  }
 
   return data;
 };

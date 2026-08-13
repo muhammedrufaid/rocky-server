@@ -35,6 +35,7 @@ const SAFE_CARD_KEYS = new Set([
   'listingType',
   'url',
   'image',
+  'ctaLabel',
 ]);
 
 const assert = (cond, msg) => {
@@ -73,6 +74,7 @@ const main = async () => {
     assert(r.route === 'GREETING', `route=${r.route}`);
     assert(r.openaiCalls === 0, 'openaiCalls');
     assert(/Rocky AI/i.test(r.reply), 'reply');
+    assert(r.quick_actions?.options?.length >= 4, 'greeting actions');
     assert(!r.property_results, 'no property_results');
     assert(!r.sources, 'no sources');
   });

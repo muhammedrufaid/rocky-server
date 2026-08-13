@@ -1,11 +1,10 @@
 /**
- * AI chat orchestrator — clean architecture.
+ * AI chat orchestrator — conversion-first Rocky AI.
  *
- * Flow: confidential → intent → structured tools OR ragService
+ * Flow: confidential → active context → conversion → intent → tools / RAG
  * Knowledge RAG uses ONLY src/ai/ragService.js (unified ai_knowledge path).
  *
- * Streaming reuses the same retrieval/prompts; only final GPT tokens stream.
- * Structured events (property_results, quick_actions, …) are emitted after deltas.
+ * Structured events (property_results, quick_actions, …) emit after deltas.
  */
 
 const {
@@ -22,6 +21,7 @@ const {
   resolvePropertyCountContext,
   resolveConversationalPropertySearch,
   formatCountReply,
+  detectListingType,
 } = require('../tools/propertyTools');
 const { resolveTeamContext } = require('../tools/teamTools');
 const {
@@ -37,11 +37,24 @@ const {
 } = require('../tools/conversationContext');
 const { resolveServiceActions } = require('../tools/serviceActions');
 const { resolveSellPropertyTurn } = require('../tools/sellPropertyFlow');
+const {
+  resolveConversionTurn,
+  knowledgeNextActions,
+  buildGreetingResult,
+} = require('../tools/conversionFlow');
+const {
+  detectConversionAction,
+  detectHighIntent,
+} = require('../tools/highIntent');
+const {
+  knowledgeAreaQuickActions,
+  greetingQuickActions,
+} = require('../tools/quickActions');
 
 const MAX_MESSAGE_LENGTH = 1000;
 const DEFAULT_STREAM_TIMEOUT_MS = 60000;
 
-const GREETING_REPLY = "Hi! 👋 I'm Rocky AI. How can I help you today?";
+const GREETING_REPLY = "Hi 👋 I'm Rocky AI. How can I help you today?";
 
 const getStreamTimeoutMs = () => {
   const raw = process.env.AI_STREAM_TIMEOUT_MS;
@@ -56,7 +69,7 @@ const getStreamTimeoutMs = () => {
 };
 
 const UNSUPPORTED_REPLY =
-  "I don't have enough information in my current knowledge base to answer that accurately. I can help with company info, services, team, properties, blogs, area guides, and FAQs.";
+  "I don't have enough information in my current knowledge base to answer that accurately. I can help with buying, renting, off-plan, selling, services, areas, and FAQs.";
 
 const COMPANY_SYSTEM_PROMPT = `You are the Rocky Real Estate AI Assistant.
 
@@ -116,6 +129,7 @@ const assertValidMessage = (message) => {
 
 const buildCompanyPrepared = (question) => {
   const knowledge = getCompanyKnowledgeText();
+  const next = knowledgeNextActions('COMPANY_INFO');
   return {
     mode: 'gpt',
     system: COMPANY_SYSTEM_PROMPT,
@@ -126,6 +140,7 @@ ${knowledge}
 USER QUESTION:
 ${question}`,
     sources: [],
+    ...next,
   };
 };
 
@@ -142,6 +157,7 @@ ${JSON.stringify(payload, null, 2)}
 USER QUESTION:
 ${question}`,
     sources: [],
+    ...knowledgeNextActions('TEAM_INFO'),
   };
 };
 
@@ -158,6 +174,7 @@ const withStructured = (base, extra = {}) => {
     'property_results',
     'service_action',
     'contact_action',
+    'whatsapp_action',
     'sources',
   ]) {
     if (extra[key] !== undefined && extra[key] !== null) {
@@ -167,19 +184,21 @@ const withStructured = (base, extra = {}) => {
   return out;
 };
 
-const handleGreeting = () =>
-  withStructured(
-    { reply: GREETING_REPLY, openaiCalls: 0, route: 'GREETING' },
-    { context: null }
-  );
+const handleGreeting = () => buildGreetingResult();
 
 const handlePropertyCount = async (question) => {
   const counted = await resolvePropertyCountContext(question);
-  return {
-    reply: formatCountReply(counted.count, counted),
-    openaiCalls: 0,
-    route: 'PROPERTY_COUNT',
-  };
+  return withStructured(
+    {
+      reply: formatCountReply(counted.count, counted),
+      openaiCalls: 0,
+      route: 'PROPERTY_COUNT',
+    },
+    {
+      quick_actions: greetingQuickActions(),
+      context: { intent: 'PROPERTY_COUNT', conversionIntent: 'low' },
+    }
+  );
 };
 
 const handlePropertySearchFlow = async (question, context) => {
@@ -194,6 +213,8 @@ const handlePropertySearchFlow = async (question, context) => {
       context: result.context || null,
       quick_actions: result.quick_actions,
       property_results: result.property_results,
+      contact_action: result.contact_action,
+      whatsapp_action: result.whatsapp_action,
     }
   );
 };
@@ -210,6 +231,7 @@ const handleSellFlow = (question, context) => {
       context: result.context || null,
       quick_actions: result.quick_actions,
       contact_action: result.contact_action,
+      whatsapp_action: result.whatsapp_action,
     }
   );
 };
@@ -219,7 +241,14 @@ const handleCompany = async (question) => {
   const result = await generateText(prepared.userPrompt, {
     system: prepared.system,
   });
-  return { reply: result.text, openaiCalls: 1, route: 'COMPANY_INFO' };
+  return withStructured(
+    { reply: result.text, openaiCalls: 1, route: 'COMPANY_INFO' },
+    {
+      quick_actions: prepared.quick_actions,
+      contact_action: prepared.contact_action,
+      whatsapp_action: prepared.whatsapp_action,
+    }
+  );
 };
 
 const handleTeam = async (question) => {
@@ -227,7 +256,14 @@ const handleTeam = async (question) => {
   const result = await generateText(prepared.userPrompt, {
     system: prepared.system,
   });
-  return { reply: result.text, openaiCalls: 1, route: 'TEAM_INFO' };
+  return withStructured(
+    { reply: result.text, openaiCalls: 1, route: 'TEAM_INFO' },
+    {
+      quick_actions: prepared.quick_actions,
+      contact_action: prepared.contact_action,
+      whatsapp_action: prepared.whatsapp_action,
+    }
+  );
 };
 
 /**
@@ -253,7 +289,53 @@ const handleKnowledgeRag = async (question, sourceTypes, route) => {
   if (route === 'SERVICE_INFO') {
     return withStructured(base, resolveServiceActions(question));
   }
-  return base;
+
+  return withStructured(base, knowledgeNextActions(route));
+};
+
+/**
+ * Map starter phrases that should enter property/sell/service flows.
+ * @param {string} trimmed
+ * @param {object|null} context
+ */
+const tryStarterRoute = async (trimmed, context) => {
+  const lower = trimmed.toLowerCase();
+
+  if (lower === 'sell my property' || lower === 'sell property') {
+    return handleSellFlow(trimmed, context);
+  }
+  if (lower === 'property management') {
+    return handleKnowledgeRag(trimmed, ['service'], 'SERVICE_INFO');
+  }
+  if (lower === 'brokerage') {
+    return handleKnowledgeRag(trimmed, ['service'], 'SERVICE_INFO');
+  }
+  if (
+    lower === 'property listing & marketing' ||
+    lower === 'property listing and marketing'
+  ) {
+    return handleKnowledgeRag(
+      'Tell me about property listing and marketing',
+      ['service'],
+      'SERVICE_INFO'
+    );
+  }
+  if (lower === 'explore dubai areas' || lower === 'view properties') {
+    if (lower === 'explore dubai areas') {
+      return handleKnowledgeRag(
+        'What are the best areas in Dubai?',
+        ['areaGuide'],
+        'AREA_GUIDE'
+      );
+    }
+    return handlePropertySearchFlow('Buy a Property', context);
+  }
+
+  if (detectListingType(trimmed)) {
+    return handlePropertySearchFlow(trimmed, context);
+  }
+
+  return null;
 };
 
 /**
@@ -262,7 +344,7 @@ const handleKnowledgeRag = async (question, sourceTypes, route) => {
  * @param {string} route
  */
 const toImmediatePrepared = (result, route) => ({
-  route,
+  route: result.route || route,
   prepared: {
     mode: 'immediate',
     reply: result.reply,
@@ -272,8 +354,138 @@ const toImmediatePrepared = (result, route) => ({
     property_results: result.property_results,
     service_action: result.service_action,
     contact_action: result.contact_action,
+    whatsapp_action: result.whatsapp_action,
   },
 });
+
+/**
+ * Core routing shared by chat + stream.
+ * @param {string} trimmed
+ * @param {object|null} context
+ */
+const resolveChatResult = async (trimmed, context = null) => {
+  // Active multi-turn flows
+  if (hasActiveSellFlow(context) && context.pendingClarification) {
+    return handleSellFlow(trimmed, context);
+  }
+
+  // Conversion / high-intent before property clarification when user clearly converts
+  const conversionAction = detectConversionAction(trimmed);
+  const highIntent = detectHighIntent(trimmed);
+  if (
+    conversionAction === 'whatsapp' ||
+    conversionAction === 'agent' ||
+    conversionAction === 'viewing' ||
+    (highIntent &&
+      (context?.recentProperties?.length || context?.selectedProperty))
+  ) {
+    const conversion = resolveConversionTurn(trimmed, context);
+    if (conversion) return conversion;
+  }
+
+  // Change search / area / budget / view more stay in property flow
+  if (
+    hasActivePropertyFlow(context) &&
+    (context.pendingClarification ||
+      conversionAction === 'view_more' ||
+      conversionAction === 'change_search' ||
+      conversionAction === 'change_area' ||
+      conversionAction === 'change_budget' ||
+      detectListingType(trimmed) ||
+      context.pendingClarification)
+  ) {
+    if (conversionAction === 'view_more' && context.listingType && context.search) {
+      return handlePropertySearchFlow(
+        // Re-run with same criteria by sending a synthetic complete message path
+        `${context.listingType} ${context.filters?.propertyType || ''} ${context.filters?.bedrooms || ''} bedroom in ${context.search}`.trim(),
+        {
+          ...context,
+          pendingClarification: null,
+        }
+      );
+    }
+    if (
+      context.pendingClarification ||
+      conversionAction === 'change_search' ||
+      conversionAction === 'change_area' ||
+      conversionAction === 'change_budget'
+    ) {
+      return handlePropertySearchFlow(trimmed, context);
+    }
+  }
+
+  if (hasActivePropertyFlow(context) && context.pendingClarification) {
+    return handlePropertySearchFlow(trimmed, context);
+  }
+
+  const starter = await tryStarterRoute(trimmed, context);
+  if (starter) return starter;
+
+  const intent = classifyIntent(trimmed);
+  console.log('[AIOrchestrator] intent', { intent });
+
+  if (intent === 'GREETING') {
+    return handleGreeting();
+  }
+
+  if (intent === 'CONVERSION') {
+    const conversion = resolveConversionTurn(trimmed, context);
+    if (conversion) return conversion;
+    // Fallback: open agent CTA
+    return resolveConversionTurn('Talk to an Agent', context);
+  }
+
+  if (intent === 'PROPERTY_COUNT') {
+    return handlePropertyCount(trimmed);
+  }
+
+  if (intent === 'SELL_PROPERTY') {
+    return handleSellFlow(trimmed, context);
+  }
+
+  if (intent === 'PROPERTY_SEARCH') {
+    return handlePropertySearchFlow(trimmed, context);
+  }
+
+  if (intent === 'COMPANY_INFO') {
+    return handleCompany(trimmed);
+  }
+
+  if (intent === 'SERVICE_INFO') {
+    return handleKnowledgeRag(trimmed, ['service'], 'SERVICE_INFO');
+  }
+
+  if (intent === 'TEAM_INFO') {
+    return handleTeam(trimmed);
+  }
+
+  if (intent === 'BLOG') {
+    return handleKnowledgeRag(trimmed, ['blog'], 'BLOG');
+  }
+
+  if (intent === 'AREA_GUIDE') {
+    return handleKnowledgeRag(trimmed, ['areaGuide'], 'AREA_GUIDE');
+  }
+
+  if (intent === 'FAQ') {
+    return handleKnowledgeRag(trimmed, ['faq'], 'FAQ');
+  }
+
+  if (intent === 'KNOWLEDGE_BOTH') {
+    return handleKnowledgeRag(trimmed, undefined, 'KNOWLEDGE_BOTH');
+  }
+
+  return withStructured(
+    {
+      reply: UNSUPPORTED_REPLY,
+      route: 'UNSUPPORTED',
+      openaiCalls: 0,
+    },
+    {
+      quick_actions: greetingQuickActions(),
+    }
+  );
+};
 
 /**
  * Resolve retrieval/prompt plan without GPT (for streaming).
@@ -281,13 +493,67 @@ const toImmediatePrepared = (result, route) => ({
  * @param {object|null} context
  */
 const resolveStreamPlan = async (trimmed, context = null) => {
-  // Active multi-turn flows take priority over fresh intent classification
+  // GPT routes still need prepared prompts
   if (hasActiveSellFlow(context) && context.pendingClarification) {
     return toImmediatePrepared(handleSellFlow(trimmed, context), 'SELL_PROPERTY');
   }
+
+  const conversionAction = detectConversionAction(trimmed);
+  const highIntent = detectHighIntent(trimmed);
+  if (
+    conversionAction === 'whatsapp' ||
+    conversionAction === 'agent' ||
+    conversionAction === 'viewing' ||
+    (highIntent &&
+      (context?.recentProperties?.length || context?.selectedProperty))
+  ) {
+    const conversion = resolveConversionTurn(trimmed, context);
+    if (conversion) return toImmediatePrepared(conversion, 'CONVERSION');
+  }
+
   if (hasActivePropertyFlow(context) && context.pendingClarification) {
     const result = await handlePropertySearchFlow(trimmed, context);
     return toImmediatePrepared(result, 'PROPERTY_SEARCH');
+  }
+
+  const starter = await tryStarterRoute(trimmed, context);
+  if (starter) {
+    // Starter may be RAG (service) — if it has openai path via handleKnowledgeRag it's already resolved text
+    // handleKnowledgeRag is async and returns final reply — treat as immediate for stream of final text
+    // For SERVICE_INFO from starter we already called RAG (non-stream). Prefer re-prepare for stream.
+    const lower = trimmed.toLowerCase();
+    if (
+      lower === 'property management' ||
+      lower === 'brokerage' ||
+      lower === 'property listing & marketing' ||
+      lower === 'property listing and marketing'
+    ) {
+      const prepared = await prepareRagContext(
+        lower.includes('listing')
+          ? 'Tell me about property listing and marketing'
+          : trimmed,
+        { sourceTypes: ['service'] }
+      );
+      const actions = resolveServiceActions(
+        lower.includes('listing')
+          ? 'property listing and marketing'
+          : trimmed
+      );
+      return {
+        route: 'SERVICE_INFO',
+        prepared: { ...prepared, ...actions },
+      };
+    }
+    if (lower === 'explore dubai areas') {
+      const prepared = await prepareRagContext('What are the best areas in Dubai?', {
+        sourceTypes: ['areaGuide'],
+      });
+      return {
+        route: 'AREA_GUIDE',
+        prepared: { ...prepared, ...knowledgeNextActions('AREA_GUIDE') },
+      };
+    }
+    return toImmediatePrepared(starter, starter.route || 'PROPERTY_SEARCH');
   }
 
   const intent = classifyIntent(trimmed);
@@ -297,9 +563,15 @@ const resolveStreamPlan = async (trimmed, context = null) => {
     return toImmediatePrepared(handleGreeting(), 'GREETING');
   }
 
+  if (intent === 'CONVERSION') {
+    const conversion =
+      resolveConversionTurn(trimmed, context) ||
+      resolveConversionTurn('Talk to an Agent', context);
+    return toImmediatePrepared(conversion, 'CONVERSION');
+  }
+
   if (intent === 'PROPERTY_COUNT') {
-    const result = await handlePropertyCount(trimmed);
-    return toImmediatePrepared(result, 'PROPERTY_COUNT');
+    return toImmediatePrepared(await handlePropertyCount(trimmed), 'PROPERTY_COUNT');
   }
 
   if (intent === 'SELL_PROPERTY') {
@@ -307,8 +579,10 @@ const resolveStreamPlan = async (trimmed, context = null) => {
   }
 
   if (intent === 'PROPERTY_SEARCH') {
-    const result = await handlePropertySearchFlow(trimmed, context);
-    return toImmediatePrepared(result, 'PROPERTY_SEARCH');
+    return toImmediatePrepared(
+      await handlePropertySearchFlow(trimmed, context),
+      'PROPERTY_SEARCH'
+    );
   }
 
   if (intent === 'COMPANY_INFO') {
@@ -337,43 +611,50 @@ const resolveStreamPlan = async (trimmed, context = null) => {
   }
 
   if (intent === 'BLOG') {
+    const prepared = await prepareRagContext(trimmed, { sourceTypes: ['blog'] });
     return {
       route: 'BLOG',
-      prepared: await prepareRagContext(trimmed, { sourceTypes: ['blog'] }),
+      prepared: { ...prepared, ...knowledgeNextActions('BLOG') },
     };
   }
 
   if (intent === 'AREA_GUIDE') {
+    const prepared = await prepareRagContext(trimmed, {
+      sourceTypes: ['areaGuide'],
+    });
     return {
       route: 'AREA_GUIDE',
-      prepared: await prepareRagContext(trimmed, {
-        sourceTypes: ['areaGuide'],
-      }),
+      prepared: {
+        ...prepared,
+        ...knowledgeNextActions('AREA_GUIDE'),
+        quick_actions: knowledgeAreaQuickActions(),
+      },
     };
   }
 
   if (intent === 'FAQ') {
+    const prepared = await prepareRagContext(trimmed, { sourceTypes: ['faq'] });
     return {
       route: 'FAQ',
-      prepared: await prepareRagContext(trimmed, { sourceTypes: ['faq'] }),
+      prepared: { ...prepared, ...knowledgeNextActions('FAQ') },
     };
   }
 
   if (intent === 'KNOWLEDGE_BOTH') {
+    const prepared = await prepareRagContext(trimmed, {});
     return {
       route: 'KNOWLEDGE_BOTH',
-      prepared: await prepareRagContext(trimmed, {}),
+      prepared: { ...prepared, ...knowledgeNextActions('KNOWLEDGE_BOTH') },
     };
   }
 
-  return {
-    route: 'UNSUPPORTED',
-    prepared: {
-      mode: 'immediate',
-      reply: UNSUPPORTED_REPLY,
-      sources: [],
-    },
-  };
+  return toImmediatePrepared(
+    withStructured(
+      { reply: UNSUPPORTED_REPLY, openaiCalls: 0, route: 'UNSUPPORTED' },
+      { quick_actions: greetingQuickActions() }
+    ),
+    'UNSUPPORTED'
+  );
 };
 
 /**
@@ -392,6 +673,9 @@ function* yieldStructuredEvents(prepared) {
   }
   if (prepared.contact_action) {
     yield { event: 'contact_action', data: prepared.contact_action };
+  }
+  if (prepared.whatsapp_action) {
+    yield { event: 'whatsapp_action', data: prepared.whatsapp_action };
   }
   if (prepared.context) {
     yield { event: 'context', data: { context: prepared.context } };
@@ -418,65 +702,7 @@ const handleChat = async (message, options = {}) => {
   }
 
   try {
-    if (hasActiveSellFlow(context) && context.pendingClarification) {
-      return handleSellFlow(trimmed, context);
-    }
-    if (hasActivePropertyFlow(context) && context.pendingClarification) {
-      return handlePropertySearchFlow(trimmed, context);
-    }
-
-    const intent = classifyIntent(trimmed);
-    console.log('[AIOrchestrator] intent', { intent });
-
-    if (intent === 'GREETING') {
-      return handleGreeting();
-    }
-
-    if (intent === 'PROPERTY_COUNT') {
-      return handlePropertyCount(trimmed);
-    }
-
-    if (intent === 'SELL_PROPERTY') {
-      return handleSellFlow(trimmed, context);
-    }
-
-    if (intent === 'PROPERTY_SEARCH') {
-      return handlePropertySearchFlow(trimmed, context);
-    }
-
-    if (intent === 'COMPANY_INFO') {
-      return handleCompany(trimmed);
-    }
-
-    if (intent === 'SERVICE_INFO') {
-      return handleKnowledgeRag(trimmed, ['service'], 'SERVICE_INFO');
-    }
-
-    if (intent === 'TEAM_INFO') {
-      return handleTeam(trimmed);
-    }
-
-    if (intent === 'BLOG') {
-      return handleKnowledgeRag(trimmed, ['blog'], 'BLOG');
-    }
-
-    if (intent === 'AREA_GUIDE') {
-      return handleKnowledgeRag(trimmed, ['areaGuide'], 'AREA_GUIDE');
-    }
-
-    if (intent === 'FAQ') {
-      return handleKnowledgeRag(trimmed, ['faq'], 'FAQ');
-    }
-
-    if (intent === 'KNOWLEDGE_BOTH') {
-      return handleKnowledgeRag(trimmed, undefined, 'KNOWLEDGE_BOTH');
-    }
-
-    return {
-      reply: UNSUPPORTED_REPLY,
-      route: 'UNSUPPORTED',
-      openaiCalls: 0,
-    };
+    return await resolveChatResult(trimmed, context);
   } catch (error) {
     if (error instanceof OpenAIServiceError || error instanceof RagServiceError) {
       throw error;
@@ -487,9 +713,6 @@ const handleChat = async (message, options = {}) => {
 
 /**
  * Streaming chat orchestration.
- * Yields SSE-ready events:
- * start → delta* → (property_results|quick_actions|service_action|contact_action|context)? → sources? → done | error
- *
  * @param {string} message
  * @param {{ signal?: AbortSignal, context?: object }} [options]
  * @returns {AsyncGenerator<{ event: string, data: object }>}

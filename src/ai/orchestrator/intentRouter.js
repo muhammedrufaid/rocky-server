@@ -1,9 +1,9 @@
 /**
  * Intent router (rules only).
  *
- * Priority (after confidential guard):
- * GREETING → PROPERTY_COUNT → SELL_PROPERTY → PROPERTY_SEARCH → COMPANY → SERVICES → TEAM
- * → BLOG → AREA_GUIDE / FAQ / KNOWLEDGE_BOTH → UNSUPPORTED
+ * Priority (after confidential guard / active flows):
+ * GREETING → CONVERSION → PROPERTY_COUNT → SELL_PROPERTY → PROPERTY_SEARCH
+ * → COMPANY → SERVICES → TEAM → BLOG → AREA_GUIDE / FAQ / KNOWLEDGE_BOTH → UNSUPPORTED
  */
 
 const COMPANY_PATTERNS = [
@@ -62,12 +62,36 @@ const PROPERTY_SEARCH_PATTERNS = [
   /\b\d[\d\s-]*bedroom/i,
   /\b(want\s+to|looking\s+to|i\s+want\s+to)\s+(rent|buy)\b/i,
   /\b(rent|buy)\s+a\s+(apartment|villa|townhouse|property|penthouse)\b/i,
+  /^(buy|rent|off[\s-]?plan)(\s+a\s+property|\s+properties)?$/i,
+  /^buy\s+a\s+property$/i,
+  /^rent\s+a\s+property$/i,
+  /^off[\s-]?plan(\s+properties)?$/i,
+  /\bview\s+(more\s+)?propert/i,
+  /\bchange\s+(search|area|budget)\b/i,
 ];
 
 const SELL_PROPERTY_PATTERNS = [
   /\b(i\s+want\s+to\s+sell|looking\s+to\s+sell|want\s+to\s+sell)\b/i,
   /\bsell\s+my\s+(apartment|villa|townhouse|property|home|office|penthouse)\b/i,
   /\b(list|listing)\s+my\s+(apartment|villa|townhouse|property|home)\b/i,
+  /^sell\s+my\s+property$/i,
+];
+
+const CONVERSION_PATTERNS = [
+  /\btalk\s+to\s+(an\s+)?agent\b/i,
+  /\bspeak\s+(to|with)\s+(an\s+)?agent\b/i,
+  /\bwhatsapp\s+rocky\b/i,
+  /\bschedule\s+a\s+viewing\b/i,
+  /\bi\s+like\s+the\s+(first|second|third|fourth|fifth|\d+)/i,
+  /\bi\s+like\s+(this|that)\s+propert/i,
+  /\bcan\s+i\s+view\s+(this|it|that)\b/i,
+  /\bcan\s+i\s+book\s+a\s+viewing\b/i,
+  /\bis\s+(it|this)\s+(still\s+)?available\b/i,
+  /\bi\s+need\s+an\s+agent\b/i,
+  /\bcan\s+someone\s+contact\s+me\b/i,
+  /\bcan\s+i\s+speak\s+to\s+someone\b/i,
+  /^contact\s+rocky$/i,
+  /^contact\s+property\s+management$/i,
 ];
 
 const BLOG_PATTERNS = [
@@ -77,6 +101,7 @@ const BLOG_PATTERNS = [
   /\bflexi\s*rent\b/i,
   /\bfreehold\s+vs\s+leasehold\b/i,
   /\b(difference\s+between\s+)?freehold\s+and\s+leasehold\b/i,
+  /\bwhat\s+is\s+freehold\b/i,
 ];
 
 const AREA_GUIDE_PATTERNS = [
@@ -86,6 +111,8 @@ const AREA_GUIDE_PATTERNS = [
   /\barea\s+guide\b/i,
   /\bbest\s+areas?\s+to\s+(live|buy|invest)\b/i,
   /\bareas?\s+(good|best)\s+for\s+(investment|living|families)\b/i,
+  /\bbest\s+areas?\s+in\s+dubai\b/i,
+  /\bexplore\s+dubai\s+areas\b/i,
 ];
 
 const FAQ_PATTERNS = [
@@ -96,6 +123,8 @@ const FAQ_PATTERNS = [
   /\bwhat\s+are\s+the\s+costs?\s+involved\b/i,
   /\bhow\s+long\s+does\s+the\s+buying\s+process\b/i,
   /\bcommon\s+questions?\b/i,
+  /\b(how\s+much\s+)?deposit\b/i,
+  /\bdown\s+payment\b/i,
 ];
 
 const KNOWLEDGE_BOTH_PATTERNS = [
@@ -107,13 +136,13 @@ const KNOWLEDGE_BOTH_PATTERNS = [
 const matchesAny = (text, patterns) => patterns.some((re) => re.test(text));
 
 /**
- * Greeting-only messages (no RAG / property / OpenAI).
+ * Greeting / casual openers (no RAG / property / OpenAI).
  * @param {string} text
  */
 const isGreetingMessage = (text) => {
   const t = String(text || '').trim();
-  if (!t || t.length > 40) return false;
-  return /^(hi|hello|hey|hi\s+there|hey\s+there|good\s+morning|good\s+afternoon|good\s+evening)([\s,!.?]*)$/i.test(
+  if (!t || t.length > 48) return false;
+  return /^(hi|hello|hey|hi\s+there|hey\s+there|good\s+morning|good\s+afternoon|good\s+evening|how\s+are\s+you|how's\s+it\s+going|how\s+are\s+you\s+doing)([\s,!.?]*)$/i.test(
     t
   );
 };
@@ -127,6 +156,7 @@ const classifyIntent = (message) => {
   if (!text) return 'UNSUPPORTED';
 
   if (isGreetingMessage(text)) return 'GREETING';
+  if (matchesAny(text, CONVERSION_PATTERNS)) return 'CONVERSION';
   if (matchesAny(text, PROPERTY_COUNT_PATTERNS)) return 'PROPERTY_COUNT';
   // Sell before property search so "sell my apartment in X" is not misrouted
   if (matchesAny(text, SELL_PROPERTY_PATTERNS)) return 'SELL_PROPERTY';

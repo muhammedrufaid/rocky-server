@@ -1,7 +1,6 @@
 /**
- * Minimal client-echoed conversation context for multi-turn property/sell flows.
+ * Minimal client-echoed conversation context for conversion-first multi-turn flows.
  * Stateless: server never persists this — client resends on the next request.
- * Treat as untrusted hints; always re-sanitize filter keys.
  */
 
 const APPROVED_FILTER_KEYS = [
@@ -22,15 +21,25 @@ const APPROVED_FILTER_KEYS = [
 ];
 
 const LISTING_TYPES = new Set(['buy', 'rent', 'off-plan']);
-const FLOWS = new Set(['property_search', 'sell_property']);
+const FLOWS = new Set([
+  'property_search',
+  'sell_property',
+  'service',
+  'conversion',
+]);
 const PENDING = new Set([
   'listingType',
+  'propertyType',
+  'location',
   'bedrooms',
+  'budget',
   'sellPropertyType',
   'sellLocation',
   'sellBuilding',
   'sellPrice',
+  'otherArea',
 ]);
+const CONVERSION_LEVELS = new Set(['low', 'medium', 'high', 'very_high']);
 
 const pickSafeFilters = (filters) => {
   if (!filters || typeof filters !== 'object') return {};
@@ -41,6 +50,35 @@ const pickSafeFilters = (filters) => {
     }
   }
   return out;
+};
+
+const sanitizeRecentProperties = (list) => {
+  if (!Array.isArray(list)) return [];
+  return list
+    .slice(0, 5)
+    .map((p, index) => {
+      if (!p || typeof p !== 'object') return null;
+      return {
+        id: typeof p.id === 'string' ? p.id.slice(0, 80) : null,
+        title: typeof p.title === 'string' ? p.title.slice(0, 200) : null,
+        url: typeof p.url === 'string' ? p.url.slice(0, 300) : null,
+        listingType: LISTING_TYPES.has(p.listingType) ? p.listingType : null,
+        index: typeof p.index === 'number' ? p.index : index,
+      };
+    })
+    .filter((p) => p && p.id);
+};
+
+const sanitizeSelectedProperty = (raw) => {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = typeof raw.id === 'string' ? raw.id.slice(0, 80) : null;
+  if (!id) return null;
+  return {
+    id,
+    title: typeof raw.title === 'string' ? raw.title.slice(0, 200) : null,
+    url: typeof raw.url === 'string' ? raw.url.slice(0, 300) : null,
+    listingType: LISTING_TYPES.has(raw.listingType) ? raw.listingType : null,
+  };
 };
 
 /**
@@ -55,6 +93,10 @@ const sanitizeIncomingContext = (raw) => {
 
   if (FLOWS.has(raw.flow)) {
     out.flow = raw.flow;
+  }
+
+  if (typeof raw.intent === 'string' && raw.intent.trim()) {
+    out.intent = raw.intent.trim().slice(0, 64);
   }
 
   if (LISTING_TYPES.has(raw.listingType)) {
@@ -72,6 +114,16 @@ const sanitizeIncomingContext = (raw) => {
   if (PENDING.has(raw.pendingClarification)) {
     out.pendingClarification = raw.pendingClarification;
   }
+
+  if (CONVERSION_LEVELS.has(raw.conversionIntent)) {
+    out.conversionIntent = raw.conversionIntent;
+  }
+
+  const recent = sanitizeRecentProperties(raw.recentProperties);
+  if (recent.length) out.recentProperties = recent;
+
+  const selected = sanitizeSelectedProperty(raw.selectedProperty);
+  if (selected) out.selectedProperty = selected;
 
   if (raw.sellDraft && typeof raw.sellDraft === 'object') {
     const draft = {};
@@ -99,7 +151,8 @@ const hasActivePropertyFlow = (context) =>
       (context.pendingClarification ||
         context.listingType ||
         (context.filters && Object.keys(context.filters).length) ||
-        context.search)
+        context.search ||
+        (Array.isArray(context.recentProperties) && context.recentProperties.length))
   );
 
 /**
@@ -114,4 +167,5 @@ module.exports = {
   hasActivePropertyFlow,
   hasActiveSellFlow,
   LISTING_TYPES,
+  APPROVED_FILTER_KEYS,
 };
