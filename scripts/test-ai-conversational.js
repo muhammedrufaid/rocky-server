@@ -201,8 +201,9 @@ const main = async () => {
     // Missing bedrooms → clarification, OR results if we skip — expect bedrooms ask
     assert(
       r.quick_actions?.options?.some((o) => o.value === '2') ||
-        r.property_results,
-      'bedrooms ask or results'
+        r.property_results ||
+        r.context?.pendingClarification === 'budget',
+      'bedrooms ask or results or budget'
     );
     assert(r.context?.listingType === 'buy', 'listing buy');
     assert(r.context?.filters?.propertyType === 'Villa', 'Villa ctx');

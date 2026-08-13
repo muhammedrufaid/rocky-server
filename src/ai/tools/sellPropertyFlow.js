@@ -122,7 +122,7 @@ const resolveSellPropertyTurn = (message, context = null) => {
       quick_actions: sellDoneQuickActions(),
       contact_action: {
         type: 'contact_action',
-        label: 'Contact Rocky',
+        label: 'Talk to Rocky',
         service: 'sell',
       },
       ...(whatsapp_action ? { whatsapp_action } : {}),

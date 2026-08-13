@@ -6,23 +6,30 @@
 /**
  * @param {string} question
  * @param {{ label: string, value: string }[]} options
+ * @param {{ multiSelect?: boolean }} [meta]
  */
-const buildQuickActions = (question, options) => ({
-  type: 'quick_actions',
-  question: String(question || '').trim(),
-  options: (Array.isArray(options) ? options : [])
-    .filter((o) => o && o.label && o.value)
-    .slice(0, 5)
-    .map((o) => ({
-      label: String(o.label),
-      value: String(o.value),
-    })),
-});
+const buildQuickActions = (question, options, meta = {}) => {
+  const payload = {
+    type: 'quick_actions',
+    question: String(question || '').trim(),
+    options: (Array.isArray(options) ? options : [])
+      .filter((o) => o && o.label && o.value)
+      .slice(0, 6)
+      .map((o) => ({
+        label: String(o.label),
+        value: String(o.value),
+      })),
+  };
+  if (meta.multiSelect) {
+    payload.multiSelect = true;
+  }
+  return payload;
+};
 
 const GREETING_OPTIONS = [
   { label: 'Buy a Property', value: 'Buy a Property' },
   { label: 'Rent a Property', value: 'Rent a Property' },
-  { label: 'Off-Plan Properties', value: 'Off-Plan Properties' },
+  { label: 'Off-Plan', value: 'Off-Plan' },
   { label: 'Sell My Property', value: 'Sell My Property' },
   { label: 'Property Management', value: 'Property Management' },
 ];
@@ -33,11 +40,15 @@ const LISTING_TYPE_OPTIONS = [
   { label: 'Off-plan', value: 'off-plan' },
 ];
 
-const BUY_PROPERTY_TYPE_OPTIONS = [
+const PROPERTY_TYPE_OPTIONS_CORE = [
   { label: 'Apartment', value: 'Apartment' },
   { label: 'Villa', value: 'Villa' },
   { label: 'Townhouse', value: 'Townhouse' },
   { label: 'Penthouse', value: 'Penthouse' },
+];
+
+const PROPERTY_TYPE_OPTIONS_WITH_COMMERCIAL = [
+  ...PROPERTY_TYPE_OPTIONS_CORE,
   { label: 'Commercial', value: 'Commercial' },
 ];
 
@@ -46,14 +57,17 @@ const LOCATION_OPTIONS = [
   { label: 'Downtown Dubai', value: 'Downtown Dubai' },
   { label: 'Business Bay', value: 'Business Bay' },
   { label: 'Dubai South', value: 'Dubai South' },
+  { label: 'Jumeirah', value: 'Jumeirah' },
   { label: 'Other Area', value: 'Other Area' },
 ];
 
 const BEDROOM_OPTIONS = [
   { label: 'Studio', value: 'studio' },
-  { label: '1 Bedroom', value: '1' },
-  { label: '2 Bedrooms', value: '2' },
-  { label: '3+ Bedrooms', value: '3+' },
+  { label: '1', value: '1' },
+  { label: '2', value: '2' },
+  { label: '3', value: '3' },
+  { label: '4+', value: '4+' },
+  { label: 'Any', value: 'any' },
 ];
 
 const PROPERTY_TYPE_OPTIONS = [
@@ -63,17 +77,42 @@ const PROPERTY_TYPE_OPTIONS = [
   { label: 'Commercial', value: 'Commercial' },
 ];
 
-const AFTER_RESULTS_OPTIONS = [
-  { label: 'View More Properties', value: 'View More Properties' },
-  { label: 'Change Search', value: 'Change Search' },
-  { label: 'Talk to an Agent', value: 'Talk to an Agent' },
+const BUY_BUDGET_OPTIONS = [
+  { label: 'Under AED 1M', value: 'budget:buy:under_1m' },
+  { label: 'AED 1M–2M', value: 'budget:buy:1m_2m' },
+  { label: 'AED 2M–5M', value: 'budget:buy:2m_5m' },
+  { label: 'AED 5M+', value: 'budget:buy:5m_plus' },
+  { label: 'Flexible', value: 'budget:flexible' },
 ];
 
-const AFTER_RESULTS_HIGH_OPTIONS = [
-  { label: 'Talk to an Agent', value: 'Talk to an Agent' },
-  { label: 'WhatsApp Rocky', value: 'WhatsApp Rocky' },
-  { label: 'Schedule a Viewing', value: 'Schedule a Viewing' },
+const RENT_BUDGET_OPTIONS = [
+  { label: 'Under AED 80K', value: 'budget:rent:under_80k' },
+  { label: 'AED 80K–120K', value: 'budget:rent:80k_120k' },
+  { label: 'AED 120K–200K', value: 'budget:rent:120k_200k' },
+  { label: 'AED 200K+', value: 'budget:rent:200k_plus' },
+  { label: 'Flexible', value: 'budget:flexible' },
+];
+
+const OFFPLAN_BUDGET_OPTIONS = [
+  { label: 'Under AED 1M', value: 'budget:offplan:under_1m' },
+  { label: 'AED 1M–2M', value: 'budget:offplan:1m_2m' },
+  { label: 'AED 2M–5M', value: 'budget:offplan:2m_5m' },
+  { label: 'AED 5M+', value: 'budget:offplan:5m_plus' },
+  { label: 'Flexible', value: 'budget:flexible' },
+];
+
+const AFTER_RESULTS_OPTIONS = [
   { label: 'View More Properties', value: 'View More Properties' },
+  { label: 'Refine Budget', value: 'Refine Budget' },
+  { label: 'Change Area', value: 'Change Area' },
+  { label: 'Change Search', value: 'Change Search' },
+];
+
+const PROPERTY_SELECTED_OPTIONS = [
+  { label: 'View Property', value: 'View Property' },
+  { label: 'Talk to an Agent', value: 'Talk to an Agent' },
+  { label: 'Schedule a Viewing', value: 'Schedule a Viewing' },
+  { label: 'WhatsApp Rocky', value: 'WhatsApp Rocky' },
 ];
 
 const HIGH_INTENT_OPTIONS = [
@@ -94,20 +133,24 @@ const SERVICE_PM_OPTIONS = [
 ];
 
 const SELL_DONE_OPTIONS = [
-  { label: 'Contact Rocky', value: 'Contact Rocky' },
+  { label: 'Sell My Property', value: 'Sell My Property' },
+  { label: 'Talk to Rocky', value: 'Talk to Rocky' },
   { label: 'WhatsApp Rocky', value: 'WhatsApp Rocky' },
 ];
 
 const KNOWLEDGE_AREA_OPTIONS = [
-  { label: 'Explore Dubai Areas', value: 'Explore Dubai Areas' },
-  { label: 'View Properties', value: 'View Properties' },
-  { label: 'Talk to an Agent', value: 'Talk to an Agent' },
+  { label: 'Explore Areas', value: 'Explore Dubai Areas' },
+  { label: 'Find Properties', value: 'View Properties' },
 ];
 
 const KNOWLEDGE_GENERAL_OPTIONS = [
-  { label: 'View Properties', value: 'View Properties' },
+  { label: 'Find Properties', value: 'View Properties' },
+  { label: 'Explore Areas', value: 'Explore Dubai Areas' },
+];
+
+const KNOWLEDGE_INVEST_OPTIONS = [
+  { label: 'Explore Investment Properties', value: 'View Properties' },
   { label: 'Talk to an Agent', value: 'Talk to an Agent' },
-  { label: 'WhatsApp Rocky', value: 'WhatsApp Rocky' },
 ];
 
 const YES_NO_OPTIONS = [
@@ -124,29 +167,53 @@ const listingTypeQuickActions = () =>
     LISTING_TYPE_OPTIONS
   );
 
-const propertyTypeQuickActions = () =>
-  buildQuickActions('What type of property are you looking for?', BUY_PROPERTY_TYPE_OPTIONS);
+const propertyTypeQuickActions = (includeCommercial = true) =>
+  buildQuickActions(
+    'What type of property are you looking for?',
+    includeCommercial
+      ? PROPERTY_TYPE_OPTIONS_WITH_COMMERCIAL
+      : PROPERTY_TYPE_OPTIONS_CORE
+  );
 
 const locationQuickActions = () =>
-  buildQuickActions('Which area are you interested in?', LOCATION_OPTIONS);
+  buildQuickActions('Which area are you interested in?', LOCATION_OPTIONS, {
+    multiSelect: true,
+  });
 
 const bedroomQuickActions = () =>
   buildQuickActions('How many bedrooms are you looking for?', BEDROOM_OPTIONS);
 
+/**
+ * @param {'buy'|'rent'|'off-plan'|null} listingType
+ */
+const budgetQuickActions = (listingType) => {
+  if (listingType === 'rent') {
+    return buildQuickActions('What budget are you looking for?', RENT_BUDGET_OPTIONS);
+  }
+  if (listingType === 'off-plan') {
+    return buildQuickActions('What budget are you looking for?', OFFPLAN_BUDGET_OPTIONS);
+  }
+  return buildQuickActions('What budget are you looking for?', BUY_BUDGET_OPTIONS);
+};
+
 const sellPropertyTypeQuickActions = () =>
   buildQuickActions('What type of property are you looking to sell?', PROPERTY_TYPE_OPTIONS);
 
-const afterResultsQuickActions = (highIntent = false) =>
+const afterResultsQuickActions = () =>
   buildQuickActions(
-    highIntent
-      ? 'Found something you like? I can help you take the next step.'
-      : 'Would you like to see more properties or speak with an agent?',
-    highIntent ? AFTER_RESULTS_HIGH_OPTIONS : AFTER_RESULTS_OPTIONS
+    'Would you like to refine your search?',
+    AFTER_RESULTS_OPTIONS
+  );
+
+const propertySelectedQuickActions = () =>
+  buildQuickActions(
+    'Great choice. How would you like to continue?',
+    PROPERTY_SELECTED_OPTIONS
   );
 
 const highIntentQuickActions = () =>
   buildQuickActions(
-    'I can help you take the next step.',
+    'How would you like to continue?',
     HIGH_INTENT_OPTIONS
   );
 
@@ -155,18 +222,21 @@ const serviceMenuQuickActions = () =>
 
 const servicePmQuickActions = () =>
   buildQuickActions(
-    'Would you like to speak with our property management team?',
+    'Would you like to speak with our Property Management team?',
     SERVICE_PM_OPTIONS
   );
 
 const sellDoneQuickActions = () =>
-  buildQuickActions('Would you like our team to contact you?', SELL_DONE_OPTIONS);
+  buildQuickActions('Thanks. Would you like our team to contact you?', SELL_DONE_OPTIONS);
 
 const knowledgeAreaQuickActions = () =>
   buildQuickActions('What would you like to do next?', KNOWLEDGE_AREA_OPTIONS);
 
 const knowledgeGeneralQuickActions = () =>
   buildQuickActions('What would you like to do next?', KNOWLEDGE_GENERAL_OPTIONS);
+
+const knowledgeInvestQuickActions = () =>
+  buildQuickActions('What would you like to do next?', KNOWLEDGE_INVEST_OPTIONS);
 
 module.exports = {
   buildQuickActions,
@@ -175,18 +245,21 @@ module.exports = {
   propertyTypeQuickActions,
   locationQuickActions,
   bedroomQuickActions,
+  budgetQuickActions,
   sellPropertyTypeQuickActions,
   afterResultsQuickActions,
+  propertySelectedQuickActions,
   highIntentQuickActions,
   serviceMenuQuickActions,
   servicePmQuickActions,
   sellDoneQuickActions,
   knowledgeAreaQuickActions,
   knowledgeGeneralQuickActions,
+  knowledgeInvestQuickActions,
   LISTING_TYPE_OPTIONS,
   BEDROOM_OPTIONS,
   PROPERTY_TYPE_OPTIONS,
-  BUY_PROPERTY_TYPE_OPTIONS,
+  PROPERTY_TYPE_OPTIONS_CORE,
   LOCATION_OPTIONS,
   YES_NO_OPTIONS,
   GREETING_OPTIONS,

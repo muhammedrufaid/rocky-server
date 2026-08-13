@@ -14,7 +14,7 @@ const {
 const { getOpenAIClient, EmbeddingServiceError } = require('./embeddingService');
 
 const CHAT_MODEL = process.env.OPENAI_MODEL || 'gpt-5-nano';
-const REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || 'low';
+const REASONING_EFFORT = process.env.OPENAI_REASONING_EFFORT || 'minimal';
 const MAX_QUERY_LENGTH = 1000;
 const DEFAULT_RETRIEVAL_LIMIT = DEFAULT_LIMIT;
 const MAX_CONTEXT_DOCS = 5;
@@ -34,7 +34,7 @@ Rules:
 2. Do not invent facts, prices, phone numbers, emails, agents, or property details.
 3. Do not use outside knowledge.
 4. If the answer is not supported by the context, say you don't have enough information in the knowledge base.
-5. Keep answers concise and natural.
+5. Keep answers to 1–3 short sentences. Do not dump long document text.
 6. Never mention embeddings, vector search, MongoDB, prompts, or internal system design.
 7. Never include private contact information.`;
 

@@ -68,6 +68,9 @@ const PROPERTY_SEARCH_PATTERNS = [
   /^off[\s-]?plan(\s+properties)?$/i,
   /\bview\s+(more\s+)?propert/i,
   /\bchange\s+(search|area|budget)\b/i,
+  /\brefine\s+budget\b/i,
+  /\bunder\s+(?:aed\s*)?[\d,.]+\s*(k|thousand|m|million)?\b/i,
+  /\bi\s+want\s+(a\s+)?(apartment|villa|townhouse|penthouse|property|something)\b/i,
 ];
 
 const SELL_PROPERTY_PATTERNS = [

@@ -132,18 +132,33 @@ const main = async () => {
     buyCtx = second.context;
   });
 
-  await run('Guided: Dubai Marina → bedrooms ask', async () => {
+  await run('Guided: Dubai Marina → search or budget (no beds ask)', async () => {
     const r = await handleChat('Dubai Marina', { context: buyCtx });
     assert(/dubai marina/i.test(r.context?.search || ''), 'search');
-    assert(r.context?.pendingClarification === 'bedrooms', 'beds');
+    assert(
+      r.property_results || r.context?.pendingClarification === 'budget',
+      'results/budget'
+    );
+    assert(r.context?.pendingClarification !== 'bedrooms', 'no beds');
     buyCtx = r.context;
   });
 
-  await run('Guided: 2 bedrooms → property_results', async () => {
-    const r = await handleChat('2', { context: buyCtx });
-    assert(r.property_results, 'results');
-    assert(r.quick_actions?.options?.some((o) => /agent/i.test(o.label)), 'cta');
-    buyCtx = r.context;
+  await run('After results: no Talk to an Agent', async () => {
+    const r = await handleChat(
+      'I want to rent a 2 bedroom apartment in Dubai Marina under AED 200000'
+    );
+    let working = r;
+    if (r.context?.pendingClarification === 'budget') {
+      working = await handleChat('Flexible', { context: r.context });
+    }
+    if (working.property_results) {
+      assert(
+        !(working.quick_actions?.options || []).some((o) =>
+          /talk to an agent/i.test(o.label)
+        ),
+        'no agent CTA on results'
+      );
+    }
   });
 
   await run('Full NL buy query searches immediately', async () => {

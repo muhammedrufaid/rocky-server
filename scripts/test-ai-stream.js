@@ -29,8 +29,8 @@ const cases = [
     name: 'Service',
     message: 'What services does Rocky Real Estate provide?',
     expectDeltas: true,
-    expectSources: true,
-    expectImmediate: false,
+    expectSources: false,
+    expectImmediate: true,
   },
   {
     name: 'Area Guide',

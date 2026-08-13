@@ -29,8 +29,8 @@ const cases = [
     name: 'Service question',
     message: 'What services does Rocky Real Estate provide?',
     expectRoute: 'SERVICE_INFO',
-    expectSources: true,
-    minOpenAI: 2,
+    expectSources: false,
+    exactOpenAI: 0,
   },
   {
     name: 'Team question',

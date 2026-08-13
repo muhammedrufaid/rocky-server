@@ -35,7 +35,7 @@ const {
   hasActivePropertyFlow,
   hasActiveSellFlow,
 } = require('../tools/conversationContext');
-const { resolveServiceActions } = require('../tools/serviceActions');
+const { resolveServiceActions, resolveShortServiceTurn } = require('../tools/serviceActions');
 const { resolveSellPropertyTurn } = require('../tools/sellPropertyFlow');
 const {
   resolveConversionTurn,
@@ -273,6 +273,11 @@ const handleTeam = async (question) => {
  * @param {string} route
  */
 const handleKnowledgeRag = async (question, sourceTypes, route) => {
+  if (route === 'SERVICE_INFO') {
+    const short = resolveShortServiceTurn(question);
+    if (short) return short;
+  }
+
   const options = {};
   if (Array.isArray(sourceTypes) && sourceTypes.length) {
     options.sourceTypes = sourceTypes;
@@ -290,7 +295,7 @@ const handleKnowledgeRag = async (question, sourceTypes, route) => {
     return withStructured(base, resolveServiceActions(question));
   }
 
-  return withStructured(base, knowledgeNextActions(route));
+  return withStructured(base, knowledgeNextActions(route, question));
 };
 
 /**
@@ -305,9 +310,13 @@ const tryStarterRoute = async (trimmed, context) => {
     return handleSellFlow(trimmed, context);
   }
   if (lower === 'property management') {
+    const short = resolveShortServiceTurn(trimmed);
+    if (short) return short;
     return handleKnowledgeRag(trimmed, ['service'], 'SERVICE_INFO');
   }
   if (lower === 'brokerage') {
+    const short = resolveShortServiceTurn(trimmed);
+    if (short) return short;
     return handleKnowledgeRag(trimmed, ['service'], 'SERVICE_INFO');
   }
   if (
@@ -452,6 +461,8 @@ const resolveChatResult = async (trimmed, context = null) => {
   }
 
   if (intent === 'SERVICE_INFO') {
+    const short = resolveShortServiceTurn(trimmed);
+    if (short) return short;
     return handleKnowledgeRag(trimmed, ['service'], 'SERVICE_INFO');
   }
 
@@ -528,17 +539,15 @@ const resolveStreamPlan = async (trimmed, context = null) => {
       lower === 'property listing & marketing' ||
       lower === 'property listing and marketing'
     ) {
-      const prepared = await prepareRagContext(
-        lower.includes('listing')
-          ? 'Tell me about property listing and marketing'
-          : trimmed,
-        { sourceTypes: ['service'] }
-      );
-      const actions = resolveServiceActions(
-        lower.includes('listing')
-          ? 'property listing and marketing'
-          : trimmed
-      );
+      const shortMsg = lower.includes('listing')
+        ? 'Tell me about property listing and marketing'
+        : trimmed;
+      const short = resolveShortServiceTurn(shortMsg);
+      if (short) return toImmediatePrepared(short, 'SERVICE_INFO');
+      const prepared = await prepareRagContext(shortMsg, {
+        sourceTypes: ['service'],
+      });
+      const actions = resolveServiceActions(shortMsg);
       return {
         route: 'SERVICE_INFO',
         prepared: { ...prepared, ...actions },
@@ -550,7 +559,7 @@ const resolveStreamPlan = async (trimmed, context = null) => {
       });
       return {
         route: 'AREA_GUIDE',
-        prepared: { ...prepared, ...knowledgeNextActions('AREA_GUIDE') },
+        prepared: { ...prepared, ...knowledgeNextActions('AREA_GUIDE', trimmed) },
       };
     }
     return toImmediatePrepared(starter, starter.route || 'PROPERTY_SEARCH');
@@ -593,6 +602,8 @@ const resolveStreamPlan = async (trimmed, context = null) => {
   }
 
   if (intent === 'SERVICE_INFO') {
+    const short = resolveShortServiceTurn(trimmed);
+    if (short) return toImmediatePrepared(short, 'SERVICE_INFO');
     const prepared = await prepareRagContext(trimmed, {
       sourceTypes: ['service'],
     });
@@ -614,7 +625,7 @@ const resolveStreamPlan = async (trimmed, context = null) => {
     const prepared = await prepareRagContext(trimmed, { sourceTypes: ['blog'] });
     return {
       route: 'BLOG',
-      prepared: { ...prepared, ...knowledgeNextActions('BLOG') },
+      prepared: { ...prepared, ...knowledgeNextActions('BLOG', trimmed) },
     };
   }
 
@@ -626,7 +637,7 @@ const resolveStreamPlan = async (trimmed, context = null) => {
       route: 'AREA_GUIDE',
       prepared: {
         ...prepared,
-        ...knowledgeNextActions('AREA_GUIDE'),
+        ...knowledgeNextActions('AREA_GUIDE', trimmed),
         quick_actions: knowledgeAreaQuickActions(),
       },
     };
@@ -636,7 +647,7 @@ const resolveStreamPlan = async (trimmed, context = null) => {
     const prepared = await prepareRagContext(trimmed, { sourceTypes: ['faq'] });
     return {
       route: 'FAQ',
-      prepared: { ...prepared, ...knowledgeNextActions('FAQ') },
+      prepared: { ...prepared, ...knowledgeNextActions('FAQ', trimmed) },
     };
   }
 
@@ -644,7 +655,7 @@ const resolveStreamPlan = async (trimmed, context = null) => {
     const prepared = await prepareRagContext(trimmed, {});
     return {
       route: 'KNOWLEDGE_BOTH',
-      prepared: { ...prepared, ...knowledgeNextActions('KNOWLEDGE_BOTH') },
+      prepared: { ...prepared, ...knowledgeNextActions('KNOWLEDGE_BOTH', trimmed) },
     };
   }
 

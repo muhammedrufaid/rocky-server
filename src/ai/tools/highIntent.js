@@ -54,8 +54,10 @@ const detectConversionAction = (message) => {
   if (
     text === 'talk to an agent' ||
     text === 'contact rocky' ||
+    text === 'talk to rocky' ||
     text === 'contact property management' ||
     /\btalk\s+to\s+(an\s+)?agent\b/i.test(text) ||
+    /\btalk\s+to\s+rocky\b/i.test(text) ||
     /\bspeak\s+(to|with)\s+(an\s+)?agent\b/i.test(text) ||
     /\bi\s+need\s+an\s+agent\b/i.test(text)
   ) {
@@ -75,13 +77,20 @@ const detectConversionAction = (message) => {
   ) {
     return 'view_more';
   }
+  if (text === 'view property' || /\bview\s+property\b/i.test(text)) {
+    return 'view_property';
+  }
   if (text === 'change search' || /\bchange\s+search\b/i.test(text)) {
     return 'change_search';
   }
   if (text === 'change area' || /\bchange\s+area\b/i.test(text)) {
     return 'change_area';
   }
-  if (text === 'change budget' || /\bchange\s+budget\b/i.test(text)) {
+  if (
+    text === 'change budget' ||
+    text === 'refine budget' ||
+    /\b(change|refine)\s+budget\b/i.test(text)
+  ) {
     return 'change_budget';
   }
   return null;

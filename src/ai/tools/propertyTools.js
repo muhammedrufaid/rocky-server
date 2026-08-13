@@ -10,8 +10,13 @@ const {
   propertyTypeQuickActions,
   locationQuickActions,
   bedroomQuickActions,
+  budgetQuickActions,
   afterResultsQuickActions,
 } = require('./quickActions');
+const { FUNNEL_STAGES } = require('./funnelStages');
+
+/** Ask for budget when inventory matches exceed this without a price filter. */
+const LARGE_RESULT_THRESHOLD = 12;
 
 const PUBLIC_PROPERTY_FIELDS = [
   'propertyRefNo',
@@ -264,7 +269,8 @@ const detectListingType = (message) => {
     lower === 'off plan' ||
     lower === 'offplan' ||
     lower === 'off-plan properties' ||
-    lower === 'off plan properties'
+    lower === 'off plan properties' ||
+    lower === 'off-plan'
   ) {
     return 'off-plan';
   }
@@ -371,17 +377,21 @@ const parseBedroomSelection = (message) => {
   const text = String(message || '').trim().toLowerCase();
   if (!text) return null;
 
+  if (text === 'any' || text === 'any bedrooms') return 'any';
   if (text === 'studio' || text === '0') return '0';
   if (text === '1' || text === '1 bed' || text === '1 bedroom') return '1';
   if (text === '2' || text === '2 bed' || text === '2 bedroom') return '2';
-  if (
-    text === '3' ||
-    text === '3+' ||
-    text === '3 bed' ||
-    text === '3 bedroom' ||
-    text === '3 bedrooms'
-  ) {
+  if (text === '3' || text === '3 bed' || text === '3 bedroom' || text === '3 bedrooms') {
     return '3';
+  }
+  if (
+    text === '4' ||
+    text === '4+' ||
+    text === '4 bed' ||
+    text === '4 bedroom' ||
+    text === '4 bedrooms'
+  ) {
+    return '4';
   }
 
   const bedMatch = text.match(/\b(\d+)\s*(?:bed(?:room)?s?|br)\b/i);
@@ -391,6 +401,103 @@ const parseBedroomSelection = (message) => {
   if (/\bstudio\b/i.test(text)) return '0';
 
   return null;
+};
+
+/**
+ * Parse budget quick-action values or natural-language budget.
+ * @param {string} message
+ * @returns {{ priceMin?: number, priceMax?: number, flexible?: boolean }|null}
+ */
+const parseBudgetSelection = (message) => {
+  const text = String(message || '').trim().toLowerCase();
+  if (!text) return null;
+
+  if (text === 'budget:flexible' || text === 'flexible') {
+    return { flexible: true };
+  }
+
+  const presets = {
+    'budget:buy:under_1m': { priceMax: 1_000_000 },
+    'budget:buy:1m_2m': { priceMin: 1_000_000, priceMax: 2_000_000 },
+    'budget:buy:2m_5m': { priceMin: 2_000_000, priceMax: 5_000_000 },
+    'budget:buy:5m_plus': { priceMin: 5_000_000 },
+    'budget:offplan:under_1m': { priceMax: 1_000_000 },
+    'budget:offplan:1m_2m': { priceMin: 1_000_000, priceMax: 2_000_000 },
+    'budget:offplan:2m_5m': { priceMin: 2_000_000, priceMax: 5_000_000 },
+    'budget:offplan:5m_plus': { priceMin: 5_000_000 },
+    'budget:rent:under_80k': { priceMax: 80_000 },
+    'budget:rent:80k_120k': { priceMin: 80_000, priceMax: 120_000 },
+    'budget:rent:120k_200k': { priceMin: 120_000, priceMax: 200_000 },
+    'budget:rent:200k_plus': { priceMin: 200_000 },
+  };
+  if (presets[text]) return presets[text];
+
+  // under 150k / under AED 150,000 / below 2m
+  const under = text.match(
+    /\b(?:under|below|less\s+than|up\s+to)\s+(?:aed\s*)?([\d,.]+)\s*(k|thousand|million|m)?\b/i
+  );
+  if (under) {
+    let n = parseFloat(String(under[1]).replace(/,/g, ''));
+    if (!Number.isFinite(n)) return null;
+    const unit = (under[2] || '').toLowerCase();
+    if (unit === 'k' || unit === 'thousand') n *= 1_000;
+    if (unit === 'm' || unit === 'million') n *= 1_000_000;
+    return { priceMax: n };
+  }
+
+  const range = text.match(
+    /(?:aed\s*)?([\d,.]+)\s*(k|m|million)?\s*[-–to]+\s*(?:aed\s*)?([\d,.]+)\s*(k|m|million)?/i
+  );
+  if (range) {
+    let min = parseFloat(String(range[1]).replace(/,/g, ''));
+    let max = parseFloat(String(range[3]).replace(/,/g, ''));
+    if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
+    const u1 = (range[2] || '').toLowerCase();
+    const u2 = (range[4] || '').toLowerCase();
+    if (u1 === 'k') min *= 1_000;
+    if (u1 === 'm' || u1 === 'million') min *= 1_000_000;
+    if (u2 === 'k') max *= 1_000;
+    if (u2 === 'm' || u2 === 'million') max *= 1_000_000;
+    return { priceMin: min, priceMax: max };
+  }
+
+  return null;
+};
+
+/**
+ * Parse multi-location selections (comma / + / and / JSON array).
+ * @param {string} message
+ * @returns {string[]}
+ */
+const parseLocationsSelection = (message) => {
+  const text = String(message || '').trim();
+  if (!text || /^other\s+area$/i.test(text)) return [];
+
+  if (text.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(text);
+      if (Array.isArray(parsed)) {
+        return parsed
+          .map((v) => String(v || '').trim())
+          .filter(Boolean)
+          .slice(0, 5);
+      }
+    } catch (_) {
+      // fall through
+    }
+  }
+
+  const parts = text
+    .split(/\s*(?:,|\+|\/|\band\b)\s*/i)
+    .map((p) => p.trim())
+    .filter(Boolean);
+
+  if (parts.length > 1) {
+    return parts.slice(0, 5).map((p) => parseLocationSelection(p) || p).filter(Boolean);
+  }
+
+  const single = parseLocationSelection(text);
+  return single ? [single] : [];
 };
 
 /**
@@ -526,7 +633,28 @@ const mergePropertySearchState = (message, context = null) => {
     extracted.filters.bedrooms === undefined
   ) {
     const bed = parseBedroomSelection(message);
-    if (bed !== null) filters.bedrooms = bed;
+    if (bed === 'any') {
+      delete filters.bedrooms;
+      // mark as answered so we don't re-ask — use sentinel via context later
+    } else if (bed !== null) {
+      filters.bedrooms = bed;
+    }
+  }
+
+  // Budget quick-action / NL during budget clarification or free-text
+  const budget = parseBudgetSelection(message);
+  if (budget) {
+    if (budget.flexible) {
+      delete filters.priceMin;
+      delete filters.priceMax;
+    } else {
+      if (budget.priceMin !== undefined) filters.priceMin = budget.priceMin;
+      if (budget.priceMax !== undefined) filters.priceMax = budget.priceMax;
+    }
+  } else if (context?.budgetMax && !filters.priceMax) {
+    filters.priceMax = context.budgetMax;
+  } else if (context?.budgetMin && !filters.priceMin) {
+    filters.priceMin = context.budgetMin;
   }
 
   // Property type quick-action replies
@@ -538,7 +666,6 @@ const mergePropertySearchState = (message, context = null) => {
     if (type) filters.propertyType = type;
   } else if (!filters.propertyType) {
     const type = parsePropertyTypeSelection(message);
-    // Only apply short/exact type replies when already in a property flow
     if (
       type &&
       (context?.flow === 'property_search' ||
@@ -561,34 +688,56 @@ const mergePropertySearchState = (message, context = null) => {
     if (selected) listingType = selected;
   }
 
+  let locations = Array.isArray(context?.locations)
+    ? context.locations.filter(Boolean).slice(0, 5)
+    : [];
+
   let search =
     (extracted.search && extracted.search.trim()) ||
     (context && typeof context.search === 'string' && context.search.trim()) ||
     '';
 
-  if (context?.pendingClarification === 'location' || context?.pendingClarification === 'otherArea') {
-    const loc = parseLocationSelection(message);
-    if (loc) search = loc;
-  } else if (!extracted.search) {
-    // Location-only quick actions while in property flow
-    const loc = parseLocationSelection(message);
-    if (
-      loc &&
-      context?.flow === 'property_search' &&
-      /^(dubai marina|downtown dubai|business bay|dubai south|arabian ranches|palm jumeirah|jvc|jlt|dubai hills|jebel ali)$/i.test(
-        String(message || '').trim()
-      )
-    ) {
-      search = loc;
+  if (
+    context?.pendingClarification === 'location' ||
+    context?.pendingClarification === 'otherArea'
+  ) {
+    const locs = parseLocationsSelection(message);
+    if (locs.length) {
+      locations = locs;
+      search = locs[0];
+    } else {
+      const loc = parseLocationSelection(message);
+      if (loc) {
+        search = loc;
+        locations = [loc];
+      }
     }
+  } else if (!extracted.search) {
+    const locs = parseLocationsSelection(message);
+    if (
+      locs.length &&
+      context?.flow === 'property_search' &&
+      (locs.length > 1 ||
+        /^(dubai marina|downtown dubai|business bay|dubai south|arabian ranches|palm jumeirah|jvc|jlt|dubai hills|jebel ali|jumeirah)$/i.test(
+          String(message || '').trim()
+        ))
+    ) {
+      locations = locs;
+      search = locs[0];
+    }
+  }
+
+  if (!search && locations.length) {
+    search = locations[0];
   }
 
   // Change area / change budget intents clear the relevant field
   const lower = String(message || '').trim().toLowerCase();
   if (lower === 'change area') {
     search = '';
+    locations = [];
   }
-  if (lower === 'change budget') {
+  if (lower === 'change budget' || lower === 'refine budget') {
     delete filters.priceMin;
     delete filters.priceMax;
   }
@@ -596,53 +745,52 @@ const mergePropertySearchState = (message, context = null) => {
     return {
       filters: {},
       search: '',
+      locations: [],
       listingType: listingType || context?.listingType || null,
       resetPending: true,
+      bedroomsAny: false,
     };
   }
 
-  return { filters, search, listingType };
+  const bedroomsAny =
+    parseBedroomSelection(message) === 'any' ||
+    context?.bedroomsAny === true;
+
+  if (bedroomsAny) {
+    delete filters.bedrooms;
+  }
+
+  return { filters, search, listingType, locations, bedroomsAny };
 };
 
 /**
- * Whether we have enough filters to run a property search without more questions.
- * Requires listing type + location. Property type / bedrooms / budget are used when present.
- * @param {{ listingType: string|null, filters: object, search: string }} state
+ * Enough to search: listing type + property type + location.
+ * Bedrooms and budget are optional (budget asked only if results are too large).
+ * @param {{ listingType: string|null, filters: object, search: string, locations?: string[] }} state
  */
 const hasEnoughToSearch = (state) => {
   if (!state.listingType) return false;
-  if (!state.search || !String(state.search).trim()) return false;
-  // Prefer having property type for residential searches, but allow search if bedrooms given
-  if (state.filters?.propertyType) return true;
-  if (state.filters?.bedrooms !== undefined && state.filters?.bedrooms !== null) {
-    return true;
-  }
-  // listing + location alone is enough for conversion (avoid over-questioning)
-  return true;
+  if (!state.filters?.propertyType) return false;
+  const hasLocation =
+    (state.search && String(state.search).trim()) ||
+    (Array.isArray(state.locations) && state.locations.length > 0);
+  return Boolean(hasLocation);
 };
 
 /**
  * Next missing clarification step for guided funnel.
- * Order: listingType → propertyType → location → bedrooms (skip beds for commercial)
- * @param {{ listingType: string|null, filters: object, search: string }} state
+ * Order: listingType → propertyType → location
+ * Bedrooms/budget are optional refinements (budget when results are large).
+ * @param {{ listingType: string|null, filters: object, search: string, locations?: string[], bedroomsAny?: boolean }} state
  * @returns {string|null}
  */
 const nextMissingClarification = (state) => {
   if (!state.listingType) return 'listingType';
   if (!state.filters?.propertyType) return 'propertyType';
-  if (!state.search || !String(state.search).trim()) return 'location';
-  const type = String(state.filters.propertyType || '');
-  const isCommercial = /commercial|office|shop|retail|warehouse|showroom|labour/i.test(
-    type
-  );
-  if (
-    !isCommercial &&
-    (state.filters.bedrooms === undefined ||
-      state.filters.bedrooms === null ||
-      state.filters.bedrooms === '')
-  ) {
-    return 'bedrooms';
-  }
+  const hasLocation =
+    (state.search && String(state.search).trim()) ||
+    (Array.isArray(state.locations) && state.locations.length > 0);
+  if (!hasLocation) return 'location';
   return null;
 };
 
@@ -751,11 +899,26 @@ const formatPropertySearchReply = (result) => {
   const shown = Array.isArray(result.properties) ? result.properties.length : 0;
   const total = result.total || 0;
   if (total === 0 || shown === 0) {
-    return 'I could not find matching public listings for those filters. Try adjusting the location, bedrooms, or listing type.';
+    return 'I could not find matching public listings for those filters. Try adjusting the location, bedrooms, or budget.';
   }
 
+  const type = result.filters?.propertyType
+    ? String(result.filters.propertyType).toLowerCase()
+    : 'propert';
+  const typeLabel =
+    type === 'propert' ? 'properties' : type.endsWith('s') ? type : `${type}s`;
+
+  const beds = result.filters?.bedrooms;
+  const bedLabel =
+    beds === '0' || beds === 0
+      ? 'studio '
+      : beds
+        ? `${beds}-bedroom `
+        : '';
+
+  const area = result.search ? ` in ${result.search}` : '';
   const n = total > shown ? total : shown;
-  return `I found ${n} ${n === 1 ? 'property' : 'properties'} matching your requirements. Would you like to see more properties or speak with an agent?`;
+  return `I found ${n} matching ${bedLabel}${typeLabel}${area}.`;
 };
 
 /**
@@ -766,8 +929,11 @@ const toRecentProperties = (cards) =>
   (Array.isArray(cards) ? cards : []).slice(0, 5).map((p, index) => ({
     id: p.id || null,
     title: p.title || null,
+    building: p.building || null,
+    locality: p.locality || null,
     url: p.url || null,
     listingType: p.listingType || null,
+    price: p.price ?? null,
     index,
   }));
 
@@ -777,29 +943,63 @@ const toRecentProperties = (cards) =>
  * @param {object} quick_actions
  * @param {object} partial
  */
-const clarificationResult = (reply, quick_actions, partial) => ({
-  kind: 'clarification',
-  reply,
-  quick_actions,
-  context: {
-    flow: 'property_search',
-    intent: 'PROPERTY_SEARCH',
-    conversionIntent: 'medium',
-    ...partial,
-  },
-  openaiCalls: 0,
-});
+const clarificationResult = (reply, quick_actions, partial) => {
+  const out = {
+    kind: 'clarification',
+    reply,
+    context: {
+      flow: 'property_search',
+      intent: 'PROPERTY_SEARCH',
+      funnelStage: FUNNEL_STAGES.PROPERTY_REQUIREMENTS,
+      conversionIntent: 'medium',
+      ...partial,
+    },
+    openaiCalls: 0,
+  };
+  if (quick_actions) out.quick_actions = quick_actions;
+  return out;
+};
 
 /**
  * @param {object} state
  * @param {object|null} context
+ * @param {{ forceResults?: boolean }} [opts]
  */
-const buildResultsPayload = async (state, context = null) => {
+const buildResultsPayload = async (state, context = null, opts = {}) => {
   const result = await searchByListingType({
     listingType: state.listingType,
     filters: state.filters,
     search: state.search,
   });
+
+  const hasBudget =
+    state.filters?.priceMin !== undefined ||
+    state.filters?.priceMax !== undefined;
+
+  // Large result set without budget → ask budget instead of dumping cards
+  if (
+    !opts.forceResults &&
+    !hasBudget &&
+    (result.total || 0) > LARGE_RESULT_THRESHOLD
+  ) {
+    const qa = budgetQuickActions(state.listingType);
+    return clarificationResult(
+      `I found ${result.total} matching properties. ${qa.question}`,
+      qa,
+      {
+        listingType: state.listingType,
+        filters: state.filters,
+        search: state.search,
+        locations: state.locations || [],
+        bedroomsAny: state.bedroomsAny || false,
+        pendingClarification: 'budget',
+        funnelStage: FUNNEL_STAGES.PROPERTY_REQUIREMENTS,
+        budgetMin: state.filters?.priceMin,
+        budgetMax: state.filters?.priceMax,
+      }
+    );
+  }
+
   const recentProperties = toRecentProperties(result.properties);
   return {
     kind: 'results',
@@ -808,13 +1008,18 @@ const buildResultsPayload = async (state, context = null) => {
       properties: result.properties,
       total: result.total,
     },
-    quick_actions: afterResultsQuickActions(false),
+    quick_actions: afterResultsQuickActions(),
     context: {
       flow: 'property_search',
       intent: 'PROPERTY_SEARCH',
+      funnelStage: FUNNEL_STAGES.PROPERTY_RESULTS,
       listingType: state.listingType,
       filters: state.filters,
       search: state.search,
+      locations: state.locations || [],
+      bedroomsAny: state.bedroomsAny || false,
+      budgetMin: state.filters?.priceMin,
+      budgetMax: state.filters?.priceMax,
       pendingClarification: null,
       recentProperties,
       selectedProperty: context?.selectedProperty || null,
@@ -833,7 +1038,7 @@ const buildResultsPayload = async (state, context = null) => {
 const resolveConversationalPropertySearch = async (message, context = null) => {
   const lower = String(message || '').trim().toLowerCase();
 
-  // Change-area: keep filters/listing, clear location, re-ask
+  // Change-area
   if (lower === 'change area' && context?.flow === 'property_search') {
     const state = mergePropertySearchState(message, context);
     const qa = locationQuickActions();
@@ -841,30 +1046,28 @@ const resolveConversationalPropertySearch = async (message, context = null) => {
       listingType: state.listingType,
       filters: state.filters,
       search: '',
+      locations: [],
       pendingClarification: 'location',
       recentProperties: context.recentProperties,
       selectedProperty: context.selectedProperty,
     });
   }
 
-  // Change budget
-  if (lower === 'change budget' && context?.flow === 'property_search') {
+  // Change / refine budget
+  if (
+    (lower === 'change budget' || lower === 'refine budget') &&
+    context?.flow === 'property_search'
+  ) {
     const state = mergePropertySearchState(message, context);
-    return {
-      kind: 'clarification',
-      reply: 'What is your maximum budget in AED?',
-      context: {
-        flow: 'property_search',
-        intent: 'PROPERTY_SEARCH',
-        listingType: state.listingType,
-        filters: state.filters,
-        search: state.search,
-        pendingClarification: 'budget',
-        conversionIntent: 'medium',
-        recentProperties: context.recentProperties,
-      },
-      openaiCalls: 0,
-    };
+    const qa = budgetQuickActions(state.listingType);
+    return clarificationResult(qa.question, qa, {
+      listingType: state.listingType,
+      filters: state.filters,
+      search: state.search,
+      locations: state.locations,
+      pendingClarification: 'budget',
+      recentProperties: context.recentProperties,
+    });
   }
 
   // Change search: restart
@@ -874,7 +1077,9 @@ const resolveConversationalPropertySearch = async (message, context = null) => {
       listingType: null,
       filters: {},
       search: '',
+      locations: [],
       pendingClarification: 'listingType',
+      funnelStage: FUNNEL_STAGES.DISCOVERY,
     });
   }
 
@@ -884,44 +1089,35 @@ const resolveConversationalPropertySearch = async (message, context = null) => {
     (context?.pendingClarification === 'location' ||
       context?.flow === 'property_search')
   ) {
-    return {
-      kind: 'clarification',
-      reply: 'Which area are you interested in?',
-      context: {
-        flow: 'property_search',
-        intent: 'PROPERTY_SEARCH',
-        listingType: context?.listingType || null,
-        filters: context?.filters || {},
-        search: '',
-        pendingClarification: 'otherArea',
-        conversionIntent: 'medium',
-      },
-      openaiCalls: 0,
-    };
+    return clarificationResult('Which area are you interested in?', null, {
+      listingType: context?.listingType || null,
+      filters: context?.filters || {},
+      search: '',
+      locations: [],
+      pendingClarification: 'otherArea',
+    });
   }
 
-  // Budget clarification reply → search
+  // Budget clarification reply → search (force results even if still large)
   if (context?.pendingClarification === 'budget') {
     const state = mergePropertySearchState(message, context);
-    const budgetMatch = String(message || '').match(
-      /(?:aed\s*)?([\d,.]+)\s*(million|m)?/i
-    );
-    if (budgetMatch) {
-      let n = parseFloat(String(budgetMatch[1]).replace(/,/g, ''));
-      if (Number.isFinite(n)) {
-        if (budgetMatch[2]) n *= 1_000_000;
-        state.filters.priceMax = n;
-      }
+    const budget = parseBudgetSelection(message);
+    if (budget?.flexible) {
+      delete state.filters.priceMin;
+      delete state.filters.priceMax;
+    } else if (budget) {
+      if (budget.priceMin !== undefined) state.filters.priceMin = budget.priceMin;
+      if (budget.priceMax !== undefined) state.filters.priceMax = budget.priceMax;
     }
-    if (state.listingType && state.search) {
-      return buildResultsPayload(state, context);
+    if (hasEnoughToSearch(state)) {
+      return buildResultsPayload(state, context, { forceResults: true });
     }
   }
 
   const state = mergePropertySearchState(message, context);
-  const { filters, search, listingType } = state;
+  const { filters, search, listingType, locations, bedroomsAny } = state;
 
-  // Guided funnel: ask only for the next missing field
+  // Guided funnel: ask only for the next missing required field
   const missing = nextMissingClarification(state);
   if (missing === 'listingType') {
     const qa = listingTypeQuickActions();
@@ -929,15 +1125,17 @@ const resolveConversationalPropertySearch = async (message, context = null) => {
       listingType: null,
       filters,
       search,
+      locations,
       pendingClarification: 'listingType',
     });
   }
   if (missing === 'propertyType') {
-    const qa = propertyTypeQuickActions();
+    const qa = propertyTypeQuickActions(true);
     return clarificationResult(qa.question, qa, {
       listingType,
       filters,
       search,
+      locations,
       pendingClarification: 'propertyType',
     });
   }
@@ -947,20 +1145,15 @@ const resolveConversationalPropertySearch = async (message, context = null) => {
       listingType,
       filters,
       search: '',
+      locations: [],
       pendingClarification: 'location',
     });
   }
-  if (missing === 'bedrooms') {
-    const qa = bedroomQuickActions();
-    return clarificationResult(qa.question, qa, {
-      listingType,
-      filters,
-      search,
-      pendingClarification: 'bedrooms',
-    });
-  }
 
-  return buildResultsPayload(state, context);
+  return buildResultsPayload(
+    { listingType, filters, search, locations, bedroomsAny },
+    context
+  );
 };
 
 /**
@@ -1030,7 +1223,10 @@ module.exports = {
   parseBedroomSelection,
   parsePropertyTypeSelection,
   parseLocationSelection,
+  parseLocationsSelection,
+  parseBudgetSelection,
   nextMissingClarification,
+  hasEnoughToSearch,
   sanitizePublicProperty,
   toPropertyCard,
   searchByListingType,
@@ -1040,4 +1236,5 @@ module.exports = {
   PUBLIC_PROPERTY_FIELDS,
   FORBIDDEN_PROPERTY_FIELDS,
   pickApprovedFilters,
+  LARGE_RESULT_THRESHOLD,
 };
