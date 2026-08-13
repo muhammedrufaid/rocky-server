@@ -102,14 +102,38 @@ const OFFPLAN_BUDGET_OPTIONS = [
 ];
 
 const AFTER_RESULTS_OPTIONS = [
-  { label: 'View More Properties', value: 'View More Properties' },
-  { label: 'Refine Budget', value: 'Refine Budget' },
+  { label: "I'm Interested", value: "I'm Interested" },
+  { label: 'View Property', value: 'View Property' },
+  { label: 'Refine Search', value: 'Refine Search' },
+];
+
+const FEW_RESULTS_OPTIONS = [
+  { label: "I'm Interested", value: "I'm Interested" },
+  { label: 'View Property', value: 'View Property' },
+  { label: 'Refine Search', value: 'Refine Search' },
+];
+
+const MANY_RESULTS_REFINE_OPTIONS = [
+  { label: 'Budget', value: 'Budget' },
+  { label: 'Bedrooms', value: 'Bedrooms' },
+  { label: 'Property Type', value: 'Property Type' },
+  { label: 'Change Area', value: 'Change Area' },
+];
+
+const ZERO_RESULTS_OPTIONS = [
+  { label: 'Show Similar Properties', value: 'Show Similar Properties' },
+  { label: 'Change Budget', value: 'Change Budget' },
   { label: 'Change Area', value: 'Change Area' },
   { label: 'Change Search', value: 'Change Search' },
 ];
 
+const BUDGET_ZERO_RECOVERY_OPTIONS = [
+  { label: 'Show Closest Options', value: 'Show Closest Options' },
+  { label: 'Change Budget', value: 'Change Budget' },
+  { label: 'Change Area', value: 'Change Area' },
+];
+
 const PROPERTY_SELECTED_OPTIONS = [
-  { label: 'View Property', value: 'View Property' },
   { label: 'Talk to an Agent', value: 'Talk to an Agent' },
   { label: 'Schedule a Viewing', value: 'Schedule a Viewing' },
   { label: 'WhatsApp Rocky', value: 'WhatsApp Rocky' },
@@ -201,13 +225,37 @@ const sellPropertyTypeQuickActions = () =>
 
 const afterResultsQuickActions = () =>
   buildQuickActions(
-    'Would you like to refine your search?',
+    'Would you like to continue with one of these properties?',
     AFTER_RESULTS_OPTIONS
+  );
+
+const fewResultsQuickActions = () =>
+  buildQuickActions(
+    'Would you like to continue with one of these properties?',
+    FEW_RESULTS_OPTIONS
+  );
+
+const manyResultsRefineQuickActions = () =>
+  buildQuickActions(
+    'Want to narrow them down?',
+    MANY_RESULTS_REFINE_OPTIONS
+  );
+
+const zeroResultsRecoveryQuickActions = () =>
+  buildQuickActions(
+    'Would you like to try nearby options?',
+    ZERO_RESULTS_OPTIONS
+  );
+
+const budgetZeroRecoveryQuickActions = () =>
+  buildQuickActions(
+    'Would you like to see the closest available options?',
+    BUDGET_ZERO_RECOVERY_OPTIONS
   );
 
 const propertySelectedQuickActions = () =>
   buildQuickActions(
-    'Great choice. How would you like to continue?',
+    'Great choice. How would you like to proceed?',
     PROPERTY_SELECTED_OPTIONS
   );
 
@@ -248,6 +296,10 @@ module.exports = {
   budgetQuickActions,
   sellPropertyTypeQuickActions,
   afterResultsQuickActions,
+  fewResultsQuickActions,
+  manyResultsRefineQuickActions,
+  zeroResultsRecoveryQuickActions,
+  budgetZeroRecoveryQuickActions,
   propertySelectedQuickActions,
   highIntentQuickActions,
   serviceMenuQuickActions,

@@ -157,6 +157,9 @@ const sanitizeIncomingContext = (raw) => {
   const recent = sanitizeRecentProperties(raw.recentProperties);
   if (recent.length) out.recentProperties = recent;
 
+  const previousRecent = sanitizeRecentProperties(raw.previousRecentProperties);
+  if (previousRecent.length) out.previousRecentProperties = previousRecent;
+
   const selected = sanitizeSelectedProperty(raw.selectedProperty);
   if (selected) out.selectedProperty = selected;
 

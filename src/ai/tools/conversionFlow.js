@@ -1,6 +1,7 @@
 /**
  * Conversion / high-intent response builders.
  * Talk to an Agent is only offered after a property is selected (or explicit agent request).
+ * listingAgentPhone is ONLY returned on property_agent contact after Talk to an Agent.
  */
 
 const {
@@ -19,9 +20,10 @@ const {
 } = require('./highIntent');
 const { sanitizeSelectedProperty } = require('./conversationContext');
 const { FUNNEL_STAGES } = require('./funnelStages');
+const { fetchListingAgentForSelectedProperty } = require('./propertyTools');
 
 /**
- * Safe property payload for contact_action (no images, no agent/private fields).
+ * Safe property payload for non-agent contact actions (no images, no agent phone).
  * @param {object|null} selected
  */
 const toContactProperty = (selected) => {
@@ -35,6 +37,21 @@ const toContactProperty = (selected) => {
     listingType: safe.listingType,
     url: safe.url,
   };
+};
+
+/**
+ * Property + listing agent fields for Talk to an Agent only.
+ * @param {object|null} selected
+ * @param {{ listingAgent?: string|null, listingAgentPhone?: string|null }} agent
+ */
+const toPropertyAgentContactProperty = (selected, agent = {}) => {
+  const base = toContactProperty(selected);
+  if (!base) return null;
+  const out = { ...base };
+  if (agent.listingAgent) out.listingAgent = agent.listingAgent;
+  if (agent.listingAgentPhone) out.listingAgentPhone = agent.listingAgentPhone;
+  // Never include image / email / private fields
+  return out;
 };
 
 /**
@@ -54,12 +71,28 @@ const buildPropertyContactAction = (selected, label, service) => {
 };
 
 /**
+ * Talk-to-agent contact_action with listing agent (phone only when present on the listing).
+ * @param {object|null} selected
+ * @param {{ listingAgent?: string|null, listingAgentPhone?: string|null }} agent
+ */
+const buildPropertyAgentContactAction = (selected, agent = {}) => {
+  const property = toPropertyAgentContactProperty(selected, agent);
+  const action = {
+    type: 'contact_action',
+    label: 'Talk to an Agent',
+    service: 'property_agent',
+  };
+  if (property) action.property = property;
+  return action;
+};
+
+/**
  * Handle Talk to Agent / WhatsApp / Schedule Viewing / property selection.
  * @param {string} message
  * @param {object|null} context
- * @returns {object|null}
+ * @returns {Promise<object|null>}
  */
-const resolveConversionTurn = (message, context = null) => {
+const resolveConversionTurn = async (message, context = null) => {
   const action = detectConversionAction(message);
   const high = detectHighIntent(message);
   const selected =
@@ -103,6 +136,39 @@ const resolveConversionTurn = (message, context = null) => {
     }
   }
 
+  // "I'm Interested" → select property then conversion CTAs (no agent phone yet)
+  if (action === 'interested' || (high && !action)) {
+    const mentioned =
+      safeSelected ||
+      sanitizeSelectedProperty(resolvePropertyMention(message, context)) ||
+      sanitizeSelectedProperty(
+        Array.isArray(context?.recentProperties) ? context.recentProperties[0] : null
+      );
+    if (mentioned) {
+      return {
+        reply: 'Great choice. How would you like to proceed?',
+        quick_actions: propertySelectedQuickActions(),
+        context: {
+          ...(context || {}),
+          flow: context?.flow || 'property_search',
+          intent: 'CONVERSION',
+          funnelStage: FUNNEL_STAGES.PROPERTY_SELECTED,
+          conversionIntent: 'high',
+          selectedProperty: mentioned,
+          recentProperties: context?.recentProperties,
+          previousRecentProperties: context?.previousRecentProperties,
+          listingType: context?.listingType,
+          filters: context?.filters,
+          search: context?.search,
+          locations: context?.locations,
+        },
+        openaiCalls: 0,
+        route: 'CONVERSION',
+      };
+    }
+  }
+
+  // Official Rocky WhatsApp — never use listing agent phone
   if (action === 'whatsapp') {
     const whatsapp_action = buildWhatsAppAction(whatsappPrefill);
     return {
@@ -110,21 +176,6 @@ const resolveConversionTurn = (message, context = null) => {
         ? 'Would you like to continue on WhatsApp?'
         : 'Please use the contact options on our website to reach the Rocky team.',
       ...(whatsapp_action ? { whatsapp_action } : {}),
-      ...(safeSelected
-        ? {
-            contact_action: buildPropertyContactAction(
-              safeSelected,
-              'Talk to an Agent',
-              'property'
-            ),
-          }
-        : {
-            contact_action: {
-              type: 'contact_action',
-              label: 'Talk to an Agent',
-              service: 'agent',
-            },
-          }),
       quick_actions: highIntentQuickActions(),
       context: {
         ...(context || {}),
@@ -139,34 +190,76 @@ const resolveConversionTurn = (message, context = null) => {
     };
   }
 
-  if (action === 'agent' || action === 'viewing') {
-    // Agent / viewing preferred when a property is selected.
-    // Explicit agent request is still allowed without a property.
-    const whatsapp_action = buildWhatsAppAction(whatsappPrefill);
+  // Talk to an Agent — listing agent phone ONLY here, from DB for selected property
+  if (action === 'agent') {
     const hasProperty = Boolean(safeSelected);
-    const reply =
-      action === 'viewing'
-        ? hasProperty
-          ? 'Great choice. I can help you schedule a viewing.'
-          : 'I can help you schedule a viewing. Please select a property first, or tell me which listing you mean.'
-        : hasProperty
-          ? 'Great choice. How would you like to continue?'
-          : 'I can connect you with a Rocky property consultant.';
+
+    if (!hasProperty) {
+      return {
+        reply: 'I can connect you with a Rocky property consultant.',
+        contact_action: {
+          type: 'contact_action',
+          label: 'Talk to an Agent',
+          service: 'agent',
+        },
+        quick_actions: highIntentQuickActions(),
+        context: {
+          ...(context || {}),
+          flow: context?.flow || 'conversion',
+          intent: 'CONVERSION',
+          funnelStage: FUNNEL_STAGES.CONTACT,
+          conversionIntent: 'very_high',
+        },
+        openaiCalls: 0,
+        route: 'CONVERSION',
+      };
+    }
+
+    const agent = await fetchListingAgentForSelectedProperty(safeSelected);
+    const contact_action = buildPropertyAgentContactAction(safeSelected, agent);
+    const reply = agent.listingAgentPhone
+      ? 'Sure. I can connect you directly with the agent handling this property.'
+      : 'I can connect you with our team about this property. An agent will follow up shortly.';
+
+    return {
+      reply,
+      contact_action,
+      // Do not also emit Schedule Viewing / WhatsApp as the selected action
+      context: {
+        ...(context || {}),
+        flow: context?.flow || 'conversion',
+        intent: 'CONVERSION',
+        funnelStage: FUNNEL_STAGES.CONTACT,
+        conversionIntent: 'very_high',
+        selectedProperty: safeSelected,
+        recentProperties: context?.recentProperties,
+        previousRecentProperties: context?.previousRecentProperties,
+        listingType: context?.listingType,
+        filters: context?.filters,
+        search: context?.search,
+        locations: context?.locations,
+      },
+      openaiCalls: 0,
+      route: 'CONVERSION',
+    };
+  }
+
+  // Schedule a Viewing — separate flow; never expose listingAgentPhone
+  if (action === 'viewing') {
+    const hasProperty = Boolean(safeSelected);
+    const reply = hasProperty
+      ? 'Great choice. I can help you schedule a viewing.'
+      : 'I can help you schedule a viewing. Please select a property first, or tell me which listing you mean.';
 
     return {
       reply,
       contact_action: hasProperty
-        ? buildPropertyContactAction(
-            safeSelected,
-            action === 'viewing' ? 'Schedule a Viewing' : 'Talk to an Agent',
-            action === 'viewing' ? 'viewing' : 'property'
-          )
+        ? buildPropertyContactAction(safeSelected, 'Schedule a Viewing', 'viewing')
         : {
             type: 'contact_action',
-            label: action === 'viewing' ? 'Schedule a Viewing' : 'Talk to an Agent',
-            service: action === 'viewing' ? 'viewing' : 'agent',
+            label: 'Schedule a Viewing',
+            service: 'viewing',
           },
-      ...(whatsapp_action ? { whatsapp_action } : {}),
       quick_actions: hasProperty
         ? propertySelectedQuickActions()
         : highIntentQuickActions(),
@@ -185,24 +278,15 @@ const resolveConversionTurn = (message, context = null) => {
     };
   }
 
-  // Property selection / high intent with a specific listing
+  // Property selection / high intent with a specific listing (no agent phone yet)
   if (high || selected) {
-    const mentioned = safeSelected || sanitizeSelectedProperty(
-      resolvePropertyMention(message, context)
-    );
+    const mentioned =
+      safeSelected ||
+      sanitizeSelectedProperty(resolvePropertyMention(message, context));
     if (mentioned) {
-      const whatsapp_action = buildWhatsAppAction(
-        `Hi Rocky, I'm interested in "${mentioned.title || 'a property'}" and would like more information.`
-      );
       return {
-        reply: 'Great choice. How would you like to continue?',
+        reply: 'Great choice. How would you like to proceed?',
         quick_actions: propertySelectedQuickActions(),
-        contact_action: buildPropertyContactAction(
-          mentioned,
-          'Talk to an Agent',
-          'property'
-        ),
-        ...(whatsapp_action ? { whatsapp_action } : {}),
         context: {
           ...(context || {}),
           flow: context?.flow || 'property_search',
@@ -211,6 +295,7 @@ const resolveConversionTurn = (message, context = null) => {
           conversionIntent: 'high',
           selectedProperty: mentioned,
           recentProperties: context?.recentProperties,
+          previousRecentProperties: context?.previousRecentProperties,
           listingType: context?.listingType,
           filters: context?.filters,
           search: context?.search,
@@ -221,7 +306,6 @@ const resolveConversionTurn = (message, context = null) => {
       };
     }
 
-    // High intent without a selected property — do not invent an agent CTA for a listing
     if (high && action) {
       return null;
     }
@@ -283,5 +367,7 @@ module.exports = {
   knowledgeNextActions,
   buildGreetingResult,
   buildPropertyContactAction,
+  buildPropertyAgentContactAction,
   toContactProperty,
+  toPropertyAgentContactProperty,
 };

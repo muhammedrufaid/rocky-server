@@ -66,8 +66,12 @@ const main = async () => {
     const r = await handleChat(
       'I want to rent a 2 bedroom apartment in Dubai Marina'
     );
-    assert(r.property_results || r.context?.pendingClarification === 'budget', 'search/budget');
-    assert(!r.context?.pendingClarification || r.context.pendingClarification === 'budget', 'no type ask');
+    assert(r.context?.pendingClarification !== 'budget', 'no budget gate');
+    assert(
+      r.property_results ||
+        r.quick_actions?.options?.some((o) => /similar|closest|change/i.test(o.label)),
+      'results or recovery'
+    );
     assert(
       !(r.quick_actions?.options || []).some((o) => /talk to an agent/i.test(o.label)),
       'no agent after search'
@@ -83,13 +87,15 @@ const main = async () => {
     );
   });
 
-  await run('Buy villa Arabian Ranches → search (no bedrooms ask)', async () => {
+  await run('Buy villa Arabian Ranches → search (no bedrooms/budget gate)', async () => {
     const r = await handleChat('I want to buy a villa in Arabian Ranches');
-    assert(
-      r.property_results || r.context?.pendingClarification === 'budget',
-      'results or budget'
-    );
     assert(r.context?.pendingClarification !== 'bedrooms', 'no beds ask');
+    assert(r.context?.pendingClarification !== 'budget', 'no budget gate');
+    assert(
+      r.property_results ||
+        r.quick_actions?.options?.some((o) => /similar|closest|change|budget|bedroom/i.test(o.label)),
+      'results or refine/recovery'
+    );
   });
 
   await run('under AED 150,000 budget parse', async () => {
@@ -143,10 +149,17 @@ const main = async () => {
   await run('Talk to agent includes property on contact_action', async () => {
     const r = await handleChat('Talk to an Agent', { context: ctx });
     assert(r.contact_action, 'contact');
-    assert(r.contact_action.service === 'property' || r.contact_action.service === 'agent', 'service');
+    assert(
+      r.contact_action.service === 'property_agent' ||
+        r.contact_action.service === 'agent',
+      'service'
+    );
     if (ctx?.selectedProperty) {
+      assert(r.contact_action.service === 'property_agent', 'property_agent');
       assert(r.contact_action.property?.title || r.contact_action.property?.url, 'property payload');
       assert(!r.contact_action.property?.image, 'no image');
+      assert(!r.contact_action.property?.listingAgentEmail, 'no email');
+      assert(!r.whatsapp_action, 'no whatsapp alongside agent');
     }
   });
 

@@ -132,14 +132,18 @@ const main = async () => {
     buyCtx = second.context;
   });
 
-  await run('Guided: Dubai Marina → search or budget (no beds ask)', async () => {
+  await run('Guided: Dubai Marina → search immediately (no beds/budget gate)', async () => {
     const r = await handleChat('Dubai Marina', { context: buyCtx });
     assert(/dubai marina/i.test(r.context?.search || ''), 'search');
-    assert(
-      r.property_results || r.context?.pendingClarification === 'budget',
-      'results/budget'
-    );
+    assert(r.context?.pendingClarification !== 'budget', 'no budget gate');
     assert(r.context?.pendingClarification !== 'bedrooms', 'no beds');
+    assert(
+      r.property_results ||
+        r.quick_actions?.options?.some((o) =>
+          /similar|closest|change|budget|bedroom/i.test(o.label)
+        ),
+      'results or refine/recovery'
+    );
     buyCtx = r.context;
   });
 
@@ -175,7 +179,15 @@ const main = async () => {
       'I want to buy a 2 bedroom apartment in Dubai Marina under AED 2M'
     );
     assert(r.route === 'PROPERTY_SEARCH', 'route');
-    assert(r.property_results, 'results');
+    assert(r.context?.filters?.priceMax === 2000000, 'budget applied');
+    assert(r.context?.pendingClarification !== 'budget', 'no budget gate');
+    assert(
+      r.property_results ||
+        r.quick_actions?.options?.some((o) =>
+          /similar|closest|change/i.test(o.label)
+        ),
+      'results or recovery'
+    );
     assert(!r.context?.pendingClarification, 'no pending');
   });
 

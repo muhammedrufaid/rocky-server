@@ -385,14 +385,16 @@ const resolveChatResult = async (trimmed, context = null) => {
     conversionAction === 'whatsapp' ||
     conversionAction === 'agent' ||
     conversionAction === 'viewing' ||
+    conversionAction === 'interested' ||
+    conversionAction === 'view_property' ||
     (highIntent &&
       (context?.recentProperties?.length || context?.selectedProperty))
   ) {
-    const conversion = resolveConversionTurn(trimmed, context);
+    const conversion = await resolveConversionTurn(trimmed, context);
     if (conversion) return conversion;
   }
 
-  // Change search / area / budget / view more stay in property flow
+  // Change search / area / budget / refine / similar stay in property flow
   if (
     hasActivePropertyFlow(context) &&
     (context.pendingClarification ||
@@ -400,12 +402,14 @@ const resolveChatResult = async (trimmed, context = null) => {
       conversionAction === 'change_search' ||
       conversionAction === 'change_area' ||
       conversionAction === 'change_budget' ||
+      conversionAction === 'show_similar' ||
+      conversionAction === 'refine_search' ||
+      conversionAction === 'refine_field' ||
       detectListingType(trimmed) ||
       context.pendingClarification)
   ) {
     if (conversionAction === 'view_more' && context.listingType && context.search) {
       return handlePropertySearchFlow(
-        // Re-run with same criteria by sending a synthetic complete message path
         `${context.listingType} ${context.filters?.propertyType || ''} ${context.filters?.bedrooms || ''} bedroom in ${context.search}`.trim(),
         {
           ...context,
@@ -417,7 +421,10 @@ const resolveChatResult = async (trimmed, context = null) => {
       context.pendingClarification ||
       conversionAction === 'change_search' ||
       conversionAction === 'change_area' ||
-      conversionAction === 'change_budget'
+      conversionAction === 'change_budget' ||
+      conversionAction === 'show_similar' ||
+      conversionAction === 'refine_search' ||
+      conversionAction === 'refine_field'
     ) {
       return handlePropertySearchFlow(trimmed, context);
     }
@@ -438,10 +445,10 @@ const resolveChatResult = async (trimmed, context = null) => {
   }
 
   if (intent === 'CONVERSION') {
-    const conversion = resolveConversionTurn(trimmed, context);
+    const conversion = await resolveConversionTurn(trimmed, context);
     if (conversion) return conversion;
     // Fallback: open agent CTA
-    return resolveConversionTurn('Talk to an Agent', context);
+    return await resolveConversionTurn('Talk to an Agent', context);
   }
 
   if (intent === 'PROPERTY_COUNT') {
@@ -515,14 +522,31 @@ const resolveStreamPlan = async (trimmed, context = null) => {
     conversionAction === 'whatsapp' ||
     conversionAction === 'agent' ||
     conversionAction === 'viewing' ||
+    conversionAction === 'interested' ||
+    conversionAction === 'view_property' ||
     (highIntent &&
       (context?.recentProperties?.length || context?.selectedProperty))
   ) {
-    const conversion = resolveConversionTurn(trimmed, context);
+    const conversion = await resolveConversionTurn(trimmed, context);
     if (conversion) return toImmediatePrepared(conversion, 'CONVERSION');
   }
 
   if (hasActivePropertyFlow(context) && context.pendingClarification) {
+    const result = await handlePropertySearchFlow(trimmed, context);
+    return toImmediatePrepared(result, 'PROPERTY_SEARCH');
+  }
+
+  // Property-flow refinements in stream path
+  if (
+    hasActivePropertyFlow(context) &&
+    (conversionAction === 'show_similar' ||
+      conversionAction === 'refine_search' ||
+      conversionAction === 'refine_field' ||
+      conversionAction === 'change_search' ||
+      conversionAction === 'change_area' ||
+      conversionAction === 'change_budget' ||
+      conversionAction === 'view_more')
+  ) {
     const result = await handlePropertySearchFlow(trimmed, context);
     return toImmediatePrepared(result, 'PROPERTY_SEARCH');
   }
@@ -574,8 +598,8 @@ const resolveStreamPlan = async (trimmed, context = null) => {
 
   if (intent === 'CONVERSION') {
     const conversion =
-      resolveConversionTurn(trimmed, context) ||
-      resolveConversionTurn('Talk to an Agent', context);
+      (await resolveConversionTurn(trimmed, context)) ||
+      (await resolveConversionTurn('Talk to an Agent', context));
     return toImmediatePrepared(conversion, 'CONVERSION');
   }
 

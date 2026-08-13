@@ -198,12 +198,16 @@ const main = async () => {
     assert(/arabian ranches/i.test(q.search), 'area');
 
     const r = await handleChat('I want to buy a villa in Arabian Ranches');
-    // Missing bedrooms → clarification, OR results if we skip — expect bedrooms ask
+    // STEP 15A: search immediately (no bedrooms/budget gate); results or recovery
+    assert(r.route === 'PROPERTY_SEARCH', 'route');
+    assert(r.context?.pendingClarification !== 'budget', 'no budget gate');
+    assert(r.context?.pendingClarification !== 'bedrooms', 'no bedrooms gate');
     assert(
-      r.quick_actions?.options?.some((o) => o.value === '2') ||
-        r.property_results ||
-        r.context?.pendingClarification === 'budget',
-      'bedrooms ask or results or budget'
+      r.property_results ||
+        r.quick_actions?.options?.some((o) =>
+          /similar|closest|change/i.test(o.label)
+        ),
+      'results or recovery'
     );
     assert(r.context?.listingType === 'buy', 'listing buy');
     assert(r.context?.filters?.propertyType === 'Villa', 'Villa ctx');

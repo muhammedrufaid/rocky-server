@@ -4,6 +4,7 @@
 
 const HIGH_INTENT_PATTERNS = [
   /\bi\s+like\s+(this|the|that)\b/i,
+  /\bi\s*(?:'|a)?m\s+interested\b/i,
   /\bi\s+want\s+(this|it|that)\b/i,
   /\bi\s+want\s+to\s+(buy|rent)\s+(it|this|that)\b/i,
   /\bcan\s+i\s+(view|see|visit)\s+(it|this|that|the\s+property)?\b/i,
@@ -71,6 +72,29 @@ const detectConversionAction = (message) => {
     return 'viewing';
   }
   if (
+    text === "i'm interested" ||
+    text === 'im interested' ||
+    text === "i am interested" ||
+    /^i'?m\s+interested(\s+in\s+(the\s+)?(first|second|third|this|that).*)?$/i.test(
+      text
+    )
+  ) {
+    return 'interested';
+  }
+  if (
+    text === 'show closest options' ||
+    text === 'show similar properties' ||
+    text === 'show similar'
+  ) {
+    return 'show_similar';
+  }
+  if (text === 'refine search') {
+    return 'refine_search';
+  }
+  if (text === 'budget' || text === 'bedrooms' || text === 'property type') {
+    return 'refine_field';
+  }
+  if (
     text === 'view more properties' ||
     text === 'view more' ||
     /\bview\s+more\s+propert/i.test(text)
@@ -135,6 +159,7 @@ const resolvePropertyMention = (message, context = null) => {
   if (
     /\b(this|that|the)\s+(property|one|listing)\b/i.test(text) ||
     /\bi\s+like\s+(this|it|that)\b/i.test(text) ||
+    /\bi\s*(?:'|a)?m\s+interested\b/i.test(text) ||
     /\b(view|available|buy|rent)\s+(it|this)\b/i.test(text)
   ) {
     if (context?.selectedProperty) return context.selectedProperty;
