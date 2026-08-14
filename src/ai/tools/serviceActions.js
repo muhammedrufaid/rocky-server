@@ -69,7 +69,11 @@ const resolveServiceActions = (message) => {
   const key = detectServiceKey(message);
   const out = {};
 
-  if (!key || key === 'services') {
+  // Unknown / topic-specific questions must not fall into the generic services dump.
+  // Those are routed to CONTENT_TOPIC / RAG instead.
+  if (!key) return out;
+
+  if (key === 'services') {
     out.service_action = {
       type: 'service_action',
       label: 'Learn More',

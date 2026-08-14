@@ -107,6 +107,10 @@ const toSafeResult = (row) => {
         : undefined,
   };
 
+  if (row.updatedAt) {
+    result.updatedAt = row.updatedAt;
+  }
+
   if (
     row.metadata &&
     typeof row.metadata === 'object' &&
@@ -199,6 +203,7 @@ const searchKnowledge = async (query, options = {}) => {
         slug: 1,
         content: 1,
         metadata: 1,
+        updatedAt: 1,
         score: { $meta: 'vectorSearchScore' },
         // Explicitly never project embedding / embeddingHash
       },

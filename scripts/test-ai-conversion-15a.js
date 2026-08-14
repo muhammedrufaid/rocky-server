@@ -146,8 +146,15 @@ const main = async () => {
     }
     const r = await handleChat('Talk to an Agent', { context: marinaCtx });
     assert(r.contact_action, 'contact');
+    assert(r.contact_action.service === 'property_agent', 'property_agent');
     assert(r.contact_action.property?.url || r.contact_action.property?.title, 'property');
-    for (const bad of FORBIDDEN_PROPERTY_FIELDS) {
+    assert(!r.contact_action.property?.image, 'no image');
+    assert(!r.contact_action.property?.listingAgentEmail, 'no email');
+    assert(!r.whatsapp_action, 'no whatsapp on agent turn');
+    const stillForbidden = FORBIDDEN_PROPERTY_FIELDS.filter(
+      (k) => k !== 'listingAgent' && k !== 'listingAgentPhone'
+    );
+    for (const bad of stillForbidden) {
       assert(
         !Object.prototype.hasOwnProperty.call(r.contact_action.property || {}, bad),
         `no ${bad}`

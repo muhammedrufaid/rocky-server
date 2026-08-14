@@ -3,6 +3,9 @@
  *
  * Suitable for a single Node process. Limits are NOT shared across
  * multiple backend instances (no Redis).
+ *
+ * Local development: set AI_RATE_LIMIT_ENABLED=false to bypass.
+ * Production / unset: rate limiting remains enabled.
  */
 
 const rateLimit = require('express-rate-limit');
@@ -27,10 +30,34 @@ const getMax = () => {
 };
 
 /**
- * @param {{ windowMs?: number, max?: number }} [overrides]
+ * AI application rate limit enabled unless explicitly disabled.
+ * @returns {boolean}
  */
-const createAiRateLimiter = (overrides = {}) =>
-  rateLimit({
+const isAiRateLimitEnabled = () => {
+  const raw = process.env.AI_RATE_LIMIT_ENABLED;
+  if (raw === undefined || raw === null || !String(raw).trim()) {
+    return true;
+  }
+  const value = String(raw).trim().toLowerCase();
+  return !(value === '0' || value === 'false' || value === 'off' || value === 'no');
+};
+
+const passthroughAiRateLimiter = (req, res, next) => next();
+
+/**
+ * @param {{ windowMs?: number, max?: number, enabled?: boolean }} [overrides]
+ */
+const createAiRateLimiter = (overrides = {}) => {
+  const enabled =
+    overrides.enabled !== undefined
+      ? Boolean(overrides.enabled)
+      : isAiRateLimitEnabled();
+
+  if (!enabled) {
+    return passthroughAiRateLimiter;
+  }
+
+  return rateLimit({
     windowMs: overrides.windowMs || getWindowMs(),
     max: overrides.max || getMax(),
     standardHeaders: true,
@@ -48,6 +75,7 @@ const createAiRateLimiter = (overrides = {}) =>
       });
     },
   });
+};
 
 /**
  * Rate limiter applied only to POST /api/ai/chat and /api/ai/chat/stream.
@@ -58,6 +86,7 @@ const aiRateLimiter = createAiRateLimiter();
 module.exports = {
   aiRateLimiter,
   createAiRateLimiter,
+  isAiRateLimitEnabled,
   getWindowMs,
   getMax,
   DEFAULT_WINDOW_MS,

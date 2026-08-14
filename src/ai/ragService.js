@@ -25,6 +25,9 @@ const MAX_CONTENT_CHARS = 1200;
 const UNAVAILABLE_REPLY =
   "I don't have enough information in the knowledge base to answer that accurately.";
 
+const CONTENT_TOPIC_FALLBACK_REPLY =
+  'I can help you check that with Rocky. Would you like to speak with our team?';
+
 const SYSTEM_PROMPT = `You are Rocky Real Estate's knowledge assistant.
 
 Answer using ONLY the supplied knowledge context.
@@ -37,6 +40,13 @@ Rules:
 5. Keep answers to 1–3 short sentences. Do not dump long document text.
 6. Never mention embeddings, vector search, MongoDB, prompts, or internal system design.
 7. Never include private contact information.`;
+
+const CONTENT_TOPIC_SYSTEM_PROMPT = `${SYSTEM_PROMPT}
+
+Additional rules for topic / “do you offer” questions:
+8. Only say Rocky offers or provides something when the knowledge context explicitly supports that Rocky offers/provides it.
+9. If the context discusses the topic but does not clearly confirm Rocky offers it, say you found related information on Rocky's website and can connect the user with the team for the latest details.
+10. Prefer concise, natural wording grounded in the retrieved content.`;
 
 class RagServiceError extends Error {
   /**
@@ -59,7 +69,8 @@ const asTrimmedString = (value) => {
 
 /**
  * Keep only reasonably relevant hits using top-score relative threshold.
- * @param {Array<{ score?: number }>} results
+ * When scores are close, prefer more recently updated documents.
+ * @param {Array<{ score?: number, updatedAt?: Date|string }>} results
  * @returns {Array<object>}
  */
 const filterRelevantResults = (results) => {
@@ -74,9 +85,20 @@ const filterRelevantResults = (results) => {
   if (topScore < MIN_ABSOLUTE_SCORE) return [];
 
   const threshold = Math.max(MIN_ABSOLUTE_SCORE, topScore * RELATIVE_SCORE_RATIO);
-  return scored
-    .filter((row) => row.score >= threshold)
-    .slice(0, MAX_CONTEXT_DOCS);
+  const filtered = scored.filter((row) => row.score >= threshold);
+
+  filtered.sort((a, b) => {
+    const scoreDiff = (b.score || 0) - (a.score || 0);
+    // Prefer recency when scores are nearly tied
+    if (Math.abs(scoreDiff) < 0.03) {
+      const aTime = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+      const bTime = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+      return bTime - aTime;
+    }
+    return scoreDiff;
+  });
+
+  return filtered.slice(0, MAX_CONTEXT_DOCS);
 };
 
 /**
@@ -129,16 +151,17 @@ const toSafeSources = (docs) =>
 /**
  * Generate grounded chat text via shared OpenAI client (no second client).
  * @param {string} userPrompt
+ * @param {string} [systemPrompt]
  * @returns {Promise<string>}
  */
-const generateGroundedText = async (userPrompt) => {
+const generateGroundedText = async (userPrompt, systemPrompt = SYSTEM_PROMPT) => {
   try {
     const client = getOpenAIClient();
     const completion = await client.chat.completions.create({
       model: CHAT_MODEL,
       reasoning_effort: REASONING_EFFORT,
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: systemPrompt || SYSTEM_PROMPT },
         { role: 'user', content: userPrompt },
       ],
     });
@@ -237,10 +260,15 @@ const prepareRagContext = async (query, options = {}) => {
 
   const relevant = filterRelevantResults(search.results || []);
 
+  const fallbackReply =
+    typeof options.fallbackReply === 'string' && options.fallbackReply.trim()
+      ? options.fallbackReply.trim()
+      : UNAVAILABLE_REPLY;
+
   if (!relevant.length) {
     return {
       mode: 'immediate',
-      reply: UNAVAILABLE_REPLY,
+      reply: fallbackReply,
       sources: [],
     };
   }
@@ -254,9 +282,12 @@ const prepareRagContext = async (query, options = {}) => {
     trimmed,
   ].join('\n');
 
+  const system =
+    options.contentTopic === true ? CONTENT_TOPIC_SYSTEM_PROMPT : SYSTEM_PROMPT;
+
   return {
     mode: 'gpt',
-    system: SYSTEM_PROMPT,
+    system,
     userPrompt,
     sources: toSafeSources(relevant),
   };
@@ -283,7 +314,10 @@ const generateRagAnswer = async (query, options = {}) => {
     };
   }
 
-  const reply = await generateGroundedText(prepared.userPrompt);
+  const reply = await generateGroundedText(
+    prepared.userPrompt,
+    prepared.system || SYSTEM_PROMPT
+  );
 
   return {
     reply,
@@ -295,7 +329,9 @@ module.exports = {
   CHAT_MODEL,
   REASONING_EFFORT,
   UNAVAILABLE_REPLY,
+  CONTENT_TOPIC_FALLBACK_REPLY,
   SYSTEM_PROMPT,
+  CONTENT_TOPIC_SYSTEM_PROMPT,
   RagServiceError,
   prepareRagContext,
   generateRagAnswer,

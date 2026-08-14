@@ -10,6 +10,7 @@ const {
   greetingQuickActions,
   knowledgeAreaQuickActions,
   knowledgeGeneralQuickActions,
+  knowledgeTopicQuickActions,
   knowledgeInvestQuickActions,
 } = require('./quickActions');
 const { buildWhatsAppAction } = require('./whatsappAction');
@@ -21,6 +22,7 @@ const {
 const { sanitizeSelectedProperty } = require('./conversationContext');
 const { FUNNEL_STAGES } = require('./funnelStages');
 const { fetchListingAgentForSelectedProperty } = require('./propertyTools');
+const { COMPANY_LINKS } = require('./knownLinks');
 
 /**
  * Safe property payload for non-agent contact actions (no images, no agent phone).
@@ -315,7 +317,7 @@ const resolveConversionTurn = async (message, context = null) => {
 };
 
 /**
- * Next actions after knowledge / area / blog answers.
+ * Next actions after knowledge / area / blog / content-topic answers.
  * Avoid generic "Talk to an Agent" unless investment/high-intent.
  * @param {string} route
  * @param {string} [question]
@@ -338,6 +340,27 @@ const knowledgeNextActions = (route, question = '') => {
   if (route === 'AREA_GUIDE' || route === 'KNOWLEDGE_BOTH') {
     return {
       quick_actions: knowledgeAreaQuickActions(),
+    };
+  }
+
+  if (route === 'CONTENT_TOPIC' || route === 'BLOG') {
+    const whatsapp_action = buildWhatsAppAction(
+      'Hi Rocky, I would like more information about a topic from your website.'
+    );
+    return {
+      service_action: {
+        type: 'service_action',
+        label: 'Learn More',
+        title: 'Rocky Blogs',
+        url: COMPANY_LINKS.blogs,
+      },
+      contact_action: {
+        type: 'contact_action',
+        label: 'Contact Us',
+        service: 'agent',
+      },
+      ...(whatsapp_action ? { whatsapp_action } : {}),
+      quick_actions: knowledgeTopicQuickActions(),
     };
   }
 

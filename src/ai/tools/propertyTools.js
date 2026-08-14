@@ -329,15 +329,26 @@ const detectListingType = (message) => {
   }
 
   if (/\boff[\s-]?plan\b/i.test(text)) return 'off-plan';
-  if (
-    /\b(for\s+rent|to\s+rent|want\s+to\s+rent|looking\s+to\s+rent|rentals?)\b/i.test(
-      text
-    )
-  ) {
-    return 'rent';
+
+  // Informational rental topics (Flexi Rent / short-term) are NOT listing-type selections
+  const isInformationalRentalTopic =
+    /\bflexi[\s-]?rent\b/i.test(text) ||
+    /\bflexible\s+rents?\b/i.test(text) ||
+    /\bflexible\s+rentals?\b/i.test(text) ||
+    /\bshort[\s-]?term\s+rentals?\b/i.test(text) ||
+    /\brent(?:als?)?\s+on\s+a\s+flexible\b/i.test(text);
+
+  if (!isInformationalRentalTopic) {
+    if (
+      /\b(for\s+rent|to\s+rent|want\s+to\s+rent|looking\s+to\s+rent|rentals?)\b/i.test(
+        text
+      )
+    ) {
+      return 'rent';
+    }
+    // Standalone "rent" as a short selection (already handled), or "rent a ..."
+    if (/^\s*rent\b/i.test(text) || /\brent\s+a\b/i.test(text)) return 'rent';
   }
-  // Standalone "rent" as a short selection (already handled), or "rent a ..."
-  if (/^\s*rent\b/i.test(text) || /\brent\s+a\b/i.test(text)) return 'rent';
   if (
     /\b(for\s+sale|to\s+buy|want\s+to\s+buy|looking\s+to\s+buy|purchase)\b/i.test(
       text

@@ -3,7 +3,7 @@
  *
  * Priority (after confidential guard / active flows):
  * GREETING → CONVERSION → PROPERTY_COUNT → SELL_PROPERTY → PROPERTY_SEARCH
- * → COMPANY → SERVICES → TEAM → BLOG → AREA_GUIDE / FAQ / KNOWLEDGE_BOTH → UNSUPPORTED
+ * → COMPANY → SERVICES → CONTENT_TOPIC → TEAM → BLOG → AREA_GUIDE / FAQ / KNOWLEDGE_BOTH → UNSUPPORTED
  */
 
 const COMPANY_PATTERNS = [
@@ -26,7 +26,7 @@ const SERVICE_PATTERNS = [
   /\bwhat\s+does\s+rocky.{0,30}\bdo\b/i,
   /\b(property\s+management|professional\s+inspection|brokerage|mortgage|after[\s-]?sales|property\s+listing\s*(?:&|and)?\s*marketing)\b/i,
   /\btell\s+me\s+about\s+(?:your\s+)?(property\s+management|brokerage|mortgage|inspection|listing)\b/i,
-  /\bdo\s+you\s+(provide|offer)\b/i,
+  /\bdo\s+you\s+(provide|offer)\s+(?:property\s+)?(?:management|brokerage|listing|marketing|mortgage|inspection|services?)\b/i,
 ];
 
 const TEAM_PATTERNS = [
@@ -53,6 +53,9 @@ const PROPERTY_COUNT_PATTERNS = [
 const PROPERTY_SEARCH_PATTERNS = [
   /\b(show|find|list|search|get)\b.{0,40}\b(apartments?|villas?|townhouses?|penthouses?|offices?|properties|listings|homes)\b/i,
   /\b(apartments?|villas?|townhouses?|penthouses?)\s+in\b/i,
+  /\b(apartments?|villas?|townhouses?|penthouses?|properties|homes|listings).{0,80}\b(for\s+rent|to\s+rent|for\s+sale|available)\b/i,
+  /\bwhat\s+(apartments?|villas?|properties|homes|listings).{0,80}\b(available|for\s+rent|for\s+sale|in)\b/i,
+  /\b(apartments?|villas?|townhouses?|penthouses?|properties).{0,60}\bin\s+[A-Za-z]/i,
   /\bproperties?\s+(under|below|less\s+than|above|over|in|at|for)\b/i,
   /\blistings?\s+(under|below|in|at|for)\b/i,
   /\b(under|below)\s+(?:aed\s*)?[\d,.]+\s*(million|m)?\b.{0,20}\b(propert|listing|apartment|villa)/i,
@@ -97,11 +100,30 @@ const CONVERSION_PATTERNS = [
   /^contact\s+property\s+management$/i,
 ];
 
+/**
+ * Informational topic/content queries → dynamic RAG (blog/faq/service).
+ * Routing only — answers come from indexed content, never hard-coded facts.
+ */
+const CONTENT_TOPIC_PATTERNS = [
+  /\bflexi[\s-]?rent\b/i,
+  /\bflexible\s+rents?\b/i,
+  /\bflexible\s+rentals?\b/i,
+  /\brent(?:als?)?\s+on\s+a\s+flexible\b/i,
+  /\bon\s+a\s+flexible\s+basis\b/i,
+  /\bshort[\s-]?term\s+rentals?\b/i,
+  /\bi\s+need\s+(?:a\s+)?(flexible\s+rental|flexi[\s-]?rent|short[\s-]?term\s+rental)\b/i,
+  /\b(is|are)\s+.{0,50}\b(flexible\s+rental|flexi[\s-]?rent|short[\s-]?term\s+rental).{0,30}\bavailable\b/i,
+  /\b(rental|buying|investment|property)\s+guides?\b/i,
+  /\bwhat\s+is\s+(?:a\s+)?(?:flexi|flexible|freehold|leasehold)\b/i,
+  // "Do you offer/have X" when X is not a known static service catalogue item
+  /\bdo\s+you\s+(offer|provide|have)\b(?![\s\S]*\b(services?|property\s+management|brokerage|listing|marketing|mortgage|inspection)\b)/i,
+  /\bcan\s+i\s+rent\s+on\s+a\s+flexible\b/i,
+];
+
 const BLOG_PATTERNS = [
   /\b(blog|articles?|guides?\s+and\s+articles?)\b/i,
   /\b(latest|recent)\s+.{0,40}\b(articles?|blogs?|posts?)\b/i,
   /\bproperty\s+investment\s+articles?\b/i,
-  /\bflexi\s*rent\b/i,
   /\bfreehold\s+vs\s+leasehold\b/i,
   /\b(difference\s+between\s+)?freehold\s+and\s+leasehold\b/i,
   /\bwhat\s+is\s+freehold\b/i,
@@ -165,7 +187,10 @@ const classifyIntent = (message) => {
   if (matchesAny(text, SELL_PROPERTY_PATTERNS)) return 'SELL_PROPERTY';
   if (matchesAny(text, PROPERTY_SEARCH_PATTERNS)) return 'PROPERTY_SEARCH';
   if (matchesAny(text, COMPANY_PATTERNS)) return 'COMPANY_INFO';
+  // Known service catalogue before open-ended topic RAG
   if (matchesAny(text, SERVICE_PATTERNS)) return 'SERVICE_INFO';
+  // Topic/content RAG (Flexi Rent, guides, “do you offer X”, …)
+  if (matchesAny(text, CONTENT_TOPIC_PATTERNS)) return 'CONTENT_TOPIC';
   if (matchesAny(text, TEAM_PATTERNS)) return 'TEAM_INFO';
   if (matchesAny(text, KNOWLEDGE_BOTH_PATTERNS)) return 'KNOWLEDGE_BOTH';
   if (matchesAny(text, BLOG_PATTERNS)) return 'BLOG';

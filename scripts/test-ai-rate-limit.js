@@ -94,7 +94,12 @@ const runIsolatedLimiterTests = async () => {
   app.set('trust proxy', 1);
   app.use(express.json());
 
-  const limiter = createAiRateLimiter({ windowMs: 60_000, max: 3 });
+  // Force-enable so local AI_RATE_LIMIT_ENABLED=false does not skip isolated tests
+  const limiter = createAiRateLimiter({
+    windowMs: 60_000,
+    max: 3,
+    enabled: true,
+  });
 
   app.post('/api/ai/chat', limiter, (req, res) => {
     hitCount += 1;

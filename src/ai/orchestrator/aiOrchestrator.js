@@ -28,6 +28,7 @@ const {
   generateRagAnswer,
   prepareRagContext,
   RagServiceError,
+  CONTENT_TOPIC_FALLBACK_REPLY,
 } = require('../ragService');
 const { classifyIntent } = require('./intentRouter');
 const {
@@ -271,14 +272,15 @@ const handleTeam = async (question) => {
  * @param {string} question
  * @param {string[]|undefined} sourceTypes
  * @param {string} route
+ * @param {{ contentTopic?: boolean, fallbackReply?: string }} [ragOptions]
  */
-const handleKnowledgeRag = async (question, sourceTypes, route) => {
+const handleKnowledgeRag = async (question, sourceTypes, route, ragOptions = {}) => {
   if (route === 'SERVICE_INFO') {
     const short = resolveShortServiceTurn(question);
     if (short) return short;
   }
 
-  const options = {};
+  const options = { ...ragOptions };
   if (Array.isArray(sourceTypes) && sourceTypes.length) {
     options.sourceTypes = sourceTypes;
   }
@@ -287,9 +289,14 @@ const handleKnowledgeRag = async (question, sourceTypes, route) => {
   const base = {
     reply: result.reply,
     sources: Array.isArray(result.sources) ? result.sources : [],
-    openaiCalls: 2,
+    openaiCalls: result.sources?.length ? 2 : 1,
     route,
   };
+
+  // Immediate fallback (no GPT) still counts as retrieval attempt only
+  if (!result.sources?.length) {
+    base.openaiCalls = 1; // query embedding only
+  }
 
   if (route === 'SERVICE_INFO') {
     return withStructured(base, resolveServiceActions(question));
@@ -478,7 +485,23 @@ const resolveChatResult = async (trimmed, context = null) => {
   }
 
   if (intent === 'BLOG') {
-    return handleKnowledgeRag(trimmed, ['blog'], 'BLOG');
+    return handleKnowledgeRag(trimmed, ['blog'], 'BLOG', {
+      contentTopic: true,
+      fallbackReply: CONTENT_TOPIC_FALLBACK_REPLY,
+    });
+  }
+
+  if (intent === 'CONTENT_TOPIC') {
+    // Semantic retrieval across indexed blog/faq/service content (no hard-coded answers)
+    return handleKnowledgeRag(
+      trimmed,
+      ['blog', 'faq', 'service'],
+      'CONTENT_TOPIC',
+      {
+        contentTopic: true,
+        fallbackReply: CONTENT_TOPIC_FALLBACK_REPLY,
+      }
+    );
   }
 
   if (intent === 'AREA_GUIDE') {
@@ -646,10 +669,29 @@ const resolveStreamPlan = async (trimmed, context = null) => {
   }
 
   if (intent === 'BLOG') {
-    const prepared = await prepareRagContext(trimmed, { sourceTypes: ['blog'] });
+    const prepared = await prepareRagContext(trimmed, {
+      sourceTypes: ['blog'],
+      contentTopic: true,
+      fallbackReply: CONTENT_TOPIC_FALLBACK_REPLY,
+    });
     return {
       route: 'BLOG',
       prepared: { ...prepared, ...knowledgeNextActions('BLOG', trimmed) },
+    };
+  }
+
+  if (intent === 'CONTENT_TOPIC') {
+    const prepared = await prepareRagContext(trimmed, {
+      sourceTypes: ['blog', 'faq', 'service'],
+      contentTopic: true,
+      fallbackReply: CONTENT_TOPIC_FALLBACK_REPLY,
+    });
+    return {
+      route: 'CONTENT_TOPIC',
+      prepared: {
+        ...prepared,
+        ...knowledgeNextActions('CONTENT_TOPIC', trimmed),
+      },
     };
   }
 

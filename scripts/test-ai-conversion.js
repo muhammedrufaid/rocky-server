@@ -257,10 +257,18 @@ const main = async () => {
 
   await run('Flexi Rent → knowledge + next actions', async () => {
     if (!process.env.OPENAI_API_KEY) return;
-    assert(classifyIntent('What is Flexi Rent?') === 'BLOG', 'intent');
+    const intent = classifyIntent('What is Flexi Rent?');
+    assert(intent === 'CONTENT_TOPIC' || intent === 'BLOG', `intent=${intent}`);
     const r = await handleChat('What is Flexi Rent?');
-    assert(r.route === 'BLOG', `route=${r.route}`);
+    assert(
+      r.route === 'CONTENT_TOPIC' || r.route === 'BLOG',
+      `route=${r.route}`
+    );
     assert(r.quick_actions, 'next actions');
+    assert(
+      !/brokerage, property management, listing/i.test(r.reply),
+      'not generic services dump'
+    );
   });
 
   await run('Best areas in Dubai → area guide + actions', async () => {

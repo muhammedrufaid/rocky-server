@@ -172,6 +172,12 @@ const KNOWLEDGE_GENERAL_OPTIONS = [
   { label: 'Explore Areas', value: 'Explore Dubai Areas' },
 ];
 
+const KNOWLEDGE_TOPIC_OPTIONS = [
+  { label: 'Learn More', value: 'Learn More' },
+  { label: 'Contact Us', value: 'Talk to an Agent' },
+  { label: 'WhatsApp Rocky', value: 'WhatsApp Rocky' },
+];
+
 const KNOWLEDGE_INVEST_OPTIONS = [
   { label: 'Explore Investment Properties', value: 'View Properties' },
   { label: 'Talk to an Agent', value: 'Talk to an Agent' },
@@ -283,6 +289,9 @@ const knowledgeAreaQuickActions = () =>
 const knowledgeGeneralQuickActions = () =>
   buildQuickActions('What would you like to do next?', KNOWLEDGE_GENERAL_OPTIONS);
 
+const knowledgeTopicQuickActions = () =>
+  buildQuickActions('Would you like more help with this topic?', KNOWLEDGE_TOPIC_OPTIONS);
+
 const knowledgeInvestQuickActions = () =>
   buildQuickActions('What would you like to do next?', KNOWLEDGE_INVEST_OPTIONS);
 
@@ -307,6 +316,7 @@ module.exports = {
   sellDoneQuickActions,
   knowledgeAreaQuickActions,
   knowledgeGeneralQuickActions,
+  knowledgeTopicQuickActions,
   knowledgeInvestQuickActions,
   LISTING_TYPE_OPTIONS,
   BEDROOM_OPTIONS,
