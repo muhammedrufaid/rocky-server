@@ -7,7 +7,7 @@ const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
 const MAX_TOOL_ROUNDS = 4;
 const TOOL_MAX_TOKENS = 1024;
-const REPLY_MAX_TOKENS = 180;
+const REPLY_MAX_TOKENS = 600;
 
 const PROPERTY_CTAS = ['View listing', 'Book a viewing', 'See similar properties'];
 const CONTENT_CTAS = ['Talk to an agent', 'Explore related properties'];
@@ -117,6 +117,15 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage }) {
     if (!msg) {
       throw new Error('Empty response from OpenAI');
     }
+
+    console.log(
+      'finish_reason:',
+      completion.choices?.[0]?.finish_reason,
+      '| usage:',
+      completion.usage,
+      '| content_length:',
+      (msg.content || '').length
+    );
 
     messages.push(msg);
 
