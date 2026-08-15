@@ -4,7 +4,7 @@ const { Lead, ChatbotKnowledge } = require('./chat.models');
 
 const VECTOR_INDEX_NAME = process.env.CHATBOT_VECTOR_INDEX || 'chatbot_knowledge_vector_index';
 const VECTOR_MIN_SCORE = Number(process.env.CHAT_VECTOR_MIN_SCORE) || 0.75;
-const CONTENT_LIMIT = 6;
+const CONTENT_LIMIT = 3;
 const PROPERTY_LIMIT = 6;
 
 const TOOL_DEFINITIONS = [

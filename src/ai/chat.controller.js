@@ -6,6 +6,8 @@ const { TOOL_DEFINITIONS, executeTool } = require('./chat.tools');
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
 const MAX_TOOL_ROUNDS = 4;
+const TOOL_MAX_TOKENS = 1024;
+const REPLY_MAX_TOKENS = 180;
 
 const PROPERTY_CTAS = ['View listing', 'Book a viewing', 'See similar properties'];
 const CONTENT_CTAS = ['Talk to an agent', 'Explore related properties'];
@@ -101,12 +103,13 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage }) {
   let profile = userProfile;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+    const hasToolResults = messages.some((m) => m.role === 'tool');
     const completion = await openai.chat.completions.create({
       model,
       messages,
       tools: TOOL_DEFINITIONS,
       tool_choice: 'auto',
-      max_completion_tokens: 1024,
+      max_completion_tokens: hasToolResults ? REPLY_MAX_TOKENS : TOOL_MAX_TOKENS,
       reasoning_effort: reasoningEffort,
     });
 
