@@ -1,5 +1,20 @@
 const Property = require('../models/Property');
 
+// Stored on Mongo docs for AI/semantic search only — never expose via frontend APIs.
+const INTERNAL_PROPERTY_FIELDS = ['embedding', 'embeddingHash'];
+
+const stripInternalPropertyFields = (doc) => {
+  if (!doc || typeof doc !== 'object') return doc;
+  INTERNAL_PROPERTY_FIELDS.forEach((field) => {
+    delete doc[field];
+  });
+  return doc;
+};
+
+const publicPropertyProjection = Object.fromEntries(
+  INTERNAL_PROPERTY_FIELDS.map((field) => [field, 0])
+);
+
 const SEARCH_FIELDS = [
   'propertyTitle',
   'city',
@@ -152,6 +167,7 @@ const paginateAggregation = async ({ basePipeline, page = 1, limit = 10, sort = 
 
   const pipeline = [
     ...basePipeline,
+    { $project: publicPropertyProjection },
     { $sort: sort },
     {
       $facet: {
@@ -174,14 +190,13 @@ const paginateAggregation = async ({ basePipeline, page = 1, limit = 10, sort = 
     hasPrevPage: safePage > 1,
   };
 
-  // remove internal computed fields
+  // remove internal computed + AI-only fields
   const cleaned = items.map((doc) => {
-    // docs are plain objects here
     delete doc.__priceNum;
     delete doc.__sizeNum;
     delete doc.__bedroomsNum;
     delete doc.__bathroomsNum;
-    return doc;
+    return stripInternalPropertyFields(doc);
   });
 
   return { properties: cleaned, total, pagination };
@@ -224,7 +239,9 @@ const {
 const fetchFeaturedJebelAliVillageProperties = async () => {
   const docs = await Property.find({
     propertyRefNo: { $in: FEATURED_JEBEL_ALI_VILLAGE_PROPERTY_REF_NOS },
-  }).lean();
+  })
+    .select(publicPropertyProjection)
+    .lean();
 
   const byRefNo = new Map(docs.map((doc) => [doc.propertyRefNo, doc]));
   const properties = [];
@@ -251,7 +268,10 @@ const fetchFeaturedJebelAliVillageProperties = async () => {
 
 const fetchPropertyByRefNo = async (propertyRefNo) => {
   if (!propertyRefNo || typeof propertyRefNo !== 'string') return null;
-  return Property.findOne({ propertyRefNo: propertyRefNo.trim() }).lean();
+  const doc = await Property.findOne({ propertyRefNo: propertyRefNo.trim() })
+    .select(publicPropertyProjection)
+    .lean();
+  return doc ? stripInternalPropertyFields(doc) : null;
 };
 
 const fetchUniquePropertyTypes = async () => {
