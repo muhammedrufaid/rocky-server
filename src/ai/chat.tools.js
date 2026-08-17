@@ -7,6 +7,40 @@ const VECTOR_MIN_SCORE = Number(process.env.CHAT_VECTOR_MIN_SCORE) || 0.75;
 const CONTENT_LIMIT = 3;
 const PROPERTY_LIMIT = 6;
 
+const NEARBY_AREAS = {
+  'dubai marina': ['JBR', 'Palm Jumeirah'],
+  'jbr': ['Dubai Marina', 'Palm Jumeirah'],
+  'jumeirah beach residence': ['Dubai Marina', 'Palm Jumeirah'],
+  'palm jumeirah': ['Dubai Marina', 'JBR'],
+  'downtown dubai': ['Business Bay', 'DIFC'],
+  downtown: ['Business Bay', 'DIFC'],
+  'business bay': ['Downtown Dubai', 'DIFC'],
+  difc: ['Downtown Dubai', 'Business Bay'],
+  jvc: ['JVT', 'Arjan'],
+  'jumeirah village circle': ['JVT', 'Arjan'],
+  jvt: ['JVC', 'Sports City'],
+  'jumeirah village triangle': ['JVC', 'Sports City'],
+  'dubai hills': ['Arabian Ranches', 'Mohammed Bin Rashid City'],
+  'dubai hills estate': ['Arabian Ranches', 'Mohammed Bin Rashid City'],
+  'arabian ranches': ['Dubai Hills Estate', 'Sports City'],
+  'dubai south': ['Jebel Ali', 'Jebel Ali Village'],
+  'jebel ali village': ['Jebel Ali', 'Dubai South'],
+  'jebel ali': ['Dubai South', 'Jebel Ali Village'],
+  'dubai harbour': ['Dubai Marina', 'Emaar Beachfront'],
+  'emaar beachfront': ['Dubai Harbour', 'Dubai Marina'],
+  'dubai creek harbour': ['Downtown Dubai', 'Business Bay'],
+  'creek harbour': ['Downtown Dubai', 'Business Bay'],
+  'mbr city': ['Dubai Hills Estate', 'Arabian Ranches'],
+  'mohammed bin rashid city': ['Dubai Hills Estate', 'Arabian Ranches'],
+  'sports city': ['Motor City', 'JVT'],
+  'motor city': ['Sports City', 'Arabian Ranches'],
+  arjan: ['JVC', 'Al Barsha'],
+  'al barsha': ['Tecom', 'Al Sufouh'],
+  tecom: ['Al Barsha', 'Dubai Internet City'],
+  'dubai internet city': ['Dubai Media City', 'Tecom'],
+  'dubai media city': ['Dubai Internet City', 'JBR'],
+};
+
 const TOOL_DEFINITIONS = [
   {
     type: 'function',
@@ -141,8 +175,32 @@ function profilePatchFromPropertyFilters(filters) {
   return patch;
 }
 
-async function searchProperties(filters = {}) {
-  const search = (filters.location || '').toString().trim();
+function nearbyAreasFor(location) {
+  const q = String(location || '')
+    .trim()
+    .toLowerCase();
+  if (!q || q === 'dubai' || q === 'uae' || q === 'united arab emirates') return [];
+  if (NEARBY_AREAS[q]) return NEARBY_AREAS[q].slice(0, 2);
+
+  let bestKey = '';
+  for (const key of Object.keys(NEARBY_AREAS)) {
+    if ((q.includes(key) || key.includes(q)) && key.length > bestKey.length) bestKey = key;
+  }
+  return bestKey ? NEARBY_AREAS[bestKey].slice(0, 2) : [];
+}
+
+function uniqueCards(cards) {
+  const seen = new Set();
+  const out = [];
+  for (const card of cards) {
+    if (!card?.id || seen.has(card.id)) continue;
+    seen.add(card.id);
+    out.push(card);
+  }
+  return out;
+}
+
+function listingQueryOpts(filters, search) {
   const queryFilters = {};
   if (filters.bedrooms !== undefined && filters.bedrooms !== null && filters.bedrooms !== '') {
     queryFilters.bedrooms = filters.bedrooms;
@@ -154,16 +212,20 @@ async function searchProperties(filters = {}) {
     queryFilters.priceMax = filters.budgetMax;
   }
   if (filters.type) queryFilters.propertyType = filters.type;
+  return { page: 1, limit: PROPERTY_LIMIT, search, filters: queryFilters };
+}
 
-  const opts = { page: 1, limit: PROPERTY_LIMIT, search, filters: queryFilters };
+async function fetchPropertyCards(filters, search) {
+  const opts = listingQueryOpts(filters, search);
   const purpose = normalizePurpose(filters.purpose);
-
   let result;
   if (purpose === 'Buy') result = await propertyDbService.fetchBuyProperties(opts);
   else if (purpose === 'Rent') result = await propertyDbService.fetchRentProperties(opts);
   else result = await propertyDbService.fetchAllProperties(opts);
+  return (result.properties || []).map(toPropertyCard);
+}
 
-  const propertyCards = (result.properties || []).map(toPropertyCard);
+function propertySearchResult(propertyCards, filters, extraPayload = {}) {
   return {
     propertyCards,
     sources: [],
@@ -180,8 +242,43 @@ async function searchProperties(filters = {}) {
         area: card.area,
         listingUrl: card.listingUrl,
       })),
+      ...extraPayload,
     },
   };
+}
+
+async function searchProperties(filters = {}) {
+  const search = (filters.location || '').toString().trim();
+  const propertyCards = await fetchPropertyCards(filters, search);
+  if (propertyCards.length || !search) {
+    return propertySearchResult(propertyCards, filters, {
+      requestedLocation: search || null,
+      broadened: false,
+    });
+  }
+
+  const nearbyAreas = nearbyAreasFor(search).filter(
+    (area) => area.toLowerCase() !== search.toLowerCase()
+  );
+  if (!nearbyAreas.length) {
+    return propertySearchResult([], filters, {
+      requestedLocation: search,
+      broadened: false,
+      nearbyAreas: [],
+    });
+  }
+
+  const nearbyCards = [];
+  for (const area of nearbyAreas) {
+    const cards = await fetchPropertyCards(filters, area);
+    nearbyCards.push(...cards);
+  }
+
+  return propertySearchResult(uniqueCards(nearbyCards).slice(0, PROPERTY_LIMIT), filters, {
+    requestedLocation: search,
+    broadened: true,
+    nearbyAreas,
+  });
 }
 
 async function embedQuery(query) {
