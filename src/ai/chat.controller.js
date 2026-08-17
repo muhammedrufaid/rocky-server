@@ -161,6 +161,15 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage }) {
         };
       }
 
+      console.log(
+        'TOOL CALL:',
+        call.function?.name,
+        'args:',
+        call.function?.arguments,
+        '| propertyCards returned:',
+        result.propertyCards?.length ?? 0
+      );
+
       if (result.propertyCards?.length) propertyCards.push(...result.propertyCards);
       if (result.sources?.length) sources.push(...result.sources);
       if (result.leadCaptured) leadCaptured = true;
