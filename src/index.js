@@ -78,7 +78,7 @@ app.use('/api/services', serviceRoutes);
 app.use('/api/blogs', blogRoutes);
 app.use('/api/team-members', teamMemberRoutes);
 app.use('/api/chat', chatRoutes);
-
+ 
 // Error handler (e.g. Multer/Cloudinary errors)
 app.use((err, req, res, next) => {
   if (!err) return next();
