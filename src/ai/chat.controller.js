@@ -11,6 +11,11 @@ const REPLY_MAX_TOKENS = 600;
 
 const PROPERTY_CTAS = ['View listing', 'Book a viewing', 'See similar properties'];
 const CONTENT_CTAS = ['Talk to an agent', 'Explore related properties'];
+const BOTH_EMPTY_REPLIES = [
+  'Let me explore a few more suitable options around your preferred area. Do you have a preferred budget range?',
+  'Let me narrow this down for you. What budget range would you like to stay within?',
+  'Let me help you find the closest suitable options. Would you prefer to adjust the budget or consider nearby areas?',
+];
 
 function getOpenAI() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -86,7 +91,11 @@ function toOpenAIHistory(messages) {
   return recent.map((m) => ({ role: m.role, content: m.content }));
 }
 
-async function runModelLoop({ sessionId, userProfile, history, userMessage }) {
+function pickBothEmptyReply(turnIndex) {
+  return BOTH_EMPTY_REPLIES[turnIndex % BOTH_EMPTY_REPLIES.length];
+}
+
+async function runModelLoop({ sessionId, userProfile, history, userMessage, turnIndex }) {
   const openai = getOpenAI();
   const model = process.env.OPENAI_CHAT_MODEL || process.env.OPENAI_MODEL || 'gpt-5-nano';
   const reasoningEffort = process.env.OPENAI_REASONING_EFFORT || 'minimal';
@@ -101,6 +110,8 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage }) {
   const sources = [];
   let leadCaptured = false;
   let profile = userProfile;
+  let previousPropertySearchEmpty = false;
+  let lastSearchBothEmpty = false;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     const hasToolResults = messages.some((m) => m.role === 'tool');
@@ -150,7 +161,10 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage }) {
 
       let result;
       try {
-        result = await executeTool(call.function?.name, args, { sessionId });
+        result = await executeTool(call.function?.name, args, {
+          sessionId,
+          previousPropertySearchEmpty,
+        });
       } catch (err) {
         result = {
           propertyCards: [],
@@ -175,11 +189,28 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage }) {
       if (result.leadCaptured) leadCaptured = true;
       if (result.profilePatch) profile = mergeProfile(profile, result.profilePatch);
 
+      if (call.function?.name === 'search_properties') {
+        const returnedCards = result.propertyCards?.length ?? 0;
+        if (returnedCards === 0) previousPropertySearchEmpty = true;
+        lastSearchBothEmpty = !!result.modelPayload?.bothEmpty;
+        if (returnedCards > 0) lastSearchBothEmpty = false;
+      }
+
       messages.push({
         role: 'tool',
         tool_call_id: call.id,
         content: JSON.stringify(result.modelPayload),
       });
+    }
+
+    if (lastSearchBothEmpty && propertyCards.length === 0) {
+      return {
+        reply: pickBothEmptyReply(turnIndex),
+        propertyCards: uniqueBy(propertyCards, (c) => c.id),
+        sources: uniqueBy(sources, (s) => s.url || s.title),
+        leadCaptured,
+        profile,
+      };
     }
   }
 
@@ -203,6 +234,7 @@ const chat = async (req, res) => {
       userProfile: conversation.userProfile || {},
       history,
       userMessage: message,
+      turnIndex: conversation.messages.length,
     });
 
     const reply = result.reply || 'How can I help you with Dubai property today?';

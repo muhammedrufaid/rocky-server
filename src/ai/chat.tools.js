@@ -188,12 +188,16 @@ function propertySearchResult(propertyCards, filters, extraPayload = {}) {
   };
 }
 
-async function searchProperties(filters = {}) {
+async function searchProperties(filters = {}, { previousPropertySearchEmpty } = {}) {
   const search = (filters.location || '').toString().trim();
   const propertyCards = await fetchPropertyCards(filters, search);
-  return propertySearchResult(propertyCards, filters, {
+  const extraPayload = {
     requestedLocation: search || null,
-  });
+  };
+  if (propertyCards.length === 0 && previousPropertySearchEmpty) {
+    extraPayload.bothEmpty = true;
+  }
+  return propertySearchResult(propertyCards, filters, extraPayload);
 }
 
 async function embedQuery(query) {
@@ -315,8 +319,10 @@ async function captureLead({ name, phone, email, intent }, sessionId) {
   };
 }
 
-async function executeTool(name, args, { sessionId } = {}) {
-  if (name === 'search_properties') return searchProperties(args || {});
+async function executeTool(name, args, { sessionId, previousPropertySearchEmpty } = {}) {
+  if (name === 'search_properties') {
+    return searchProperties(args || {}, { previousPropertySearchEmpty });
+  }
   if (name === 'search_content') return searchContent(args || {});
   if (name === 'capture_lead') return captureLead(args || {}, sessionId);
   return {
