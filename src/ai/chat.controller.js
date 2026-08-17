@@ -25,6 +25,57 @@ function getOpenAI() {
   return new OpenAI({ apiKey });
 }
 
+function emptySearchFilters() {
+  return {
+    location: null,
+    bedrooms: null,
+    budgetMin: null,
+    budgetMax: null,
+    type: null,
+    purpose: null,
+  };
+}
+
+function copySearchFilters(filters = {}) {
+  return {
+    location: filters.location || null,
+    bedrooms: filters.bedrooms ?? null,
+    budgetMin: filters.budgetMin ?? null,
+    budgetMax: filters.budgetMax ?? null,
+    type: filters.type || null,
+    purpose: filters.purpose || null,
+  };
+}
+
+function toLastSearchFilters(args = {}) {
+  const num = (value) => {
+    if (value === undefined || value === null || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  };
+  return {
+    location: args.location ? String(args.location).trim() : null,
+    bedrooms: num(args.bedrooms),
+    budgetMin: num(args.budgetMin),
+    budgetMax: num(args.budgetMax),
+    type: args.type ? String(args.type).trim() : null,
+    purpose: args.purpose ? String(args.purpose).trim() : null,
+  };
+}
+
+function toStoredPropertyCards(cards = []) {
+  return (cards || []).slice(0, 10).map((card) => ({
+    id: card.id || '',
+    title: card.title || '',
+    price: card.price ?? '',
+    beds: card.beds ?? '',
+    baths: card.baths ?? '',
+    area: card.area || '',
+    imageUrl: card.imageUrl || '',
+    listingUrl: card.listingUrl || '',
+  }));
+}
+
 function mergeProfile(current, patch) {
   const next = {
     preferredAreas: [...(current.preferredAreas || [])],
@@ -34,6 +85,8 @@ function mergeProfile(current, patch) {
     },
     bedrooms: current.bedrooms ?? null,
     purpose: current.purpose || null,
+    lastPropertyCards: toStoredPropertyCards(current.lastPropertyCards),
+    lastSearchFilters: copySearchFilters(current.lastSearchFilters || emptySearchFilters()),
   };
 
   if (Array.isArray(patch.preferredAreas)) {
@@ -51,6 +104,12 @@ function mergeProfile(current, patch) {
   }
   if (patch.bedrooms !== undefined && patch.bedrooms !== null) next.bedrooms = patch.bedrooms;
   if (patch.purpose) next.purpose = patch.purpose;
+  if (Array.isArray(patch.lastPropertyCards)) {
+    next.lastPropertyCards = toStoredPropertyCards(patch.lastPropertyCards);
+  }
+  if (patch.lastSearchFilters) {
+    next.lastSearchFilters = copySearchFilters(patch.lastSearchFilters);
+  }
 
   return next;
 }
@@ -68,7 +127,7 @@ function uniqueBy(items, keyFn) {
 }
 
 function pickSuggestedCta({ propertyCards, sources, leadCaptured, turnIndex }) {
-  if (leadCaptured) return null;
+  if (leadCaptured) return CONTENT_CTAS[0];
   if (propertyCards.length) return PROPERTY_CTAS[turnIndex % PROPERTY_CTAS.length];
   if (sources.length) return CONTENT_CTAS[turnIndex % CONTENT_CTAS.length];
   return null;
@@ -80,7 +139,14 @@ async function loadConversation(sessionId) {
     conversation = await Conversation.create({
       sessionId,
       messages: [],
-      userProfile: { preferredAreas: [], budget: { min: null, max: null }, bedrooms: null, purpose: null },
+      userProfile: {
+        preferredAreas: [],
+        budget: { min: null, max: null },
+        bedrooms: null,
+        purpose: null,
+        lastPropertyCards: [],
+        lastSearchFilters: emptySearchFilters(),
+      },
     });
   }
   return conversation;
@@ -193,7 +259,13 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         const returnedCards = result.propertyCards?.length ?? 0;
         if (returnedCards === 0) previousPropertySearchEmpty = true;
         lastSearchBothEmpty = !!result.modelPayload?.bothEmpty;
-        if (returnedCards > 0) lastSearchBothEmpty = false;
+        if (returnedCards > 0) {
+          lastSearchBothEmpty = false;
+          profile = mergeProfile(profile, {
+            lastPropertyCards: result.propertyCards,
+            lastSearchFilters: toLastSearchFilters(args),
+          });
+        }
       }
 
       messages.push({

@@ -27,6 +27,29 @@ const conversationSchema = new mongoose.Schema(
       },
       bedrooms: { type: Number, default: null },
       purpose: { type: String, default: null, trim: true },
+      lastPropertyCards: {
+        type: [
+          {
+            id: { type: String, default: '' },
+            title: { type: String, default: '' },
+            price: { type: mongoose.Schema.Types.Mixed, default: '' },
+            beds: { type: mongoose.Schema.Types.Mixed, default: '' },
+            baths: { type: mongoose.Schema.Types.Mixed, default: '' },
+            area: { type: String, default: '' },
+            imageUrl: { type: String, default: '' },
+            listingUrl: { type: String, default: '' },
+          },
+        ],
+        default: [],
+      },
+      lastSearchFilters: {
+        location: { type: String, default: null, trim: true },
+        bedrooms: { type: Number, default: null },
+        budgetMin: { type: Number, default: null },
+        budgetMax: { type: Number, default: null },
+        type: { type: String, default: null, trim: true },
+        purpose: { type: String, default: null, trim: true },
+      },
     },
   },
   { timestamps: true }
