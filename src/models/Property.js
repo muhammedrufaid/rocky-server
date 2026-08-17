@@ -37,6 +37,8 @@ const propertySchema = new mongoose.Schema(
 );
 
 propertySchema.index({ propertyRefNo: 1 }, { unique: true });
+propertySchema.index({ offPlan: 1, _id: -1 });
+propertySchema.index({ propertyPurpose: 1, _id: -1 });
 
 module.exports = mongoose.model('Property', propertySchema);
 

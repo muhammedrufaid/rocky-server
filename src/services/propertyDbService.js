@@ -71,7 +71,7 @@ const numberExprFromStringField = (field) => {
   };
 };
 
-const buildCommonPipeline = ({ search = '', filters = {}, forced = {} }) => {
+const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
   const q = normalizeToLower(search);
 
   const nf = {
@@ -107,10 +107,16 @@ const buildCommonPipeline = ({ search = '', filters = {}, forced = {} }) => {
   ].filter(Boolean);
   if (listMatches.length) match.push(...listMatches);
 
-  // Forced constraints (offPlan / propertyPurpose etc)
   Object.entries(forced).forEach(([key, value]) => {
     match.push({ [key]: value });
   });
+
+  if (q) {
+    const re = new RegExp(escapeRegex(q), 'i');
+    match.push({ $or: SEARCH_FIELDS.map((f) => ({ [f]: re })) });
+  }
+
+  const mongoMatch = match.length ? { $and: match } : {};
 
   const addFields = {
     __priceNum: numberExprFromStringField('price'),
@@ -135,38 +141,84 @@ const buildCommonPipeline = ({ search = '', filters = {}, forced = {} }) => {
     if (nf.propertySizeMax !== null) numericMatch.__sizeNum.$lte = nf.propertySizeMax;
   }
 
+  return {
+    mongoMatch,
+    addFields,
+    numericMatch,
+    hasNumericFilters: Object.keys(numericMatch).length > 0,
+  };
+};
+
+const buildCommonPipeline = ({ search = '', filters = {}, forced = {} }) => {
+  const { mongoMatch, addFields, numericMatch, hasNumericFilters } = buildListQuery({
+    search,
+    filters,
+    forced,
+  });
+
   const pipeline = [];
-
-  // Search across fields (contains, case-insensitive)
-  if (q) {
-    const re = new RegExp(escapeRegex(q), 'i');
-    pipeline.push({
-      $match: {
-        $or: SEARCH_FIELDS.map((f) => ({ [f]: re })),
-      },
-    });
+  if (Object.keys(mongoMatch).length) {
+    pipeline.push({ $match: mongoMatch });
   }
-
-  if (match.length) {
-    pipeline.push({ $match: { $and: match } });
-  }
-
-  // Numeric filters need computed fields
-  pipeline.push({ $addFields: addFields });
-  if (Object.keys(numericMatch).length) {
+  if (hasNumericFilters) {
+    pipeline.push({ $addFields: addFields });
     pipeline.push({ $match: numericMatch });
   }
-
   return pipeline;
 };
 
-const paginateAggregation = async ({ basePipeline, page = 1, limit = 10, sort = { _id: -1 } }) => {
+const buildPagination = (safePage, safeLimit, total) => {
+  const totalPages = safeLimit ? Math.ceil(total / safeLimit) : 1;
+  return {
+    page: safePage,
+    limit: safeLimit,
+    totalPages,
+    hasNextPage: safePage < totalPages,
+    hasPrevPage: safePage > 1,
+  };
+};
+
+const paginateProperties = async ({
+  search = '',
+  filters = {},
+  forced = {},
+  page = 1,
+  limit = 10,
+  sort = { _id: -1 },
+}) => {
   const safePage = Math.max(parseInt(page, 10) || 1, 1);
   const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
   const skip = (safePage - 1) * safeLimit;
+  const { mongoMatch, addFields, numericMatch, hasNumericFilters } = buildListQuery({
+    search,
+    filters,
+    forced,
+  });
+
+  // Simple listing (off-plan / buy / rent with no price/size/bed filters):
+  // use indexed find + count instead of scanning every matching document in $facet.
+  if (!hasNumericFilters) {
+    const [items, total] = await Promise.all([
+      Property.find(mongoMatch)
+        .select(publicPropertyProjection)
+        .sort(sort)
+        .skip(skip)
+        .limit(safeLimit)
+        .lean(),
+      Property.countDocuments(mongoMatch),
+    ]);
+
+    return {
+      properties: items.map(stripInternalPropertyFields),
+      total,
+      pagination: buildPagination(safePage, safeLimit, total),
+    };
+  }
 
   const pipeline = [
-    ...basePipeline,
+    ...(Object.keys(mongoMatch).length ? [{ $match: mongoMatch }] : []),
+    { $addFields: addFields },
+    { $match: numericMatch },
     { $project: publicPropertyProjection },
     { $sort: sort },
     {
@@ -181,16 +233,6 @@ const paginateAggregation = async ({ basePipeline, page = 1, limit = 10, sort = 
   const items = out?.items || [];
   const total = out?.meta?.[0]?.total || 0;
 
-  const totalPages = safeLimit ? Math.ceil(total / safeLimit) : 1;
-  const pagination = {
-    page: safePage,
-    limit: safeLimit,
-    totalPages,
-    hasNextPage: safePage < totalPages,
-    hasPrevPage: safePage > 1,
-  };
-
-  // remove internal computed + AI-only fields
   const cleaned = items.map((doc) => {
     delete doc.__priceNum;
     delete doc.__sizeNum;
@@ -199,37 +241,32 @@ const paginateAggregation = async ({ basePipeline, page = 1, limit = 10, sort = 
     return stripInternalPropertyFields(doc);
   });
 
-  return { properties: cleaned, total, pagination };
+  return { properties: cleaned, total, pagination: buildPagination(safePage, safeLimit, total) };
 };
 
 const fetchAllProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {} } = opts;
-  const basePipeline = buildCommonPipeline({ search, filters });
-  return paginateAggregation({ basePipeline, page, limit });
+  return paginateProperties({ page, limit, search, filters });
 };
 
 const fetchOffPlanProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {} } = opts;
-  const basePipeline = buildCommonPipeline({ search, filters, forced: { offPlan: 'Yes' } });
-  return paginateAggregation({ basePipeline, page, limit });
+  return paginateProperties({ page, limit, search, filters, forced: { offPlan: 'Yes' } });
 };
 
 const fetchReadyProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {} } = opts;
-  const basePipeline = buildCommonPipeline({ search, filters, forced: { offPlan: 'No' } });
-  return paginateAggregation({ basePipeline, page, limit });
+  return paginateProperties({ page, limit, search, filters, forced: { offPlan: 'No' } });
 };
 
 const fetchBuyProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {} } = opts;
-  const basePipeline = buildCommonPipeline({ search, filters, forced: { propertyPurpose: 'Buy' } });
-  return paginateAggregation({ basePipeline, page, limit });
+  return paginateProperties({ page, limit, search, filters, forced: { propertyPurpose: 'Buy' } });
 };
 
 const fetchRentProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {} } = opts;
-  const basePipeline = buildCommonPipeline({ search, filters, forced: { propertyPurpose: 'Rent' } });
-  return paginateAggregation({ basePipeline, page, limit });
+  return paginateProperties({ page, limit, search, filters, forced: { propertyPurpose: 'Rent' } });
 };
 
 const {
