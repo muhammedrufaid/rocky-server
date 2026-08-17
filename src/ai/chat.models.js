@@ -50,6 +50,7 @@ const conversationSchema = new mongoose.Schema(
         type: { type: String, default: null, trim: true },
         purpose: { type: String, default: null, trim: true },
       },
+      leadCaptured: { type: Boolean, default: false },
     },
   },
   { timestamps: true }

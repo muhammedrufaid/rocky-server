@@ -47,22 +47,6 @@ function copySearchFilters(filters = {}) {
   };
 }
 
-function toLastSearchFilters(args = {}) {
-  const num = (value) => {
-    if (value === undefined || value === null || value === '') return null;
-    const n = Number(value);
-    return Number.isFinite(n) ? n : null;
-  };
-  return {
-    location: args.location ? String(args.location).trim() : null,
-    bedrooms: num(args.bedrooms),
-    budgetMin: num(args.budgetMin),
-    budgetMax: num(args.budgetMax),
-    type: args.type ? String(args.type).trim() : null,
-    purpose: args.purpose ? String(args.purpose).trim() : null,
-  };
-}
-
 function toStoredPropertyCards(cards = []) {
   return (cards || []).slice(0, 10).map((card) => ({
     id: card.id || '',
@@ -87,6 +71,7 @@ function mergeProfile(current, patch) {
     purpose: current.purpose || null,
     lastPropertyCards: toStoredPropertyCards(current.lastPropertyCards),
     lastSearchFilters: copySearchFilters(current.lastSearchFilters || emptySearchFilters()),
+    leadCaptured: current.leadCaptured || false,
   };
 
   if (Array.isArray(patch.preferredAreas)) {
@@ -110,6 +95,7 @@ function mergeProfile(current, patch) {
   if (patch.lastSearchFilters) {
     next.lastSearchFilters = copySearchFilters(patch.lastSearchFilters);
   }
+  if (patch.leadCaptured) next.leadCaptured = true;
 
   return next;
 }
@@ -146,6 +132,7 @@ async function loadConversation(sessionId) {
         purpose: null,
         lastPropertyCards: [],
         lastSearchFilters: emptySearchFilters(),
+        leadCaptured: false,
       },
     });
   }
@@ -230,6 +217,8 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         result = await executeTool(call.function?.name, args, {
           sessionId,
           previousPropertySearchEmpty,
+          lastSearchFilters: profile.lastSearchFilters,
+          leadAlreadyCaptured: !!profile.leadCaptured,
         });
       } catch (err) {
         result = {
@@ -263,7 +252,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
           lastSearchBothEmpty = false;
           profile = mergeProfile(profile, {
             lastPropertyCards: result.propertyCards,
-            lastSearchFilters: toLastSearchFilters(args),
+            lastSearchFilters: result.effectiveFilters,
           });
         }
       }
@@ -313,7 +302,7 @@ const chat = async (req, res) => {
     const suggestedCta = pickSuggestedCta({
       propertyCards: result.propertyCards,
       sources: result.sources,
-      leadCaptured: result.leadCaptured,
+      leadCaptured: result.leadCaptured || result.profile.leadCaptured,
       turnIndex: conversation.messages.length,
     });
 

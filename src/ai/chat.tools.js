@@ -121,6 +121,51 @@ function normalizePurpose(value) {
   return null;
 }
 
+function isProvidedText(value) {
+  if (value === undefined || value === null) return false;
+  return String(value).trim() !== '';
+}
+
+function textsDiffer(a, b) {
+  return String(a).trim().toLowerCase() !== String(b).trim().toLowerCase();
+}
+
+function coalesceFilter(incoming, fallback) {
+  if (incoming === undefined || incoming === null || incoming === '') return fallback ?? null;
+  return incoming;
+}
+
+function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
+  const last = lastSearchFilters || {};
+  const locationProvided = isProvidedText(filters.location);
+  const lastLocationSet = isProvidedText(last.location);
+  const typeProvided = isProvidedText(filters.type);
+  const lastTypeSet = isProvidedText(last.type);
+  const isNewIntent =
+    (locationProvided && lastLocationSet && textsDiffer(filters.location, last.location)) ||
+    (typeProvided && lastTypeSet && textsDiffer(filters.type, last.type));
+
+  if (isNewIntent) {
+    return {
+      location: coalesceFilter(filters.location, null),
+      type: coalesceFilter(filters.type, null),
+      bedrooms: coalesceFilter(filters.bedrooms, null),
+      budgetMin: coalesceFilter(filters.budgetMin, null),
+      budgetMax: coalesceFilter(filters.budgetMax, null),
+      purpose: coalesceFilter(filters.purpose, last.purpose),
+    };
+  }
+
+  return {
+    location: coalesceFilter(filters.location, last.location),
+    type: coalesceFilter(filters.type, last.type),
+    bedrooms: coalesceFilter(filters.bedrooms, last.bedrooms),
+    budgetMin: coalesceFilter(filters.budgetMin, last.budgetMin),
+    budgetMax: coalesceFilter(filters.budgetMax, last.budgetMax),
+    purpose: coalesceFilter(filters.purpose, last.purpose),
+  };
+}
+
 function profilePatchFromPropertyFilters(filters) {
   const patch = {};
   if (filters.location) patch.preferredAreas = [String(filters.location).trim()];
@@ -188,16 +233,19 @@ function propertySearchResult(propertyCards, filters, extraPayload = {}) {
   };
 }
 
-async function searchProperties(filters = {}, { previousPropertySearchEmpty } = {}) {
-  const search = (filters.location || '').toString().trim();
-  const propertyCards = await fetchPropertyCards(filters, search);
+async function searchProperties(filters = {}, { previousPropertySearchEmpty, lastSearchFilters } = {}) {
+  const effectiveFilters = resolveEffectiveFilters(filters, lastSearchFilters);
+  const search = (effectiveFilters.location || '').toString().trim();
+  const propertyCards = await fetchPropertyCards(effectiveFilters, search);
   const extraPayload = {
     requestedLocation: search || null,
   };
   if (propertyCards.length === 0 && previousPropertySearchEmpty) {
     extraPayload.bothEmpty = true;
   }
-  return propertySearchResult(propertyCards, filters, extraPayload);
+  const result = propertySearchResult(propertyCards, effectiveFilters, extraPayload);
+  result.effectiveFilters = effectiveFilters;
+  return result;
 }
 
 async function embedQuery(query) {
@@ -288,8 +336,21 @@ function looksCollected(value) {
   return true;
 }
 
-async function captureLead({ name, phone, email, intent }, sessionId) {
-  if (!looksCollected(name) || !looksCollected(phone) || !looksCollected(email) || !looksCollected(intent)) {
+async function captureLead({ name, phone, email, intent }, sessionId, { leadAlreadyCaptured } = {}) {
+  const hasFullDetails =
+    looksCollected(name) && looksCollected(phone) && looksCollected(email) && looksCollected(intent);
+
+  if (leadAlreadyCaptured) {
+    return {
+      propertyCards: [],
+      sources: [],
+      leadCaptured: true,
+      profilePatch: { leadCaptured: true },
+      modelPayload: { ok: true, alreadyCaptured: true },
+    };
+  }
+
+  if (!hasFullDetails) {
     return {
       propertyCards: [],
       sources: [],
@@ -314,17 +375,23 @@ async function captureLead({ name, phone, email, intent }, sessionId) {
     propertyCards: [],
     sources: [],
     leadCaptured: true,
-    profilePatch: {},
+    profilePatch: { leadCaptured: true },
     modelPayload: { ok: true, id: String(lead._id) },
   };
 }
 
-async function executeTool(name, args, { sessionId, previousPropertySearchEmpty } = {}) {
+async function executeTool(
+  name,
+  args,
+  { sessionId, previousPropertySearchEmpty, lastSearchFilters, leadAlreadyCaptured } = {}
+) {
   if (name === 'search_properties') {
-    return searchProperties(args || {}, { previousPropertySearchEmpty });
+    return searchProperties(args || {}, { previousPropertySearchEmpty, lastSearchFilters });
   }
   if (name === 'search_content') return searchContent(args || {});
-  if (name === 'capture_lead') return captureLead(args || {}, sessionId);
+  if (name === 'capture_lead') {
+    return captureLead(args || {}, sessionId, { leadAlreadyCaptured });
+  }
   return {
     propertyCards: [],
     sources: [],
