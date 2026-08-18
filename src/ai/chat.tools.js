@@ -452,10 +452,10 @@ async function executeTool(
   return {
     propertyCards: [],
     sources: [],
-          leadCaptured: false,
-          profilePatch: {},
-          modelPayload: { error: `Unknown tool: ${name}` },
-          viewAllMatching: null,
+    leadCaptured: false,
+    profilePatch: {},
+    modelPayload: { error: `Unknown tool: ${name}` },
+    viewAllMatching: null,
   };
 }
 

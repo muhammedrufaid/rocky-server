@@ -165,6 +165,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   let profile = userProfile;
   let previousPropertySearchEmpty = false;
   let lastSearchBothEmpty = false;
+  let viewAllMatching = null;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     const hasToolResults = messages.some((m) => m.role === 'tool');
@@ -201,6 +202,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         sources: uniqueBy(sources, (s) => s.url || s.title),
         leadCaptured,
         profile,
+        viewAllMatching,
       };
     }
 
@@ -250,6 +252,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         lastSearchBothEmpty = !!result.modelPayload?.bothEmpty;
         if (returnedCards > 0) {
           lastSearchBothEmpty = false;
+          viewAllMatching = result.viewAllMatching || null;
           profile = mergeProfile(profile, {
             lastPropertyCards: result.propertyCards,
             lastSearchFilters: result.effectiveFilters,
@@ -271,6 +274,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         sources: uniqueBy(sources, (s) => s.url || s.title),
         leadCaptured,
         profile,
+        viewAllMatching: null,
       };
     }
   }
@@ -281,6 +285,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
     sources: uniqueBy(sources, (s) => s.url || s.title),
     leadCaptured,
     profile,
+    viewAllMatching,
   };
 }
 
@@ -317,6 +322,7 @@ const chat = async (req, res) => {
       propertyCards: result.propertyCards,
       sources: result.sources,
       suggestedCta,
+      viewAllMatching: result.viewAllMatching || null,
     });
   } catch (error) {
     console.error('POST /api/chat error:', error);
