@@ -97,6 +97,35 @@ function buildListingUrl(property) {
   return `${frontendBase()}/properties/${path}/in-dubai/${property.propertyRefNo}`;
 }
 
+function buildListingSearchUrl(filters = {}) {
+  const purpose = normalizePurpose(filters.purpose);
+  const path = purpose === 'Rent' ? 'rent' : 'buy';
+  const params = new URLSearchParams();
+  const q = (filters.location || '').toString().trim();
+  if (q) params.set('q', q);
+  if (filters.type) params.set('type', String(filters.type).trim());
+  if (filters.bedrooms !== undefined && filters.bedrooms !== null && filters.bedrooms !== '') {
+    params.set('beds', String(filters.bedrooms));
+  }
+  if (filters.budgetMin !== undefined && filters.budgetMin !== null && filters.budgetMin !== '') {
+    params.set('min', String(filters.budgetMin));
+  }
+  if (filters.budgetMax !== undefined && filters.budgetMax !== null && filters.budgetMax !== '') {
+    params.set('max', String(filters.budgetMax));
+  }
+  const qs = params.toString().replace(/\+/g, '%20');
+  return `${frontendBase()}/properties/${path}/in-dubai${qs ? `?${qs}` : ''}`;
+}
+
+function buildViewAllMatching(total, filters) {
+  if (!Number.isFinite(total) || total <= PROPERTY_LIMIT) return null;
+  return {
+    total,
+    url: buildListingSearchUrl(filters),
+    label: `View all ${total} matching properties`,
+  };
+}
+
 function toPropertyCard(property) {
   const size = (property.propertySize || '').toString().trim();
   const unit = (property.propertySizeUnit || '').toString().trim();
@@ -201,22 +230,41 @@ function listingQueryOpts(filters, search) {
   return { page: 1, limit: PROPERTY_LIMIT, search, filters: queryFilters };
 }
 
-async function fetchPropertyCards(filters, search) {
-  const opts = listingQueryOpts(filters, search);
-  const purpose = normalizePurpose(filters.purpose);
-  let result;
-  if (purpose === 'Buy') result = await propertyDbService.fetchBuyProperties(opts);
-  else if (purpose === 'Rent') result = await propertyDbService.fetchRentProperties(opts);
-  else result = await propertyDbService.fetchAllProperties(opts);
-  return (result.properties || []).map(toPropertyCard);
+async function fetchByPurpose(purpose, opts) {
+  if (purpose === 'Rent') return propertyDbService.fetchRentProperties(opts);
+  return propertyDbService.fetchBuyProperties(opts);
 }
 
-function propertySearchResult(propertyCards, filters, extraPayload = {}) {
+async function fetchPropertyCards(filters, search) {
+  const opts = listingQueryOpts(filters, search);
+  const requested = normalizePurpose(filters.purpose) || 'Buy';
+  let result = await fetchByPurpose(requested, opts);
+  let usedPurpose = requested;
+
+  // Website listing default is Buy. If the model infers Rent and that inventory is
+  // empty, retry Buy with the same location/beds/type/budget filters.
+  if (!(result.properties || []).length && requested === 'Rent') {
+    const buyResult = await fetchByPurpose('Buy', opts);
+    if ((buyResult.properties || []).length) {
+      result = buyResult;
+      usedPurpose = 'Buy';
+    }
+  }
+
+  return {
+    propertyCards: (result.properties || []).map(toPropertyCard),
+    usedPurpose,
+    total: result.total || 0,
+  };
+}
+
+function propertySearchResult(propertyCards, filters, extraPayload = {}, viewAllMatching = null) {
   return {
     propertyCards,
     sources: [],
     leadCaptured: false,
     profilePatch: profilePatchFromPropertyFilters(filters),
+    viewAllMatching,
     modelPayload: {
       count: propertyCards.length,
       properties: propertyCards.map((card) => ({
@@ -235,15 +283,24 @@ function propertySearchResult(propertyCards, filters, extraPayload = {}) {
 
 async function searchProperties(filters = {}, { previousPropertySearchEmpty, lastSearchFilters } = {}) {
   const effectiveFilters = resolveEffectiveFilters(filters, lastSearchFilters);
+  if (!normalizePurpose(effectiveFilters.purpose)) {
+    effectiveFilters.purpose = 'Buy';
+  }
   const search = (effectiveFilters.location || '').toString().trim();
-  const propertyCards = await fetchPropertyCards(effectiveFilters, search);
+  const { propertyCards, usedPurpose, total } = await fetchPropertyCards(effectiveFilters, search);
+  effectiveFilters.purpose = usedPurpose;
   const extraPayload = {
     requestedLocation: search || null,
   };
   if (propertyCards.length === 0 && previousPropertySearchEmpty) {
     extraPayload.bothEmpty = true;
   }
-  const result = propertySearchResult(propertyCards, effectiveFilters, extraPayload);
+  const result = propertySearchResult(
+    propertyCards,
+    effectiveFilters,
+    extraPayload,
+    buildViewAllMatching(total, effectiveFilters)
+  );
   result.effectiveFilters = effectiveFilters;
   return result;
 }
@@ -395,9 +452,10 @@ async function executeTool(
   return {
     propertyCards: [],
     sources: [],
-    leadCaptured: false,
-    profilePatch: {},
-    modelPayload: { error: `Unknown tool: ${name}` },
+          leadCaptured: false,
+          profilePatch: {},
+          modelPayload: { error: `Unknown tool: ${name}` },
+          viewAllMatching: null,
   };
 }
 
