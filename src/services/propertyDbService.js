@@ -85,6 +85,7 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
     offPlan: normalizeStringList(filters.offPlan),
     propertyStatus: normalizeStringList(filters.propertyStatus),
     bedrooms: parseOptionalNumber(filters.bedrooms),
+    bedroomsMin: parseOptionalNumber(filters.bedroomsMin),
     bathrooms: parseOptionalNumber(filters.bathrooms),
     priceMin: parseOptionalNumber(filters.priceMin),
     priceMax: parseOptionalNumber(filters.priceMax),
@@ -126,7 +127,11 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
   };
 
   const numericMatch = {};
-  if (nf.bedrooms !== null) numericMatch.__bedroomsNum = nf.bedrooms;
+  if (nf.bedroomsMin !== null) {
+    numericMatch.__bedroomsNum = { $gte: nf.bedroomsMin };
+  } else if (nf.bedrooms !== null) {
+    numericMatch.__bedroomsNum = nf.bedrooms;
+  }
   if (nf.bathrooms !== null) numericMatch.__bathroomsNum = nf.bathrooms;
 
   if (nf.priceMin !== null || nf.priceMax !== null) {

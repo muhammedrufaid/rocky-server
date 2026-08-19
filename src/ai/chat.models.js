@@ -45,6 +45,9 @@ const conversationSchema = new mongoose.Schema(
       lastSearchFilters: {
         location: { type: String, default: null, trim: true },
         bedrooms: { type: Number, default: null },
+        bedroomsMin: { type: Number, default: null },
+        bedroomsAny: { type: Boolean, default: false },
+        bedroomsResolved: { type: Boolean, default: false },
         budgetMin: { type: Number, default: null },
         budgetMax: { type: Number, default: null },
         type: { type: String, default: null, trim: true },
