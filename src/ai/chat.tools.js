@@ -318,9 +318,16 @@ function describeBedroomPhrase(filters = {}) {
 function describeTypePhrase(filters = {}) {
   const t = String(filters.type || '').trim();
   if (!t) return 'properties';
-  const lower = t.toLowerCase();
-  if (lower.endsWith('s')) return lower;
-  return `${lower}s`;
+  // Preserve the canonical capitalisation from PROPERTY_TYPE_MAP (e.g. "Villa" → "villas")
+  if (t.toLowerCase().endsWith('s')) return t;
+  return `${t}s`;
+}
+
+/** Singular form, capitalised — e.g. "Villa", "Apartment", "property". */
+function describeTypeSingular(filters = {}) {
+  const t = String(filters.type || '').trim();
+  if (!t) return 'property';
+  return t; // PROPERTY_TYPE_MAP canonical values are already capitalised singular
 }
 
 function foundListingsReply(filters = {}, total = 0) {
@@ -340,7 +347,10 @@ function foundListingsReply(filters = {}, total = 0) {
 
 function emptyResultsReply(filters = {}) {
   const loc = (filters.location || 'that area').toString().trim() || 'that area';
-  return `I couldn't find matching ${describeBedroomPhrase(filters)}${describeTypePhrase(filters)} in ${loc}.`;
+  const beds = describeBedroomPhrase(filters).trim(); // e.g. "1-bedroom" or ""
+  const type = describeTypeSingular(filters);         // e.g. "Villa" or "property"
+  const bedsType = beds ? `${beds} ${type.toLowerCase()}` : type.toLowerCase();
+  return `I don't have a ${bedsType} available in ${loc} right now.`;
 }
 
 function emptyResultOptions(filters = {}) {
@@ -467,6 +477,19 @@ function normalizePropertyType(raw) {
   for (const entry of PROPERTY_TYPE_MAP) {
     if (entry.patterns.test(lower)) return entry.canonical;
   }
+  return null;
+}
+
+/**
+ * Extracts a location from patterns like "in Dubai Hills", "in Arabian Ranches".
+ * Returns the location string or null if none found.
+ */
+function parseLocationFromMessage(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  // Match " in <location>" — location is everything after "in" until end or a filter word
+  const m = raw.match(/\bin\s+([A-Za-z0-9][A-Za-z0-9 '-]+?)(?:\s+(?:for|with|under|below|up\s+to|at|max)|$)/i);
+  if (m) return m[1].trim() || null;
   return null;
 }
 
@@ -785,9 +808,267 @@ function emptyResultsClarificationFields() {
   };
 }
 
-function emptyResultsResult(effectiveFilters) {
+/** Quick count-only query — returns 0 or positive integer. */
+async function countByFilters(filters, search) {
+  const opts = listingQueryOpts(filters, search);
+  const purpose = normalizePurpose(filters.purpose);
+  if (!purpose) return 0;
+  try {
+    const result = await fetchByPurpose(purpose, opts);
+    return (result.properties || []).length > 0 ? result.total || (result.properties || []).length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Alternative types to try when the requested type has no results.
+ * Ordered by typical availability in Dubai.
+ */
+const ALTERNATIVE_TYPES = {
+  Apartment: ['Villa', 'Townhouse'],
+  Villa: ['Apartment', 'Townhouse'],
+  Townhouse: ['Villa', 'Apartment'],
+  Penthouse: ['Apartment', 'Villa'],
+  Duplex: ['Apartment', 'Townhouse'],
+  default: ['Apartment', 'Villa'],
+};
+
+function alternativeTypesFor(currentType) {
+  const key = Object.keys(ALTERNATIVE_TYPES).find(
+    (k) => k.toLowerCase() === String(currentType || '').toLowerCase()
+  );
+  return key ? ALTERNATIVE_TYPES[key] : ALTERNATIVE_TYPES.default;
+}
+
+/** Adjacent bedroom counts to try. */
+function adjacentBedroomCounts(filters) {
+  const adj = [];
+  const n = Number(filters.bedrooms);
+  const min = Number(filters.bedroomsMin);
+  if (filters.bedroomsAny) return [];
+  if (min >= 4) {
+    adj.push({ exact: 3, label: 'Try 3 BR' });
+  } else if (Number.isFinite(n)) {
+    if (n > 0) adj.push({ exact: n - 1, label: n - 1 === 0 ? 'Try Studio' : `Try ${n - 1} BR` });
+    if (n < 5) adj.push({ exact: n + 1, label: n + 1 >= 4 ? 'Try 4+ BR' : `Try ${n + 1} BR` });
+  }
+  return adj;
+}
+
+function pluraliseType(type) {
+  const t = String(type || '').trim();
+  if (!t) return t;
+  if (t.toLowerCase().endsWith('s')) return t;   // already plural
+  if (t.toLowerCase() === 'studio') return 'Studios';
+  return `${t}s`;
+}
+
+/**
+ * Chip label helpers — must round-trip through parseAlternativeChip().
+ * Format: "<N> BR <Type> in <Area>" | "<Type> in <Area>" | "<N> BR <Type>" |
+ *         "<N> BR in <Area>" | "Try <N> BR" | "Try Studio"
+ */
+function nearbyAreaChipLabel(area, filters) {
+  const bedsPhrase = describeBedroomPhrase(filters).trim();
+  const type = pluraliseType((filters.type || '').trim());
+  if (bedsPhrase && type) return `${capitalise(bedsPhrase)} ${type} in ${area}`;
+  if (type) return `${type} in ${area}`;
+  if (bedsPhrase) return `${capitalise(bedsPhrase)} in ${area}`;
+  return area;
+}
+
+function altTypeChipLabel(altType, filters) {
+  const bedsPhrase = describeBedroomPhrase(filters).trim();
+  const plural = pluraliseType(altType);
+  if (bedsPhrase) return `${capitalise(bedsPhrase)} ${plural}`;
+  return plural;
+}
+
+function capitalise(s) {
+  return String(s).charAt(0).toUpperCase() + String(s).slice(1);
+}
+
+/**
+ * Parse a chip label (or typed equivalent) back into a filter patch.
+ * Returns { location?, type?, bedrooms? } for the attributes that change,
+ * or null if the text isn't recognised.
+ */
+function parseAlternativeChip(text, currentFilters = {}) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+
+  // "Try N BR" / "Try Studio" / "Try 4+ BR" — bedroom change only
+  const tryBr = raw.match(/^try\s+(.+)$/i);
+  if (tryBr) {
+    const choice = parseBedroomChoice(tryBr[1]);
+    if (choice) return { bedroomChoice: choice };
+  }
+
+  // Typed "what about villas" / "show me villas" → property type change
+  const typeChange = parsePropertyTypeChange(raw);
+  if (typeChange) return { type: typeChange };
+
+  // "N BR <Type> in <Area>" — e.g. "2 BR Villas in Arabian Ranches"
+  const fullMatch = raw.match(/^(\d+\+?\s*(?:br|bedroom)s?|studio)\s+(\w+)\s+in\s+(.+)$/i);
+  if (fullMatch) {
+    const bedsChoice = parseBedroomChoice(fullMatch[1]);
+    const altType = normalizePropertyType(fullMatch[2]);
+    const area = fullMatch[3].trim();
+    const patch = {};
+    if (bedsChoice) patch.bedroomChoice = bedsChoice;
+    if (altType) patch.type = altType;
+    if (area) patch.location = area;
+    if (Object.keys(patch).length) return patch;
+  }
+
+  // "<Type> in <Area>" — e.g. "Apartments in Arabian Ranches"
+  const typeInArea = raw.match(/^(\w+)\s+in\s+(.+)$/i);
+  if (typeInArea) {
+    const altType = normalizePropertyType(typeInArea[1]);
+    const area = typeInArea[2].trim();
+    if (altType && area) return { type: altType, location: area };
+    if (area) return { location: area };
+  }
+
+  // "<N> BR <Type>" — e.g. "2 BR Villas" (type + same location)
+  const bedsType = raw.match(/^(\d+\+?\s*(?:br|bedroom)s?|studio)\s+(\w+)$/i);
+  if (bedsType) {
+    const bedsChoice = parseBedroomChoice(bedsType[1]);
+    const altType = normalizePropertyType(bedsType[2]);
+    const patch = {};
+    if (bedsChoice) patch.bedroomChoice = bedsChoice;
+    if (altType) patch.type = altType;
+    if (Object.keys(patch).length) return patch;
+  }
+
+  // "<N> BR in <Area>"
+  const bedsInArea = raw.match(/^(\d+\+?\s*(?:br|bedroom)s?|studio)\s+in\s+(.+)$/i);
+  if (bedsInArea) {
+    const bedsChoice = parseBedroomChoice(bedsInArea[1]);
+    const area = bedsInArea[2].trim();
+    const patch = {};
+    if (bedsChoice) patch.bedroomChoice = bedsChoice;
+    if (area) patch.location = area;
+    if (Object.keys(patch).length) return patch;
+  }
+
+  // Known area name (from nearby map)
+  const nearbyList = nearbyAreaOptions(currentFilters.location);
+  if (nearbyList.some((a) => a.toLowerCase() === raw.toLowerCase())) {
+    return { location: nearbyList.find((a) => a.toLowerCase() === raw.toLowerCase()) };
+  }
+
+  // General bedroom mention — e.g. "what about 1 bedroom", "show me 3 bedrooms", "try 2"
+  const bedsGeneral = parseBedroomChoice(raw);
+  if (bedsGeneral && !bedsGeneral.any) return { bedroomChoice: bedsGeneral };
+
+  return null;
+}
+
+/**
+ * Probe all alternative categories (A/B/C) in parallel and return only those
+ * with confirmed > 0 inventory.  Returns an array of { label, patch } entries
+ * capped at MAX_ALT_CHIPS.
+ */
+const MAX_ALT_CHIPS = 4;
+
+async function buildAlternativeChips(effectiveFilters) {
+  const purpose = effectiveFilters.purpose;
+  const location = (effectiveFilters.location || '').trim();
+  const type = effectiveFilters.type || null;
+
+  const candidates = [];
+
+  // A — nearby areas with same type + same bedrooms
+  const nearbyAreas = nearbyAreaOptions(location);
+  for (const area of nearbyAreas.slice(0, 3)) {
+    candidates.push({
+      label: nearbyAreaChipLabel(area, effectiveFilters),
+      patch: { location: area },
+      priority: 1,
+    });
+  }
+
+  // B — same location + alternative property types
+  const altTypes = alternativeTypesFor(type).slice(0, 2);
+  for (const altType of altTypes) {
+    candidates.push({
+      label: altTypeChipLabel(altType, effectiveFilters),
+      patch: { type: altType },
+      priority: 2,
+    });
+  }
+
+  // C — adjacent bedroom counts at same location + same type
+  const adjBeds = adjacentBedroomCounts(effectiveFilters);
+  for (const adj of adjBeds) {
+    candidates.push({
+      label: adj.label,
+      patch: { bedroomChoice: { exact: adj.exact } },
+      priority: 3,
+    });
+  }
+
+  // Probe each candidate concurrently
+  const probed = await Promise.all(
+    candidates.map(async (cand) => {
+      const testFilters = { ...effectiveFilters };
+      if (cand.patch.location) testFilters.location = cand.patch.location;
+      if (cand.patch.type) testFilters.type = cand.patch.type;
+      if (cand.patch.bedroomChoice) {
+        const tmpFilters = { ...testFilters };
+        applyBedroomChoice(tmpFilters, cand.patch.bedroomChoice);
+        testFilters.bedrooms = tmpFilters.bedrooms;
+        testFilters.bedroomsMin = tmpFilters.bedroomsMin;
+        testFilters.bedroomsAny = tmpFilters.bedroomsAny;
+        testFilters.bedroomsResolved = true;
+      }
+      const search = (testFilters.location || '').toString().trim();
+      const count = await countByFilters({ ...testFilters, purpose }, search);
+      return { ...cand, count };
+    })
+  );
+
+  const hits = probed
+    .filter((c) => c.count > 0)
+    .sort((a, b) => a.priority - b.priority || b.count - a.count);
+
+  return hits.slice(0, MAX_ALT_CHIPS).map((c) => ({ label: c.label, patch: c.patch }));
+}
+
+async function emptyResultsResult(effectiveFilters) {
   const location = (effectiveFilters.location || '').toString().trim();
-  const options = emptyResultOptions(effectiveFilters);
+
+  const alternatives = await buildAlternativeChips(effectiveFilters);
+
+  let reply;
+  let options;
+  let slotAwaiting;
+
+  if (alternatives.length > 0) {
+    const locPart = location ? ` in ${location}` : '';
+    if (alternatives.length === 1) {
+      // Single confirmed alternative — name it inline, avoiding location duplication
+      const altLabel = alternatives[0].label;
+      // If the label already contains the location, don't append it again
+      const labelHasLoc = location && altLabel.toLowerCase().includes(location.toLowerCase());
+      const locSuffix = labelHasLoc ? '' : (locPart ? locPart : '');
+      reply = `${emptyResultsReply(effectiveFilters)} I found ${altLabel}${locSuffix} instead.`;
+    } else {
+      reply = `${emptyResultsReply(effectiveFilters)} Here are some options I found${locPart}:`;
+    }
+    options = alternatives.map((a) => a.label);
+    slotAwaiting = 'alternatives';
+  } else {
+    // No confirmed alternatives anywhere
+    reply = `${emptyResultsReply(effectiveFilters)} Let me know if you'd like to adjust the search.`;
+    options = [];
+    slotAwaiting = 'emptyResults';
+  }
+
+  const alternativesJson = alternatives.length > 0 ? JSON.stringify(alternatives) : null;
+
   return {
     propertyCards: [],
     sources: [],
@@ -795,20 +1076,20 @@ function emptyResultsResult(effectiveFilters) {
     profilePatch: {
       ...profilePatchFromPropertyFilters(effectiveFilters),
       lastSearchFilters: effectiveFilters,
-      slotFlow: { awaiting: 'emptyResults' },
+      slotFlow: { awaiting: slotAwaiting, alternatives: alternativesJson },
     },
     viewAllMatching: null,
     effectiveFilters,
     needsEmptyResults: true,
-    clarificationReply: emptyResultsReply(effectiveFilters),
-    options,
-    ...emptyResultsClarificationFields(),
+    clarificationReply: reply,
+    options: options.length > 0 ? options : undefined,
+    ...(options.length > 0 ? emptyResultsClarificationFields() : {}),
     modelPayload: {
       count: 0,
       needsEmptyResults: true,
       requestedLocation: location || null,
       instruction:
-        'No listings matched. Do not invent a budget, do not widen location, and do not claim nearby areas have results. The server will show explicit chips. Do not write a follow-up question.',
+        'No listings matched. Do not invent alternatives. The server has checked real inventory and will show chips for confirmed options. Do not write a follow-up question.',
     },
   };
 }
@@ -872,7 +1153,7 @@ async function searchProperties(
   effectiveFilters.purpose = usedPurpose;
 
   if (propertyCards.length === 0) {
-    return emptyResultsResult(effectiveFilters);
+    return emptyResultsResult(effectiveFilters);   // async — already awaited by caller
   }
 
   const extraPayload = {
@@ -1068,7 +1349,9 @@ module.exports = {
   isAmbiguousListingQuery,
   isVagueConfirm,
   normalizePropertyType,
+  parseLocationFromMessage,
   parsePropertyTypeChange,
+  parseAlternativeChip,
   parseBudgetFromMessage,
   applyBudgetChoice,
   parseEmptyResultChoice,

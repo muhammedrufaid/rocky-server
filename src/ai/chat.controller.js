@@ -1,7 +1,7 @@
 const OpenAI = require('openai');
 const { Conversation } = require('./chat.models');
 const { getSystemPrompt } = require('./chat.prompt');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isVagueConfirm, normalizePropertyType, parsePropertyTypeChange, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -74,6 +74,7 @@ function mergeProfile(current, patch) {
     lastSearchFilters: copySearchFilters(current.lastSearchFilters || emptySearchFilters()),
     slotFlow: {
       awaiting: current.slotFlow?.awaiting || null,
+      alternatives: current.slotFlow?.alternatives || null,
     },
     leadCaptured: current.leadCaptured || false,
   };
@@ -102,6 +103,7 @@ function mergeProfile(current, patch) {
   if (patch.slotFlow) {
     next.slotFlow = {
       awaiting: patch.slotFlow.awaiting || null,
+      alternatives: patch.slotFlow.alternatives ?? null,
     };
   }
   if (patch.leadCaptured) next.leadCaptured = true;
@@ -188,6 +190,15 @@ function applyPropertyTypeChange(message, profile) {
   // Do not override if the type is already the same
   if (last.type && last.type.toLowerCase() === newType.toLowerCase()) return null;
 
+  // If the message mentions a DIFFERENT location, this is a new-location search, not a
+  // type-only refinement. Let it fall through to the LLM so resolveEffectiveFilters
+  // can handle the full reset (location, bedrooms, budget).
+  const mentionedLocation = parseLocationFromMessage(message);
+  if (mentionedLocation && last.location) {
+    const locDiffers = mentionedLocation.trim().toLowerCase() !== last.location.trim().toLowerCase();
+    if (locDiffers) return null;
+  }
+
   // Carry purpose from top-level profile into lastSearchFilters so trustedPurpose can read it
   const resolvedPurpose = last.purpose || profile.purpose || null;
 
@@ -206,6 +217,10 @@ function resolvePendingSlots(message, profile) {
   // Property-type change takes priority over any pending clarification state
   const typeChange = applyPropertyTypeChange(message, profile);
   if (typeChange) return typeChange;
+
+  // New-location search: explicit different location in message → reset and proceed
+  const newLocSearch = applyNewLocationSearch(message, profile);
+  if (newLocSearch) return newLocSearch;
 
   if (!awaiting) return null;
 
@@ -308,6 +323,59 @@ function resolvePendingSlots(message, profile) {
     };
   }
 
+  if (awaiting === 'alternatives') {
+    const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+
+    // Parse stored alternative list from slotFlow.alternatives JSON
+    let storedAlts = [];
+    try {
+      storedAlts = profile.slotFlow?.alternatives ? JSON.parse(profile.slotFlow.alternatives) : [];
+    } catch {
+      storedAlts = [];
+    }
+
+    // Try to match message to one of the stored alternatives by label
+    const matched = storedAlts.find((a) => {
+      return String(a.label || '').toLowerCase() === message.trim().toLowerCase();
+    });
+
+    // Also try parsing the message directly as an alternative chip (typed equivalent)
+    const chipPatch = matched ? matched.patch : parseAlternativeChip(message, last);
+
+    if (!chipPatch || isVagueConfirm(message)) {
+      // Re-show the same alternatives with a prompt to pick one
+      return {
+        type: 'clarify',
+        profile,
+        reply: storedAlts.length > 0
+          ? 'Here are the closest alternatives I found — please pick one:'
+          : emptyResultsReply(copySearchFilters(profile.lastSearchFilters || emptySearchFilters())),
+        options: storedAlts.map((a) => a.label),
+      };
+    }
+
+    // Apply the patch to lastSearchFilters
+    const next = copySearchFilters(last);
+    if (chipPatch.location) next.location = chipPatch.location;
+    if (chipPatch.type) next.type = chipPatch.type;
+    if (chipPatch.bedroomChoice) {
+      applyBedroomChoice(next, chipPatch.bedroomChoice);
+    }
+    // Carry purpose forward
+    const resolvedPurpose = next.purpose || profile.purpose || null;
+    if (resolvedPurpose) next.purpose = resolvedPurpose;
+
+    const patch = { lastSearchFilters: next, slotFlow: { awaiting: null, alternatives: null } };
+    if (chipPatch.bedroomChoice?.exact != null) patch.bedrooms = chipPatch.bedroomChoice.exact;
+    if (chipPatch.bedroomChoice?.min != null) patch.bedrooms = chipPatch.bedroomChoice.min;
+    if (chipPatch.type) patch.purpose = resolvedPurpose;   // ensure purpose stays
+
+    return {
+      type: 'continue',
+      profile: mergeProfile(profile, patch),
+    };
+  }
+
   if (awaiting === 'nearbyArea') {
     const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
     const options = nearbyAreaOptions(last.location);
@@ -352,6 +420,78 @@ function resolvePendingSlots(message, profile) {
   }
 
   return null;
+}
+
+/**
+ * Detects a new-location listing search ("Show me villas in Dubai Hills",
+ * "Show me apartments in Dubai Marina", etc.) when we already have a prior
+ * location in context, and the message explicitly names a DIFFERENT location.
+ *
+ * When matched, returns a `{ type: 'continue', profile }` result that:
+ *   - Updates location and type from the message
+ *   - Resets bedrooms (unknown → will trigger bedroom chips)
+ *   - Resets budget
+ *   - Preserves purpose via the existing trustedPurpose rule
+ *     (purpose from message if stated, else stored purpose)
+ *
+ * Returns null if the message isn't a new-location search.
+ */
+function applyNewLocationSearch(message, profile) {
+  const mentionedLocation = parseLocationFromMessage(message);
+  if (!mentionedLocation) return null;
+
+  const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+
+  // Only activate if we already have a different prior location — avoids
+  // triggering on the very first search message in a session.
+  if (!last.location) return null;
+  const locDiffers = mentionedLocation.trim().toLowerCase() !== last.location.trim().toLowerCase();
+  if (!locDiffers) return null;
+
+  // Must look like a listing search (contains a property type or listing keyword)
+  const looksLikeListing =
+    /\b(show|find|search|looking|apartment|villa|townhouse|penthouse|duplex|studio|flat|property|properties|home|listing)\b/i.test(message);
+  if (!looksLikeListing) return null;
+
+  const mentionedType = normalizePropertyType(message);
+  const purposeFromMsg = parsePurposeFromMessage(message);
+  const bedsFromMsg = parseBedroomChoice(message);
+  const budget = parseBudgetFromMessage(message);
+
+  // Resolve purpose: explicit in message > stored purpose (existing rule: persist across location change)
+  const resolvedPurpose = purposeFromMsg || last.purpose || profile.purpose || null;
+
+  const newFilters = {
+    location: mentionedLocation,
+    type: mentionedType || null,
+    bedrooms: null,
+    bedroomsMin: null,
+    bedroomsAny: bedsFromMsg?.any === true,
+    bedroomsResolved: !!(bedsFromMsg && !bedsFromMsg.any),
+    budgetMin: null,
+    budgetMax: null,
+    purpose: resolvedPurpose,
+  };
+
+  if (bedsFromMsg && !bedsFromMsg.any) {
+    if (bedsFromMsg.exact != null) newFilters.bedrooms = bedsFromMsg.exact;
+    if (bedsFromMsg.min != null) newFilters.bedroomsMin = bedsFromMsg.min;
+  }
+  if (budget) {
+    if (budget.budgetMin != null) newFilters.budgetMin = budget.budgetMin;
+    if (budget.budgetMax != null) newFilters.budgetMax = budget.budgetMax;
+  }
+
+  const patch = {
+    lastSearchFilters: newFilters,
+    slotFlow: { awaiting: null, alternatives: null },
+  };
+  if (resolvedPurpose) patch.purpose = resolvedPurpose;
+
+  return {
+    type: 'continue',
+    profile: mergeProfile(profile, patch),
+  };
 }
 
 function bedroomClarifyIfNeeded(message, profile) {
@@ -441,15 +581,19 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
 
   if (result.needsEmptyResults || !(result.propertyCards || []).length) {
     const filters = result.effectiveFilters || nextProfile.lastSearchFilters || {};
+    // Forward the slotFlow from the result (includes awaiting + alternatives JSON)
+    const resultSlotFlow = result.profilePatch?.slotFlow || { awaiting: 'emptyResults' };
+    const hasOpts = Array.isArray(result.options) && result.options.length > 0;
+    const responseOpts = hasOpts ? result.options : emptyResultOptions(filters);
     return {
       reply: result.clarificationReply || emptyResultsReply(filters),
-      profile: mergeProfile(nextProfile, { slotFlow: { awaiting: 'emptyResults' } }),
+      profile: mergeProfile(nextProfile, { slotFlow: resultSlotFlow }),
       propertyCards: [],
       sources: [],
       suggestedCta: null,
       viewAllMatching: null,
       requiresClarification: true,
-      options: result.options || emptyResultOptions(filters),
+      options: responseOpts,
       select: PURPOSE_SELECT,
     };
   }
@@ -599,11 +743,13 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         if (result.needsEmptyResults || result.modelPayload?.needsEmptyResults) {
           lastSearchNeedsEmptyResults = true;
           emptyClarifyReply = result.clarificationReply || emptyResultsReply(result.effectiveFilters || {});
-          emptyClarifyOptions = result.options || emptyResultOptions(result.effectiveFilters || {});
+          const hasAltOpts = Array.isArray(result.options) && result.options.length > 0;
+          emptyClarifyOptions = hasAltOpts ? result.options : emptyResultOptions(result.effectiveFilters || {});
           if (result.effectiveFilters) {
+            const emptySlotFlow = result.profilePatch?.slotFlow || { awaiting: 'emptyResults' };
             profile = mergeProfile(profile, {
               lastSearchFilters: result.effectiveFilters,
-              slotFlow: { awaiting: 'emptyResults' },
+              slotFlow: emptySlotFlow,
             });
           }
         }
@@ -713,10 +859,12 @@ const chat = async (req, res) => {
     }
 
     const last = profile.lastSearchFilters || emptySearchFilters();
+    // canSearchNow: fire runForcedPropertySearch whenever a slot was resolved (type-change,
+    // new-location, or bedroom/budget choice). runForcedPropertySearch handles the case where
+    // bedrooms are still unknown by returning bedroom chips.
     const canSearchNow =
       slotResult?.type === 'continue' &&
-      (parsePurposeFromMessage(message) || last.purpose || profile.purpose) &&
-      isBedroomsResolved(last);
+      !!(parsePurposeFromMessage(message) || last.purpose || profile.purpose);
 
     if (canSearchNow) {
       const forced = await runForcedPropertySearch({ sessionId, profile, userMessage: message });

@@ -55,6 +55,7 @@ const conversationSchema = new mongoose.Schema(
       },
       slotFlow: {
         awaiting: { type: String, default: null, trim: true },
+        alternatives: { type: String, default: null },
       },
       leadCaptured: { type: Boolean, default: false },
     },
