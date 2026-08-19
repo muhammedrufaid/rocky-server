@@ -1,13 +1,14 @@
 const OpenAI = require('openai');
 const { Conversation } = require('./chat.models');
 const { getSystemPrompt } = require('./chat.prompt');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
 const MAX_TOOL_ROUNDS = 4;
 const TOOL_MAX_TOKENS = 1024;
 const REPLY_MAX_TOKENS = 600;
+const CONTENT_REPLY_MAX_TOKENS = 160;
 
 const PROPERTY_CTAS = ['View listing', 'Book a viewing', 'See similar properties'];
 const CONTENT_CTAS = ['Talk to an agent', 'Explore related properties'];
@@ -180,6 +181,40 @@ function bedroomClarifyPayload(profile, purpose) {
   };
 }
 
+function leaveSearchSlotForGeneralQuestion(profile) {
+  return {
+    type: 'delegate',
+    profile: mergeProfile(profile, {
+      slotFlow: { awaiting: null, alternatives: null },
+    }),
+  };
+}
+
+function applyRelocationIntent(message, profile) {
+  if (!wantsDifferentLocation(message)) return null;
+
+  const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+  if (!last.purpose && !last.location && !last.type && !profile.purpose) return null;
+
+  const newType = parsePropertyTypeChange(message) || parseDesiredPropertyType(message);
+  const previousLocation = last.location;
+  last.location = null;
+  if (newType) last.type = newType;
+  const resolvedPurpose = last.purpose || profile.purpose || null;
+  if (resolvedPurpose) last.purpose = resolvedPurpose;
+
+  return {
+    type: 'clarify',
+    profile: mergeProfile(profile, {
+      purpose: resolvedPurpose || profile.purpose,
+      lastSearchFilters: last,
+      slotFlow: { awaiting: 'location', alternatives: null },
+    }),
+    reply: locationClarificationReply(),
+    options: nearbyAreaOptions(previousLocation),
+  };
+}
+
 function applyPropertyTypeChange(message, profile) {
   const newType = parsePropertyTypeChange(message);
   if (!newType) return null;
@@ -188,11 +223,10 @@ function applyPropertyTypeChange(message, profile) {
   // Only treat it as a type change if we already have at least purpose or location in context
   if (!last.purpose && !last.location && !profile.purpose) return null;
   // Do not override if the type is already the same
-  if (last.type && last.type.toLowerCase() === newType.toLowerCase()) return null;
+  if (last.type && last.type.toLowerCase() === newType.toLowerCase() && last.location) return null;
 
-  // If the message mentions a DIFFERENT location, this is a new-location search, not a
-  // type-only refinement. Let it fall through to the LLM so resolveEffectiveFilters
-  // can handle the full reset (location, bedrooms, budget).
+  // If the message mentions a DIFFERENT named location, this is a new-location search, not a
+  // type-only refinement. Let it fall through so applyNewLocationSearch can handle it.
   const mentionedLocation = parseLocationFromMessage(message);
   if (mentionedLocation && last.location) {
     const locDiffers = mentionedLocation.trim().toLowerCase() !== last.location.trim().toLowerCase();
@@ -201,11 +235,39 @@ function applyPropertyTypeChange(message, profile) {
 
   // Carry purpose from top-level profile into lastSearchFilters so trustedPurpose can read it
   const resolvedPurpose = last.purpose || profile.purpose || null;
+  last.type = newType;
+  last.purpose = resolvedPurpose;
+
+  // Named area while location is empty (e.g. after "somewhere else"): keep bedrooms and search
+  if (mentionedLocation && !last.location) {
+    last.location = mentionedLocation;
+    return {
+      type: 'continue',
+      profile: mergeProfile(profile, {
+        preferredAreas: [mentionedLocation],
+        lastSearchFilters: last,
+        slotFlow: { awaiting: null, alternatives: null },
+      }),
+    };
+  }
+
+  // Type change with no current location: ask for area, do not search
+  if (!last.location) {
+    return {
+      type: 'clarify',
+      profile: mergeProfile(profile, {
+        lastSearchFilters: last,
+        slotFlow: { awaiting: 'location', alternatives: null },
+      }),
+      reply: locationClarificationReply(),
+      options: nearbyAreaOptions(null),
+    };
+  }
 
   return {
     type: 'continue',
     profile: mergeProfile(profile, {
-      lastSearchFilters: { ...last, type: newType, purpose: resolvedPurpose },
+      lastSearchFilters: last,
       slotFlow: { awaiting: null },
     }),
   };
@@ -213,6 +275,10 @@ function applyPropertyTypeChange(message, profile) {
 
 function resolvePendingSlots(message, profile) {
   const awaiting = profile.slotFlow?.awaiting;
+
+  // "villa in another location" — reset location and keep type/bedrooms/purpose
+  const relocation = applyRelocationIntent(message, profile);
+  if (relocation) return relocation;
 
   // Property-type change takes priority over any pending clarification state
   const typeChange = applyPropertyTypeChange(message, profile);
@@ -250,6 +316,9 @@ function resolvePendingSlots(message, profile) {
   if (awaiting === 'bedrooms') {
     const choice = parseBedroomChoice(message);
     if (!choice) {
+      if (!isVagueConfirm(message) && !isListingFollowUp(message)) {
+        return leaveSearchSlotForGeneralQuestion(profile);
+      }
       return {
         type: 'clarify',
         profile,
@@ -315,6 +384,10 @@ function resolvePendingSlots(message, profile) {
       };
     }
 
+    if (!isVagueConfirm(message) && !isListingFollowUp(message)) {
+      return leaveSearchSlotForGeneralQuestion(profile);
+    }
+
     return {
       type: 'clarify',
       profile,
@@ -343,6 +416,9 @@ function resolvePendingSlots(message, profile) {
     const chipPatch = matched ? matched.patch : parseAlternativeChip(message, last);
 
     if (!chipPatch || isVagueConfirm(message)) {
+      if (!isVagueConfirm(message) && !isListingFollowUp(message)) {
+        return leaveSearchSlotForGeneralQuestion(profile);
+      }
       // Re-show the same alternatives with a prompt to pick one
       return {
         type: 'clarify',
@@ -376,11 +452,42 @@ function resolvePendingSlots(message, profile) {
     };
   }
 
+  if (awaiting === 'location') {
+    const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    const options = nearbyAreaOptions(last.location);
+    const named = matchesNamedOption(message, options) || parseLocationReply(message);
+    if (!named || isVagueConfirm(message) || wantsDifferentLocation(message)) {
+      if (!isVagueConfirm(message) && !isListingFollowUp(message)) {
+        return leaveSearchSlotForGeneralQuestion(profile);
+      }
+      return {
+        type: 'clarify',
+        profile,
+        reply: locationClarificationReply(),
+        options,
+      };
+    }
+    last.location = named;
+    const resolvedPurpose = last.purpose || profile.purpose || null;
+    if (resolvedPurpose) last.purpose = resolvedPurpose;
+    return {
+      type: 'continue',
+      profile: mergeProfile(profile, {
+        preferredAreas: [named],
+        lastSearchFilters: last,
+        slotFlow: { awaiting: null, alternatives: null },
+      }),
+    };
+  }
+
   if (awaiting === 'nearbyArea') {
     const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
     const options = nearbyAreaOptions(last.location);
     const named = matchesNamedOption(message, options);
     if (!named || isVagueConfirm(message)) {
+      if (!isVagueConfirm(message) && !isListingFollowUp(message)) {
+        return leaveSearchSlotForGeneralQuestion(profile);
+      }
       return {
         type: 'clarify',
         profile,
@@ -403,6 +510,9 @@ function resolvePendingSlots(message, profile) {
     const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
     const budget = parseBudgetFromMessage(message, { requireBudgetContext: true });
     if (!budget) {
+      if (!isVagueConfirm(message) && !isListingFollowUp(message)) {
+        return leaveSearchSlotForGeneralQuestion(profile);
+      }
       return {
         type: 'clarify',
         profile,
@@ -437,6 +547,7 @@ function resolvePendingSlots(message, profile) {
  * Returns null if the message isn't a new-location search.
  */
 function applyNewLocationSearch(message, profile) {
+  if (wantsDifferentLocation(message)) return null;
   const mentionedLocation = parseLocationFromMessage(message);
   if (!mentionedLocation) return null;
 
@@ -453,7 +564,7 @@ function applyNewLocationSearch(message, profile) {
     /\b(show|find|search|looking|apartment|villa|townhouse|penthouse|duplex|studio|flat|property|properties|home|listing)\b/i.test(message);
   if (!looksLikeListing) return null;
 
-  const mentionedType = normalizePropertyType(message);
+  const mentionedType = parseDesiredPropertyType(message) || normalizePropertyType(message);
   const purposeFromMsg = parsePurposeFromMessage(message);
   const bedsFromMsg = parseBedroomChoice(message);
   const budget = parseBudgetFromMessage(message);
@@ -495,6 +606,7 @@ function applyNewLocationSearch(message, profile) {
 }
 
 function bedroomClarifyIfNeeded(message, profile) {
+  if (shouldSkipPropertySearch(message) || isGeneralKnowledgeQuery(message)) return null;
   if (parseBedroomChoice(message)) return null;
   const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
   const purpose = parsePurposeFromMessage(message) || last.purpose || profile.purpose || null;
@@ -579,6 +691,18 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
     };
   }
 
+  if (result.modelPayload?.skipped) {
+    return {
+      reply: null,
+      profile: nextProfile,
+      propertyCards: [],
+      sources: [],
+      skippedSearch: true,
+      suggestedCta: null,
+      viewAllMatching: null,
+    };
+  }
+
   if (result.needsEmptyResults || !(result.propertyCards || []).length) {
     const filters = result.effectiveFilters || nextProfile.lastSearchFilters || {};
     // Forward the slotFlow from the result (includes awaiting + alternatives JSON)
@@ -632,15 +756,23 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   let emptyClarifyOptions = null;
   let viewAllMatching = null;
   let clarificationOptions = null;
+  let usedSearchContent = false;
+  let usedSearchProperties = false;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     const hasToolResults = messages.some((m) => m.role === 'tool');
+    const contentOnlyReply =
+      hasToolResults && usedSearchContent && !usedSearchProperties && propertyCards.length === 0;
     const completion = await openai.chat.completions.create({
       model,
       messages,
       tools: TOOL_DEFINITIONS,
       tool_choice: 'auto',
-      max_completion_tokens: hasToolResults ? REPLY_MAX_TOKENS : TOOL_MAX_TOKENS,
+      max_completion_tokens: contentOnlyReply
+        ? CONTENT_REPLY_MAX_TOKENS
+        : hasToolResults
+          ? REPLY_MAX_TOKENS
+          : TOOL_MAX_TOKENS,
       reasoning_effort: reasoningEffort,
     });
 
@@ -708,6 +840,9 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         result.propertyCards?.length ?? 0
       );
 
+      if (call.function?.name === 'search_content') usedSearchContent = true;
+      if (call.function?.name === 'search_properties') usedSearchProperties = true;
+
       if (result.propertyCards?.length) propertyCards.push(...result.propertyCards);
       if (result.sources?.length) sources.push(...result.sources);
       if (result.leadCaptured) leadCaptured = true;
@@ -740,7 +875,11 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
             });
           }
         }
-        if (result.needsEmptyResults || result.modelPayload?.needsEmptyResults) {
+        if (result.modelPayload?.skipped) {
+          lastSearchNeedsPurpose = false;
+          lastSearchNeedsBedrooms = false;
+          lastSearchNeedsEmptyResults = false;
+        } else if (result.needsEmptyResults || result.modelPayload?.needsEmptyResults) {
           lastSearchNeedsEmptyResults = true;
           emptyClarifyReply = result.clarificationReply || emptyResultsReply(result.effectiveFilters || {});
           const hasAltOpts = Array.isArray(result.options) && result.options.length > 0;

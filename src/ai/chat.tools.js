@@ -52,7 +52,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'search_content',
       description:
-        'Search Rocky website content (blogs, area guides, FAQs, services). Use for company, area, process, and service questions. Do not use this for live listing prices or availability.',
+        'Search Rocky website content (blogs, area guides, FAQs, services). Use for company, area, process, Golden Visa, costs, property management, and service questions. Do not use this for live listing prices or availability. After results, write 2–3 short sentences with the key fact only, then offer more details — never paste the full chunks.',
       parameters: {
         type: 'object',
         properties: {
@@ -481,16 +481,90 @@ function normalizePropertyType(raw) {
 }
 
 /**
+ * True when the user asked for a different area without naming a real community.
+ * "another locations", "somewhere else", "a different area" are not searchable places.
+ */
+function isUnspecifiedLocationPhrase(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  if (!raw) return false;
+  if (/\bsomewhere\s+(else|new|different)\b/.test(raw)) return true;
+  return /\b((?:a|an|some)\s+)?(another|different|other|new)\s+(location|locations|area|areas|place|places|community|communities)\b/.test(
+    raw
+  );
+}
+
+function wantsDifferentLocation(text) {
+  return isUnspecifiedLocationPhrase(text);
+}
+
+function firstPropertyTypeIn(text) {
+  const lower = String(text || '').toLowerCase();
+  if (!lower.trim()) return null;
+  for (const entry of PROPERTY_TYPE_MAP) {
+    if (entry.patterns.test(lower)) return entry.canonical;
+  }
+  return null;
+}
+
+/**
+ * Prefer the type after a change-intent verb so "this is apartment i need villa"
+ * resolves to Villa, not Apartment.
+ */
+function parseDesiredPropertyType(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  if (!raw) return null;
+  const afterIntent = raw.match(
+    /\b(?:need|want|prefer|would\s+like|'d\s+like|show(?:\s+me)?|give\s+me|find(?:\s+me)?|search(?:\s+for)?|change(?:\s+it)?(?:\s+to)?|switch(?:\s+to)?|looking\s+for|instead)\b(.*)$/i
+  );
+  return firstPropertyTypeIn(afterIntent ? afterIntent[1] : '') || firstPropertyTypeIn(raw);
+}
+
+/**
  * Extracts a location from patterns like "in Dubai Hills", "in Arabian Ranches".
- * Returns the location string or null if none found.
+ * Returns the location string or null if none found. Never returns a vague
+ * phrase such as "another location".
  */
 function parseLocationFromMessage(text) {
   const raw = String(text || '').trim();
   if (!raw) return null;
+  if (isUnspecifiedLocationPhrase(raw)) return null;
   // Match " in <location>" — location is everything after "in" until end or a filter word
   const m = raw.match(/\bin\s+([A-Za-z0-9][A-Za-z0-9 '-]+?)(?:\s+(?:for|with|under|below|up\s+to|at|max)|$)/i);
-  if (m) return m[1].trim() || null;
-  return null;
+  if (!m) return null;
+  const loc = m[1].trim();
+  if (!loc || isUnspecifiedLocationPhrase(loc)) return null;
+  return loc;
+}
+
+/**
+ * Accept a standalone place name when the bot is asking which area to search.
+ */
+function parseLocationReply(text) {
+  const named = parseLocationFromMessage(text);
+  if (named) return named;
+  const raw = String(text || '')
+    .trim()
+    .replace(/[.!?]/g, '');
+  if (!raw || isUnspecifiedLocationPhrase(raw) || isGeneralKnowledgeQuery(raw)) return null;
+  if (isVagueConfirm(raw)) return null;
+  if (parsePurposeFromMessage(raw)) return null;
+  if (parseBedroomChoice(raw)) return null;
+  if (parsePropertyTypeChange(raw)) return null;
+  if (!/^[A-Za-z0-9][A-Za-z0-9 '.-]{1,80}$/.test(raw)) return null;
+  if (firstPropertyTypeIn(raw) && raw.split(/\s+/).length <= 2 && !/\b(dubai|jumeirah|marina|hills|south|palm|bay|circle|village)\b/i.test(raw)) {
+    return null;
+  }
+  return raw;
+}
+
+function locationClarificationReply() {
+  return 'Which area would you like me to search?';
 }
 
 /**
@@ -514,10 +588,7 @@ function parsePropertyTypeChange(text) {
 
   if (!changePrefix.test(lower)) return null;
 
-  for (const entry of PROPERTY_TYPE_MAP) {
-    if (entry.patterns.test(lower)) return entry.canonical;
-  }
-  return null;
+  return parseDesiredPropertyType(raw);
 }
 
 function isBedroomSkip(text) {
@@ -627,6 +698,39 @@ function isAmbiguousListingQuery(text) {
   // Property-type change phrases are refinements, not ambiguous new queries
   if (parsePropertyTypeChange(raw)) return false;
   return /\b(show|find|search|looking|apartments?|villas?|townhouses?|properties|homes?|listings?)\b/.test(raw);
+}
+
+function isListingFollowUp(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  if (parsePurposeFromMessage(raw)) return true;
+  if (parsePropertyTypeChange(raw)) return true;
+  if (wantsDifferentLocation(raw)) return true;
+  if (parseEmptyResultChoice(raw)) return true;
+  if (isAmbiguousListingQuery(raw)) return true;
+  if (parseLocationFromMessage(raw)) return true;
+  if (parseBudgetFromMessage(raw)) return true;
+  const bed = parseBedroomChoice(raw);
+  if (bed && String(raw).trim().length < 48) return true;
+  return false;
+}
+
+function isGeneralKnowledgeQuery(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase();
+  if (!raw) return false;
+  if (isListingFollowUp(raw)) return false;
+  return /\b(golden\s+visa|visa|eligib|buying\s+costs?|cost\s+of\s+buying|cost\s+to\s+buy|transfer\s+fee|dld|mortgage|property\s+management|service\s+charge|rera|freehold|tell\s+me\s+about|what\s+is|what\s+are|how\s+do(?:es)?|explain)\b/.test(
+    raw
+  );
+}
+
+/** True when this turn is not a listing follow-up and must not reuse last search filters. */
+function shouldSkipPropertySearch(text) {
+  if (!String(text || '').trim()) return false;
+  if (isListingFollowUp(text) || isVagueConfirm(text)) return false;
+  return isGeneralKnowledgeQuery(text);
 }
 
 function trustedPurpose({ lastSearchFilters = {}, userMessage, slotFlow } = {}) {
@@ -1098,6 +1202,22 @@ async function searchProperties(
   filters = {},
   { lastSearchFilters, slotFlow, userMessage } = {}
 ) {
+  if (shouldSkipPropertySearch(userMessage)) {
+    return {
+      propertyCards: [],
+      sources: [],
+      leadCaptured: false,
+      profilePatch: {},
+      viewAllMatching: null,
+      modelPayload: {
+        skipped: true,
+        count: 0,
+        instruction:
+          'The visitor asked a general question, not for listings. Do not reuse lastSearchFilters. Call search_content if needed and answer the question. Do not write a no-results property message.',
+      },
+    };
+  }
+
   const effectiveFilters = resolveEffectiveFilters(filters, lastSearchFilters);
   clearUntrustedBedrooms(effectiveFilters);
 
@@ -1249,6 +1369,8 @@ async function searchContent({ query }) {
         url: row.url,
         content: row.content,
       })),
+      instruction:
+        'Answer in 2–3 short sentences only. Lead with the single most important fact from the chunks (e.g. Golden Visa: 10-year visa, commonly AED 2 million property investment). No bullet lists, no long recap of every chunk. End with one question such as "Would you like more details?" or "Would you like to check the eligibility requirements?"',
     },
   };
 }
@@ -1347,9 +1469,16 @@ module.exports = {
   isBedroomsResolved,
   isBedroomSkip,
   isAmbiguousListingQuery,
+  isListingFollowUp,
+  isGeneralKnowledgeQuery,
+  shouldSkipPropertySearch,
   isVagueConfirm,
   normalizePropertyType,
   parseLocationFromMessage,
+  parseLocationReply,
+  wantsDifferentLocation,
+  locationClarificationReply,
+  parseDesiredPropertyType,
   parsePropertyTypeChange,
   parseAlternativeChip,
   parseBudgetFromMessage,
