@@ -13,7 +13,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'search_properties',
       description:
-        'Search live Rocky listings. Use for buy, rent, or off-plan requests and when offering matching properties. Pass every filter you know. purpose is Buy, Rent, or Off-plan — never guess it. Omit purpose only when lastSearchFilters.purpose / the visitor profile already has one (the server merges it). If purpose is not known, do not call this tool; ask whether they want to buy, rent, or explore off-plan first. If count is 0 for the requested area, call this again once with a nearby comparable area before replying. Never claim listings exist unless this tool returned at least one result.',
+        'Search live Rocky listings. Use for buy, rent, or off-plan requests and when offering matching properties. Pass every filter you know. purpose is Buy, Rent, or Off-plan — never guess it. Omit purpose only when lastSearchFilters.purpose / the visitor profile already has one (the server merges it). If purpose is not known, still call this tool WITHOUT purpose so the server can show a single-select Buy / Rent / Off-plan prompt — do not write that question yourself and do not ask about bedrooms in that turn. If count is 0 for the requested area, call this again once with a nearby comparable area before replying. Never claim listings exist unless this tool returned at least one result.',
       parameters: {
         type: 'object',
         properties: {
@@ -148,22 +148,106 @@ function toPropertyCard(property) {
   };
 }
 
+const PURPOSE_OPTIONS = ['Buy', 'Rent', 'Off-plan'];
+const PURPOSE_SELECT = 'single';
+
 function normalizePurpose(value) {
   const v = String(value || '')
     .trim()
     .toLowerCase();
   if (v === 'rent' || v === 'rental' || v === 'lease') return 'Rent';
-  if (v === 'buy' || v === 'sale' || v === 'sell') return 'Buy';
-  if (v === 'off-plan' || v === 'offplan' || v === 'off plan' || v === 'off_plan') return 'Off-plan';
+  if (v === 'buy' || v === 'sale' || v === 'sell' || v === 'purchase') return 'Buy';
+  if (
+    v === 'off-plan' ||
+    v === 'offplan' ||
+    v === 'off plan' ||
+    v === 'off_plan' ||
+    v === 'off-plan properties' ||
+    v === 'off plan properties'
+  ) {
+    return 'Off-plan';
+  }
   return null;
 }
 
-function purposeClarificationReply(location) {
-  const area = String(location || '').trim();
-  if (area) {
-    return `Are you looking to buy, rent, or explore off-plan options in ${area}?`;
+function parsePurposeFromMessage(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  const exact = normalizePurpose(raw);
+  if (exact) return exact;
+
+  const lower = raw.toLowerCase().replace(/[.!?]/g, '').trim();
+  const collapsed = lower.replace(/[\s_-]+/g, '');
+  if (collapsed === 'offplan' || collapsed === 'offplanproperties') return 'Off-plan';
+  if (/off[\s-_]*plan/.test(lower)) return 'Off-plan';
+
+  if (
+    /^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|looking\s+to\s+|looking\s+for\s+)?(buy|purchase|sale|sell)\b/.test(
+      lower
+    ) &&
+    !/\brent\b|\blease\b|off[\s-_]*plan/.test(lower)
+  ) {
+    return 'Buy';
   }
-  return 'Are you looking to buy, rent, or explore off-plan options?';
+  if (
+    /^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|looking\s+to\s+|looking\s+for\s+)?(rent|rental|lease)\b/.test(
+      lower
+    ) &&
+    !/\bbuy\b|\bpurchase\b|off[\s-_]*plan/.test(lower)
+  ) {
+    return 'Rent';
+  }
+  return null;
+}
+
+function isBedroomsSet(value) {
+  if (value === undefined || value === null || value === '') return false;
+  return Number.isFinite(Number(value));
+}
+
+function parseBedroomsFromMessage(text) {
+  const raw = String(text || '').trim().toLowerCase();
+  if (!raw) return null;
+  if (/\bstudio\b/.test(raw)) return 0;
+
+  const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+  if (Object.prototype.hasOwnProperty.call(words, raw)) return words[raw];
+
+  const wordBed = raw.match(/\b(one|two|three|four|five|six)\s*-?\s*(bed|br|bedroom)s?\b/);
+  if (wordBed) return words[wordBed[1]];
+
+  if (/^\d+$/.test(raw)) {
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 && n <= 12 ? n : null;
+  }
+
+  const numbered = raw.match(/\b(\d+)\s*-?\s*(bed|br|bedroom)s?\b/);
+  if (numbered) {
+    const n = Number(numbered[1]);
+    return Number.isFinite(n) && n >= 0 && n <= 12 ? n : null;
+  }
+  return null;
+}
+
+function isBedroomSkip(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  if (!raw) return false;
+  return /^(any|skip|none|no preference|doesn'?t matter|does not matter|don'?t care|whatever|just show( me)?( properties| listings| options)?|show me( anyway)?|all|no limit|no restriction|any number|n\/?a)$/.test(
+    raw
+  );
+}
+
+function purposeClarificationReply() {
+  return 'What are you looking for?';
+}
+
+function bedroomsClarificationReply(location) {
+  const area = String(location || '').trim();
+  if (area) return `How many bedrooms would you like in ${area}?`;
+  return 'How many bedrooms would you like?';
 }
 
 function isProvidedText(value) {
@@ -197,7 +281,7 @@ function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
       bedrooms: coalesceFilter(filters.bedrooms, null),
       budgetMin: coalesceFilter(filters.budgetMin, null),
       budgetMax: coalesceFilter(filters.budgetMax, null),
-      purpose: coalesceFilter(filters.purpose, last.purpose),
+      purpose: null,
     };
   }
 
@@ -207,7 +291,39 @@ function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
     bedrooms: coalesceFilter(filters.bedrooms, last.bedrooms),
     budgetMin: coalesceFilter(filters.budgetMin, last.budgetMin),
     budgetMax: coalesceFilter(filters.budgetMax, last.budgetMax),
-    purpose: coalesceFilter(filters.purpose, last.purpose),
+    purpose: last.purpose || null,
+  };
+}
+
+function isAmbiguousListingQuery(text) {
+  const raw = String(text || '').trim().toLowerCase();
+  if (!raw) return false;
+  if (parsePurposeFromMessage(raw)) return false;
+  if (parseBedroomsFromMessage(raw) != null) return false;
+  if (isBedroomSkip(raw)) return false;
+  return /\b(show|find|search|looking|apartments?|villas?|townhouses?|properties|homes?|listings?)\b/.test(raw);
+}
+
+function trustedPurpose({ lastSearchFilters = {}, userMessage, slotFlow } = {}) {
+  const fromMessage = parsePurposeFromMessage(userMessage);
+  if (fromMessage) return fromMessage;
+
+  const lastPurpose = normalizePurpose(lastSearchFilters?.purpose);
+  if (!lastPurpose) return null;
+
+  if (slotFlow?.awaiting === 'bedrooms') return lastPurpose;
+  if (parseBedroomsFromMessage(userMessage) != null || isBedroomSkip(userMessage)) return lastPurpose;
+
+  if (isAmbiguousListingQuery(userMessage)) return null;
+
+  return lastPurpose;
+}
+
+function purposeClarificationFields() {
+  return {
+    requiresClarification: true,
+    options: PURPOSE_OPTIONS,
+    select: PURPOSE_SELECT,
   };
 }
 
@@ -303,33 +419,91 @@ function propertySearchResult(propertyCards, filters, extraPayload = {}, viewAll
 }
 
 function purposeMissingResult(effectiveFilters) {
-  const search = (effectiveFilters.location || '').toString().trim();
-  const clarificationReply = purposeClarificationReply(search);
   return {
     propertyCards: [],
     sources: [],
     leadCaptured: false,
-    profilePatch: profilePatchFromPropertyFilters(effectiveFilters),
+    profilePatch: {
+      ...profilePatchFromPropertyFilters(effectiveFilters),
+      slotFlow: { awaiting: 'purpose' },
+    },
     viewAllMatching: null,
     effectiveFilters,
     needsPurpose: true,
-    clarificationReply,
+    clarificationReply: purposeClarificationReply(),
+    ...purposeClarificationFields(),
     modelPayload: {
       count: 0,
       needsPurpose: true,
-      requestedLocation: search || null,
+      requestedLocation: (effectiveFilters.location || '').toString().trim() || null,
       instruction:
-        'purpose is missing. Do not invent listings or assume Buy. Ask the visitor whether they want Buy, Rent, or Off-plan before calling search_properties again.',
+        'purpose is missing. Do not invent listings or assume Buy. The server will ask a single-select Buy / Rent / Off-plan question. Do not ask about bedrooms in this turn.',
     },
   };
 }
 
-async function searchProperties(filters = {}, { previousPropertySearchEmpty, lastSearchFilters } = {}) {
+function bedroomsMissingResult(effectiveFilters) {
+  const location = (effectiveFilters.location || '').toString().trim();
+  return {
+    propertyCards: [],
+    sources: [],
+    leadCaptured: false,
+    profilePatch: {
+      ...profilePatchFromPropertyFilters(effectiveFilters),
+      slotFlow: { awaiting: 'bedrooms' },
+    },
+    viewAllMatching: null,
+    effectiveFilters,
+    needsBedrooms: true,
+    clarificationReply: bedroomsClarificationReply(location),
+    modelPayload: {
+      count: 0,
+      needsBedrooms: true,
+      requestedLocation: location || null,
+      instruction:
+        'purpose is saved. Do not invent listings. Ask only how many bedrooms they want in the saved location. Do not re-ask location, property type, or purpose.',
+    },
+  };
+}
+
+async function searchProperties(
+  filters = {},
+  { previousPropertySearchEmpty, lastSearchFilters, slotFlow, userMessage } = {}
+) {
   const effectiveFilters = resolveEffectiveFilters(filters, lastSearchFilters);
-  if (!normalizePurpose(effectiveFilters.purpose)) {
+  const purpose = trustedPurpose({ lastSearchFilters, userMessage, slotFlow });
+  effectiveFilters.purpose = purpose;
+
+  console.log(
+    'search_properties purpose gate:',
+    JSON.stringify({
+      toolPurpose: filters.purpose ?? null,
+      trustedPurpose: purpose,
+      lastPurpose: lastSearchFilters?.purpose ?? null,
+      fromMessage: parsePurposeFromMessage(userMessage),
+    })
+  );
+
+  if (!purpose) {
     return purposeMissingResult(effectiveFilters);
   }
+
+  const awaiting = slotFlow?.awaiting;
+  const bedroomsMissing = !isBedroomsSet(effectiveFilters.bedrooms);
+  if (bedroomsMissing && awaiting === 'purpose') {
+    return bedroomsMissingResult(effectiveFilters);
+  }
+
   const search = (effectiveFilters.location || '').toString().trim();
+  console.log(
+    'search_properties executing:',
+    JSON.stringify({
+      purpose,
+      location: search || null,
+      type: effectiveFilters.type || null,
+      bedrooms: effectiveFilters.bedrooms ?? null,
+    })
+  );
   const { propertyCards, usedPurpose, total } = await fetchPropertyCards(effectiveFilters, search);
   effectiveFilters.purpose = usedPurpose;
   const extraPayload = {
@@ -345,6 +519,10 @@ async function searchProperties(filters = {}, { previousPropertySearchEmpty, las
     buildViewAllMatching(total, effectiveFilters)
   );
   result.effectiveFilters = effectiveFilters;
+  result.profilePatch = {
+    ...(result.profilePatch || {}),
+    slotFlow: { awaiting: null },
+  };
   return result;
 }
 
@@ -483,10 +661,15 @@ async function captureLead({ name, phone, email, intent }, sessionId, { leadAlre
 async function executeTool(
   name,
   args,
-  { sessionId, previousPropertySearchEmpty, lastSearchFilters, leadAlreadyCaptured } = {}
+  { sessionId, previousPropertySearchEmpty, lastSearchFilters, leadAlreadyCaptured, slotFlow, userMessage } = {}
 ) {
   if (name === 'search_properties') {
-    return searchProperties(args || {}, { previousPropertySearchEmpty, lastSearchFilters });
+    return searchProperties(args || {}, {
+      previousPropertySearchEmpty,
+      lastSearchFilters,
+      slotFlow,
+      userMessage,
+    });
   }
   if (name === 'search_content') return searchContent(args || {});
   if (name === 'capture_lead') {
@@ -505,4 +688,13 @@ async function executeTool(
 module.exports = {
   TOOL_DEFINITIONS,
   executeTool,
+  PURPOSE_OPTIONS,
+  PURPOSE_SELECT,
+  normalizePurpose,
+  parsePurposeFromMessage,
+  parseBedroomsFromMessage,
+  isBedroomsSet,
+  isBedroomSkip,
+  purposeClarificationReply,
+  bedroomsClarificationReply,
 };

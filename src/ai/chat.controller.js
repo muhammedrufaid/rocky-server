@@ -1,7 +1,7 @@
 const OpenAI = require('openai');
 const { Conversation } = require('./chat.models');
 const { getSystemPrompt } = require('./chat.prompt');
-const { TOOL_DEFINITIONS, executeTool } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, parsePurposeFromMessage, parseBedroomsFromMessage, isBedroomsSet, isBedroomSkip, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -71,6 +71,9 @@ function mergeProfile(current, patch) {
     purpose: current.purpose || null,
     lastPropertyCards: toStoredPropertyCards(current.lastPropertyCards),
     lastSearchFilters: copySearchFilters(current.lastSearchFilters || emptySearchFilters()),
+    slotFlow: {
+      awaiting: current.slotFlow?.awaiting || null,
+    },
     leadCaptured: current.leadCaptured || false,
   };
 
@@ -94,6 +97,11 @@ function mergeProfile(current, patch) {
   }
   if (patch.lastSearchFilters) {
     next.lastSearchFilters = copySearchFilters(patch.lastSearchFilters);
+  }
+  if (patch.slotFlow) {
+    next.slotFlow = {
+      awaiting: patch.slotFlow.awaiting || null,
+    };
   }
   if (patch.leadCaptured) next.leadCaptured = true;
 
@@ -132,6 +140,7 @@ async function loadConversation(sessionId) {
         purpose: null,
         lastPropertyCards: [],
         lastSearchFilters: emptySearchFilters(),
+        slotFlow: { awaiting: null },
         leadCaptured: false,
       },
     });
@@ -146,6 +155,92 @@ function toOpenAIHistory(messages) {
 
 function pickBothEmptyReply(turnIndex) {
   return BOTH_EMPTY_REPLIES[turnIndex % BOTH_EMPTY_REPLIES.length];
+}
+
+function emptyClarificationPayload() {
+  return {
+    propertyCards: [],
+    sources: [],
+    suggestedCta: null,
+    viewAllMatching: null,
+  };
+}
+
+function resolvePendingSlots(message, profile) {
+  const awaiting = profile.slotFlow?.awaiting;
+  if (!awaiting) return null;
+
+  if (awaiting === 'purpose') {
+    const purpose = parsePurposeFromMessage(message);
+    if (!purpose) return null;
+
+    const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    last.purpose = purpose;
+    const bedroomsKnown = isBedroomsSet(last.bedrooms) || isBedroomsSet(profile.bedrooms);
+    if (!bedroomsKnown) {
+      return {
+        type: 'clarify',
+        profile: mergeProfile(profile, {
+          purpose,
+          lastSearchFilters: last,
+          slotFlow: { awaiting: 'bedrooms' },
+        }),
+        reply: bedroomsClarificationReply(last.location),
+      };
+    }
+
+    return {
+      type: 'continue',
+      profile: mergeProfile(profile, {
+        purpose,
+        lastSearchFilters: last,
+        slotFlow: { awaiting: null },
+      }),
+    };
+  }
+
+  if (awaiting === 'bedrooms') {
+    const beds = parseBedroomsFromMessage(message);
+    const skip = isBedroomSkip(message);
+    if (beds == null && !skip) return null;
+
+    const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    const patch = {
+      lastSearchFilters: last,
+      slotFlow: { awaiting: null },
+    };
+    if (beds != null) {
+      last.bedrooms = beds;
+      patch.bedrooms = beds;
+      patch.lastSearchFilters = last;
+    }
+
+    return {
+      type: 'continue',
+      profile: mergeProfile(profile, patch),
+    };
+  }
+
+  return null;
+}
+
+async function clarificationResponse(res, { reply, profile, conversation, message, options }) {
+  conversation.messages.push({ role: 'user', content: message, createdAt: new Date() });
+  conversation.messages.push({ role: 'assistant', content: reply, createdAt: new Date() });
+  conversation.messages = conversation.messages.slice(-MAX_STORED_MESSAGES);
+  conversation.userProfile = profile;
+  await conversation.save();
+
+  const body = {
+    reply,
+    ...emptyClarificationPayload(),
+  };
+  if (options) {
+    body.requiresClarification = true;
+    body.options = options;
+    body.select = PURPOSE_SELECT;
+  }
+  return res.status(200).json(body);
 }
 
 async function runModelLoop({ sessionId, userProfile, history, userMessage, turnIndex }) {
@@ -166,8 +261,11 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   let previousPropertySearchEmpty = false;
   let lastSearchBothEmpty = false;
   let lastSearchNeedsPurpose = false;
+  let lastSearchNeedsBedrooms = false;
   let purposeClarifyReply = '';
+  let bedroomsClarifyReply = '';
   let viewAllMatching = null;
+  let clarificationOptions = null;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     const hasToolResults = messages.some((m) => m.role === 'tool');
@@ -223,6 +321,8 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
           previousPropertySearchEmpty,
           lastSearchFilters: profile.lastSearchFilters,
           leadAlreadyCaptured: !!profile.leadCaptured,
+          slotFlow: profile.slotFlow,
+          userMessage,
         });
       } catch (err) {
         result = {
@@ -252,10 +352,26 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         const returnedCards = result.propertyCards?.length ?? 0;
         if (result.needsPurpose || result.modelPayload?.needsPurpose) {
           lastSearchNeedsPurpose = true;
-          purposeClarifyReply = result.clarificationReply || purposeClarifyReply;
+          purposeClarifyReply = result.clarificationReply || purposeClarificationReply();
+          clarificationOptions = result.options || PURPOSE_OPTIONS;
+          if (result.effectiveFilters) {
+            const nextFilters = copySearchFilters(result.effectiveFilters);
+            if (!nextFilters.purpose && profile.lastSearchFilters?.purpose) {
+              nextFilters.purpose = profile.lastSearchFilters.purpose;
+            }
+            profile = mergeProfile(profile, {
+              lastSearchFilters: nextFilters,
+              slotFlow: { awaiting: 'purpose' },
+            });
+          }
+        }
+        if (result.needsBedrooms || result.modelPayload?.needsBedrooms) {
+          lastSearchNeedsBedrooms = true;
+          bedroomsClarifyReply = result.clarificationReply || bedroomsClarifyReply;
           if (result.effectiveFilters) {
             profile = mergeProfile(profile, {
               lastSearchFilters: result.effectiveFilters,
+              slotFlow: { awaiting: 'bedrooms' },
             });
           }
         }
@@ -264,10 +380,12 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         if (returnedCards > 0) {
           lastSearchBothEmpty = false;
           lastSearchNeedsPurpose = false;
+          lastSearchNeedsBedrooms = false;
           viewAllMatching = result.viewAllMatching || null;
           profile = mergeProfile(profile, {
             lastPropertyCards: result.propertyCards,
             lastSearchFilters: result.effectiveFilters,
+            slotFlow: { awaiting: null },
           });
         }
       }
@@ -281,9 +399,21 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
 
     if (lastSearchNeedsPurpose && propertyCards.length === 0) {
       return {
-        reply:
-          purposeClarifyReply ||
-          'Are you looking to buy, rent, or explore off-plan options?',
+        reply: purposeClarifyReply || purposeClarificationReply(),
+        propertyCards: uniqueBy(propertyCards, (c) => c.id),
+        sources: uniqueBy(sources, (s) => s.url || s.title),
+        leadCaptured,
+        profile,
+        viewAllMatching: null,
+        requiresClarification: true,
+        options: clarificationOptions || PURPOSE_OPTIONS,
+        select: PURPOSE_SELECT,
+      };
+    }
+
+    if (lastSearchNeedsBedrooms && propertyCards.length === 0) {
+      return {
+        reply: bedroomsClarifyReply || bedroomsClarificationReply(profile.lastSearchFilters?.location),
         propertyCards: uniqueBy(propertyCards, (c) => c.id),
         sources: uniqueBy(sources, (s) => s.url || s.title),
         leadCaptured,
@@ -318,23 +448,41 @@ const chat = async (req, res) => {
   try {
     const { sessionId, message } = req.body;
     const conversation = await loadConversation(sessionId);
+    let profile = conversation.userProfile || {};
+    const slotResult = resolvePendingSlots(message, profile);
+
+    if (slotResult?.type === 'clarify') {
+      return clarificationResponse(res, {
+        reply: slotResult.reply,
+        profile: slotResult.profile,
+        conversation,
+        message,
+      });
+    }
+
+    if (slotResult?.profile) {
+      profile = slotResult.profile;
+    }
+
     const history = toOpenAIHistory(conversation.messages || []);
 
     const result = await runModelLoop({
       sessionId,
-      userProfile: conversation.userProfile || {},
+      userProfile: profile,
       history,
       userMessage: message,
       turnIndex: conversation.messages.length,
     });
 
     const reply = result.reply || 'How can I help you with Dubai property today?';
-    const suggestedCta = pickSuggestedCta({
-      propertyCards: result.propertyCards,
-      sources: result.sources,
-      leadCaptured: result.leadCaptured || result.profile.leadCaptured,
-      turnIndex: conversation.messages.length,
-    });
+    const suggestedCta = result.options
+      ? null
+      : pickSuggestedCta({
+          propertyCards: result.propertyCards,
+          sources: result.sources,
+          leadCaptured: result.leadCaptured || result.profile.leadCaptured,
+          turnIndex: conversation.messages.length,
+        });
 
     conversation.messages.push({ role: 'user', content: message, createdAt: new Date() });
     conversation.messages.push({ role: 'assistant', content: reply, createdAt: new Date() });
@@ -342,13 +490,20 @@ const chat = async (req, res) => {
     conversation.userProfile = result.profile;
     await conversation.save();
 
-    return res.status(200).json({
+    const payload = {
       reply,
       propertyCards: result.propertyCards,
       sources: result.sources,
       suggestedCta,
       viewAllMatching: result.viewAllMatching || null,
-    });
+    };
+    if (result.options) {
+      payload.requiresClarification = true;
+      payload.options = result.options;
+      payload.select = result.select || PURPOSE_SELECT;
+    }
+
+    return res.status(200).json(payload);
   } catch (error) {
     console.error('POST /api/chat error:', error);
     return res.status(500).json({
