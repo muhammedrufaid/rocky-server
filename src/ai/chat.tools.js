@@ -315,12 +315,12 @@ function describeBedroomPhrase(filters = {}) {
   return '';
 }
 
-function describeTypePhrase(filters = {}) {
+function describeTypePhrase(filters = {}, count = 0) {
   const t = String(filters.type || '').trim();
+  const n = Number(count);
+  if (n === 1) return (t || 'property').toLowerCase();
   if (!t) return 'properties';
-  // Preserve the canonical capitalisation from PROPERTY_TYPE_MAP (e.g. "Villa" → "villas")
-  if (t.toLowerCase().endsWith('s')) return t;
-  return `${t}s`;
+  return pluraliseType(t).toLowerCase();
 }
 
 /** Singular form, capitalised — e.g. "Villa", "Apartment", "property". */
@@ -333,8 +333,8 @@ function describeTypeSingular(filters = {}) {
 function foundListingsReply(filters = {}, total = 0) {
   const loc = (filters.location || '').toString().trim();
   const beds = describeBedroomPhrase(filters);
-  const type = describeTypePhrase(filters);
   const count = Number.isFinite(Number(total)) ? Number(total) : 0;
+  const type = describeTypePhrase(filters, count);
   let purposeBit = 'for sale';
   if (filters.purpose === 'Rent') purposeBit = 'to rent';
   if (filters.purpose === 'Off-plan') purposeBit = 'off-plan';
