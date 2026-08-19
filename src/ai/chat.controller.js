@@ -165,6 +165,8 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   let profile = userProfile;
   let previousPropertySearchEmpty = false;
   let lastSearchBothEmpty = false;
+  let lastSearchNeedsPurpose = false;
+  let purposeClarifyReply = '';
   let viewAllMatching = null;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
@@ -248,10 +250,20 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
 
       if (call.function?.name === 'search_properties') {
         const returnedCards = result.propertyCards?.length ?? 0;
+        if (result.needsPurpose || result.modelPayload?.needsPurpose) {
+          lastSearchNeedsPurpose = true;
+          purposeClarifyReply = result.clarificationReply || purposeClarifyReply;
+          if (result.effectiveFilters) {
+            profile = mergeProfile(profile, {
+              lastSearchFilters: result.effectiveFilters,
+            });
+          }
+        }
         if (returnedCards === 0) previousPropertySearchEmpty = true;
         lastSearchBothEmpty = !!result.modelPayload?.bothEmpty;
         if (returnedCards > 0) {
           lastSearchBothEmpty = false;
+          lastSearchNeedsPurpose = false;
           viewAllMatching = result.viewAllMatching || null;
           profile = mergeProfile(profile, {
             lastPropertyCards: result.propertyCards,
@@ -265,6 +277,19 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         tool_call_id: call.id,
         content: JSON.stringify(result.modelPayload),
       });
+    }
+
+    if (lastSearchNeedsPurpose && propertyCards.length === 0) {
+      return {
+        reply:
+          purposeClarifyReply ||
+          'Are you looking to buy, rent, or explore off-plan options?',
+        propertyCards: uniqueBy(propertyCards, (c) => c.id),
+        sources: uniqueBy(sources, (s) => s.url || s.title),
+        leadCaptured,
+        profile,
+        viewAllMatching: null,
+      };
     }
 
     if (lastSearchBothEmpty && propertyCards.length === 0) {

@@ -13,7 +13,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'search_properties',
       description:
-        'Search live Rocky listings. Use for buy/rent requests and when offering matching properties. Pass every filter you know. If count is 0 for the requested area, call this again once with a nearby comparable area before replying. Never claim listings exist unless this tool returned at least one result.',
+        'Search live Rocky listings. Use for buy, rent, or off-plan requests and when offering matching properties. Pass every filter you know. purpose is Buy, Rent, or Off-plan — never guess it. Omit purpose only when lastSearchFilters.purpose / the visitor profile already has one (the server merges it). If purpose is not known, do not call this tool; ask whether they want to buy, rent, or explore off-plan first. If count is 0 for the requested area, call this again once with a nearby comparable area before replying. Never claim listings exist unless this tool returned at least one result.',
       parameters: {
         type: 'object',
         properties: {
@@ -33,7 +33,8 @@ const TOOL_DEFINITIONS = [
           },
           purpose: {
             type: 'string',
-            description: 'Buy or Rent.',
+            description:
+              'Buy, Rent, or Off-plan. Optional only when already known from lastSearchFilters or the visitor profile. Never invent Buy.',
           },
         },
       },
@@ -97,9 +98,15 @@ function buildListingUrl(property) {
   return `${frontendBase()}/properties/${path}/in-dubai/${property.propertyRefNo}`;
 }
 
+function listingSearchPath(purpose) {
+  if (purpose === 'Rent') return 'rent/in-dubai';
+  if (purpose === 'Off-plan') return 'off-plan';
+  return 'buy/in-dubai';
+}
+
 function buildListingSearchUrl(filters = {}) {
   const purpose = normalizePurpose(filters.purpose);
-  const path = purpose === 'Rent' ? 'rent' : 'buy';
+  const path = listingSearchPath(purpose);
   const params = new URLSearchParams();
   const q = (filters.location || '').toString().trim();
   if (q) params.set('q', q);
@@ -114,7 +121,7 @@ function buildListingSearchUrl(filters = {}) {
     params.set('max', String(filters.budgetMax));
   }
   const qs = params.toString().replace(/\+/g, '%20');
-  return `${frontendBase()}/properties/${path}/in-dubai${qs ? `?${qs}` : ''}`;
+  return `${frontendBase()}/properties/${path}${qs ? `?${qs}` : ''}`;
 }
 
 function buildViewAllMatching(total, filters) {
@@ -147,7 +154,16 @@ function normalizePurpose(value) {
     .toLowerCase();
   if (v === 'rent' || v === 'rental' || v === 'lease') return 'Rent';
   if (v === 'buy' || v === 'sale' || v === 'sell') return 'Buy';
+  if (v === 'off-plan' || v === 'offplan' || v === 'off plan' || v === 'off_plan') return 'Off-plan';
   return null;
+}
+
+function purposeClarificationReply(location) {
+  const area = String(location || '').trim();
+  if (area) {
+    return `Are you looking to buy, rent, or explore off-plan options in ${area}?`;
+  }
+  return 'Are you looking to buy, rent, or explore off-plan options?';
 }
 
 function isProvidedText(value) {
@@ -232,17 +248,22 @@ function listingQueryOpts(filters, search) {
 
 async function fetchByPurpose(purpose, opts) {
   if (purpose === 'Rent') return propertyDbService.fetchRentProperties(opts);
-  return propertyDbService.fetchBuyProperties(opts);
+  if (purpose === 'Off-plan') return propertyDbService.fetchOffPlanProperties(opts);
+  if (purpose === 'Buy') return propertyDbService.fetchBuyProperties(opts);
+  return { properties: [], total: 0 };
 }
 
 async function fetchPropertyCards(filters, search) {
   const opts = listingQueryOpts(filters, search);
-  const requested = normalizePurpose(filters.purpose) || 'Buy';
+  const requested = normalizePurpose(filters.purpose);
+  if (!requested) {
+    return { propertyCards: [], usedPurpose: null, total: 0 };
+  }
   let result = await fetchByPurpose(requested, opts);
   let usedPurpose = requested;
 
-  // Website listing default is Buy. If the model infers Rent and that inventory is
-  // empty, retry Buy with the same location/beds/type/budget filters.
+  // If the model infers Rent and that inventory is empty, retry Buy with the same
+  // location/beds/type/budget filters. Explicit Buy / Off-plan searches are unchanged.
   if (!(result.properties || []).length && requested === 'Rent') {
     const buyResult = await fetchByPurpose('Buy', opts);
     if ((buyResult.properties || []).length) {
@@ -281,10 +302,32 @@ function propertySearchResult(propertyCards, filters, extraPayload = {}, viewAll
   };
 }
 
+function purposeMissingResult(effectiveFilters) {
+  const search = (effectiveFilters.location || '').toString().trim();
+  const clarificationReply = purposeClarificationReply(search);
+  return {
+    propertyCards: [],
+    sources: [],
+    leadCaptured: false,
+    profilePatch: profilePatchFromPropertyFilters(effectiveFilters),
+    viewAllMatching: null,
+    effectiveFilters,
+    needsPurpose: true,
+    clarificationReply,
+    modelPayload: {
+      count: 0,
+      needsPurpose: true,
+      requestedLocation: search || null,
+      instruction:
+        'purpose is missing. Do not invent listings or assume Buy. Ask the visitor whether they want Buy, Rent, or Off-plan before calling search_properties again.',
+    },
+  };
+}
+
 async function searchProperties(filters = {}, { previousPropertySearchEmpty, lastSearchFilters } = {}) {
   const effectiveFilters = resolveEffectiveFilters(filters, lastSearchFilters);
   if (!normalizePurpose(effectiveFilters.purpose)) {
-    effectiveFilters.purpose = 'Buy';
+    return purposeMissingResult(effectiveFilters);
   }
   const search = (effectiveFilters.location || '').toString().trim();
   const { propertyCards, usedPurpose, total } = await fetchPropertyCards(effectiveFilters, search);
