@@ -127,7 +127,7 @@ function uniqueBy(items, keyFn) {
 function pickSuggestedCta({ propertyCards, sources, leadCaptured, turnIndex }) {
   if (leadCaptured) return CONTENT_CTAS[0];
   if (propertyCards.length) return PROPERTY_CTAS[turnIndex % PROPERTY_CTAS.length];
-  if (sources.length) return CONTENT_CTAS[turnIndex % CONTENT_CTAS.length];
+  if (sources.length) return CONTENT_CTAS[0];
   return null;
 }
 

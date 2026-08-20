@@ -6,6 +6,18 @@ const VECTOR_INDEX_NAME = process.env.CHATBOT_VECTOR_INDEX || 'chatbot_knowledge
 const VECTOR_MIN_SCORE = Number(process.env.CHAT_VECTOR_MIN_SCORE) || 0.75;
 const CONTENT_LIMIT = 3;
 const PROPERTY_LIMIT = 6;
+const MAX_RELATED_CONTENT_ACTIONS = 2;
+
+const GOLDEN_VISA_RELATED_SOURCES = [
+  {
+    title: 'Dubai Updates Investor Visa: Key Information for You',
+    url: 'https://www.rockyrealestate.com/blogs/dubai-investor-visa',
+  },
+  {
+    title: 'Golden Visa Eligibility',
+    url: 'https://www.rockyrealestate.com/off-plan-properties/in-dubai',
+  },
+];
 
 const TOOL_DEFINITIONS = [
   {
@@ -95,6 +107,82 @@ function getOpenAI() {
 
 function frontendBase() {
   return (process.env.FRONTEND_URL || 'https://www.rockyrealestate.com').replace(/\/$/, '');
+}
+
+function normalizeContentUrl(url) {
+  return String(url || '')
+    .trim()
+    .replace(/\/+$/, '')
+    .toLowerCase();
+}
+
+function isHomepageUrl(url) {
+  const u = normalizeContentUrl(url);
+  if (!u) return true;
+  const origin = normalizeContentUrl(frontendBase());
+  return u === origin || u === 'https://www.rockyrealestate.com' || u === 'https://rockyrealestate.com';
+}
+
+function contentSourceKind(source = {}) {
+  const url = normalizeContentUrl(source.url);
+  const type = String(source.sourceType || '').toLowerCase();
+  if (type === 'blog' || /\/blogs?\//.test(url)) return 'blog';
+  if (
+    type === 'property' ||
+    /\/off-plan/.test(url) ||
+    /\/properties\//.test(url) ||
+    /\/buy\//.test(url) ||
+    /\/rent\//.test(url)
+  ) {
+    return 'listing';
+  }
+  return 'other';
+}
+
+function isGoldenVisaQuery(query) {
+  return /\b(golden\s+visa|investor\s+visa|visa\s+eligib)\b/i.test(String(query || ''));
+}
+
+function titledSource(source) {
+  const url = String(source.url || '').trim();
+  const title = String(source.title || '').trim();
+  if (title && !/^https?:\/\//i.test(title)) return { title, url };
+  const slug = url.replace(/\/+$/, '').split('/').pop() || 'Related page';
+  const fromSlug = slug.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  return { title: fromSlug, url };
+}
+
+/**
+ * Related-action buttons for informational answers:
+ * blog first, then a property/off-plan page. Never the homepage. Max 2 links.
+ */
+function rankRelatedContentSources(sources = [], query = '') {
+  if (isGoldenVisaQuery(query)) {
+    return GOLDEN_VISA_RELATED_SOURCES.map(titledSource).slice(0, MAX_RELATED_CONTENT_ACTIONS);
+  }
+
+  const cleaned = (sources || [])
+    .filter((s) => s && s.url && !isHomepageUrl(s.url))
+    .map(titledSource);
+
+  const blogs = cleaned.filter((s) => contentSourceKind(s) === 'blog');
+  const listings = cleaned.filter((s) => contentSourceKind(s) === 'listing');
+  const others = cleaned.filter((s) => contentSourceKind(s) === 'other');
+
+  const ordered = [];
+  const seen = new Set();
+  const pick = (item) => {
+    if (!item || ordered.length >= MAX_RELATED_CONTENT_ACTIONS) return;
+    const key = normalizeContentUrl(item.url);
+    if (seen.has(key)) return;
+    seen.add(key);
+    ordered.push(item);
+  };
+
+  pick(blogs[0]);
+  pick(listings[0]);
+  for (const item of [...blogs.slice(1), ...listings.slice(1), ...others]) pick(item);
+  return ordered;
 }
 
 function buildListingUrl(property) {
@@ -1347,18 +1435,14 @@ async function searchContent({ query }) {
     },
   ]);
 
-  const seen = new Set();
-  const sources = [];
-  for (const row of rows) {
-    const key = row.url || row.title;
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    sources.push({ title: row.title, url: row.url });
-  }
+  const ranked = rankRelatedContentSources(
+    rows.map((row) => ({ title: row.title, url: row.url, sourceType: row.sourceType })),
+    q
+  );
 
   return {
     propertyCards: [],
-    sources,
+    sources: ranked,
     leadCaptured: false,
     profilePatch: {},
     modelPayload: {
@@ -1370,7 +1454,7 @@ async function searchContent({ query }) {
         content: row.content,
       })),
       instruction:
-        'Answer in 2–3 short sentences only. Lead with the single most important fact from the chunks (e.g. Golden Visa: 10-year visa, commonly AED 2 million property investment). No bullet lists, no long recap of every chunk. End with one question such as "Would you like more details?" or "Would you like to check the eligibility requirements?"',
+        'Answer in 2–3 short sentences only. Lead with the single most important fact from the chunks (e.g. Golden Visa: 10-year visa, commonly AED 2 million property investment). No bullet lists, no long recap of every chunk. Do not include URLs in the reply — related pages are attached separately as buttons. End with one question such as "Would you like more details?" or "Would you like to check the eligibility requirements?"',
     },
   };
 }
@@ -1491,4 +1575,6 @@ module.exports = {
   foundListingsReply,
   purposeClarificationReply,
   bedroomsClarificationReply,
+  rankRelatedContentSources,
+  isHomepageUrl,
 };
