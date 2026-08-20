@@ -1,7 +1,7 @@
 const OpenAI = require('openai');
 const { Conversation } = require('./chat.models');
 const { getSystemPrompt } = require('./chat.prompt');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, parseSellIntent, isSellCta, parseSellListingDetails, sellClarificationReply, advanceSellListing, emptySellListing, copySellListing, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, parseSellIntent, isSellCta, parseSellListingDetails, sellClarificationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -694,7 +694,29 @@ function bedroomClarifyIfNeeded(message, profile) {
   return bedroomClarifyPayload(mergeProfile(profile, { purpose, lastSearchFilters: last }), purpose);
 }
 
-async function clarificationResponse(res, { reply, profile, conversation, message, options }) {
+async function maybeCaptureSellLead(sessionId, profile, message) {
+  const listing = profile.sellListing || {};
+  if (!shouldCaptureSellLead(message, listing)) {
+    return { profile, leadCaptured: false };
+  }
+  const result = await executeTool(
+    'capture_lead',
+    {
+      name: listing.name,
+      phone: listing.phone,
+      email: listing.email,
+      intent: buildSellLeadIntent(message, listing),
+    },
+    { sessionId, leadAlreadyCaptured: !!profile.leadCaptured }
+  );
+  let nextProfile = profile;
+  if (result.profilePatch) {
+    nextProfile = mergeProfile(profile, result.profilePatch);
+  }
+  return { profile: nextProfile, leadCaptured: !!result.leadCaptured };
+}
+
+async function clarificationResponse(res, { reply, profile, conversation, message, options, leadCaptured = false }) {
   conversation.messages.push({ role: 'user', content: message, createdAt: new Date() });
   conversation.messages.push({ role: 'assistant', content: reply, createdAt: new Date() });
   conversation.messages = conversation.messages.slice(-MAX_STORED_MESSAGES);
@@ -703,6 +725,7 @@ async function clarificationResponse(res, { reply, profile, conversation, messag
 
   const body = {
     reply,
+    leadCaptured,
     ...emptyClarificationPayload(),
   };
   if (options) {
@@ -1045,12 +1068,14 @@ const chat = async (req, res) => {
     const slotResult = resolvePendingSlots(message, profile, conversation.messages || []);
 
     if (slotResult?.type === 'clarify') {
+      const captured = await maybeCaptureSellLead(sessionId, slotResult.profile, message);
       return clarificationResponse(res, {
         reply: slotResult.reply,
-        profile: slotResult.profile,
+        profile: captured.profile,
         conversation,
         message,
         options: slotResult.options,
+        leadCaptured: captured.leadCaptured,
       });
     }
 

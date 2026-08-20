@@ -11,6 +11,9 @@ const {
   emptySellListing,
   isAlreadySharedDetails,
   isSellCta,
+  hasSellContact,
+  shouldCaptureSellLead,
+  buildSellLeadIntent,
 } = require('./chat.tools');
 
 test('sell intent is not treated as Buy search', () => {
@@ -174,6 +177,43 @@ test('Test D: missing phone asks only for phone', () => {
   assert.match(reply, /phone/i);
   assert.doesNotMatch(reply, /What type is it/i);
   assert.doesNotMatch(reply, /name, phone, and email/i);
+});
+
+test('shouldCaptureSellLead fires on CTA or already-shared when contact is complete', () => {
+  const listing = {
+    intent: 'sell',
+    type: 'Villa',
+    location: 'Al Barsha',
+    name: 'test ruf',
+    email: 'testruf@gmail.com',
+    phone: '1234567890',
+  };
+  assert.equal(hasSellContact(listing), true);
+  assert.equal(shouldCaptureSellLead('Talk to an agent', listing), true);
+  assert.equal(shouldCaptureSellLead('Get a valuation', listing), true);
+  assert.equal(shouldCaptureSellLead('i already shared', listing), true);
+  assert.equal(shouldCaptureSellLead('al barsha, villa', listing), false);
+  assert.equal(
+    buildSellLeadIntent('Talk to an agent', listing),
+    'Sell listing - Villa in Al Barsha'
+  );
+  assert.equal(
+    buildSellLeadIntent('Get a valuation', listing),
+    'Sell valuation - Villa in Al Barsha'
+  );
+});
+
+test('partial contact does not trigger sell lead capture', () => {
+  const listing = {
+    intent: 'sell',
+    type: 'Villa',
+    location: 'Al Barsha',
+    name: 'test ruf',
+    email: 'testruf@gmail.com',
+    phone: null,
+  };
+  assert.equal(hasSellContact(listing), false);
+  assert.equal(shouldCaptureSellLead('Talk to an agent', listing), false);
 });
 
 test('Test E: I already gave you my details does not repeat the contact ask when complete', () => {

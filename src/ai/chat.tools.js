@@ -424,6 +424,23 @@ function hasSellContact(listing = {}) {
   return missingSellContactFields(listing).length === 0;
 }
 
+function buildSellLeadIntent(message = '', listing = {}) {
+  const type = listing.type || 'Property';
+  const loc = listing.location || 'Dubai';
+  if (/valuation/i.test(String(message || ''))) {
+    return `Sell valuation - ${type} in ${loc}`;
+  }
+  return `Sell listing - ${type} in ${loc}`;
+}
+
+/** Capture a sell lead once contact is complete and the user confirms via CTA or "already shared". */
+function shouldCaptureSellLead(message, listing = {}) {
+  if (!hasSellContact(listing)) return false;
+  if (isSellCta(message)) return true;
+  if (isAlreadySharedDetails(message)) return true;
+  return false;
+}
+
 function isSellCta(text) {
   const raw = String(text || '')
     .trim()
@@ -1820,6 +1837,9 @@ module.exports = {
   copySellListing,
   parseContactDetails,
   missingSellContactFields,
+  hasSellContact,
+  buildSellLeadIntent,
+  shouldCaptureSellLead,
   persistSellListing,
   normalizePurpose,
   parsePurposeFromMessage,
