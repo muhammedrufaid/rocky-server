@@ -318,25 +318,28 @@ function copySellListing(listing = {}) {
 
 function parseContactDetails(text, current = {}) {
   const raw = String(text || '');
-  const labeledName = raw.match(/\bname\s*[:\-]\s*([A-Za-z][A-Za-z\s.'-]{1,60}?)(?=\s*(?:email|phone|tel|,|$))/i);
+  const labeledName = raw.match(/\bname\s*[:\-]\s*([A-Za-z][A-Za-z\s.'-]{1,60}?)(?=\s*(?:email|phone|tel|whatsapp|,|$))/i);
   const labeledEmail = raw.match(/\b(?:e-?mail)\s*[:\-]\s*([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/i);
-  const labeledPhone = raw.match(/\b(?:phone|tel|mobile|whatsapp)\s*[:\-]\s*((?:\+|00)?\d[\d\s\-()]{6,}\d)/i);
+  const labeledWhatsapp = raw.match(/\bwhatsapp\s*[:\-]\s*((?:\+|00)?\d[\d\s\-()]{6,}\d)/i);
+  const labeledPhone = raw.match(/\b(?:phone|tel|mobile)\s*[:\-]\s*((?:\+|00)?\d[\d\s\-()]{6,}\d)/i);
   const emailMatch =
     labeledEmail || raw.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/);
+  const whatsappMatch = labeledWhatsapp;
   const phoneMatch =
-    labeledPhone || raw.match(/(?:\+|00)?\d[\d\s\-()]{7,14}\d/);
+    labeledPhone || (!labeledWhatsapp ? raw.match(/(?:\+|00)?\d[\d\s\-()]{7,14}\d/) : null);
   let name = current.name || null;
   if (labeledName) {
     name = labeledName[1].trim();
   } else {
     const nameMatch = raw.match(/\b(?:my name is|i am|i'm)\s+([A-Za-z][A-Za-z\s.'-]{1,50})/i);
     if (nameMatch) {
-      name = nameMatch[1].replace(/\s+(and|my|email|phone).*$/i, '').trim();
-    } else if (emailMatch || phoneMatch) {
+      name = nameMatch[1].replace(/\s+(and|my|email|phone|whatsapp).*$/i, '').trim();
+    } else if (emailMatch || phoneMatch || whatsappMatch) {
       const leftover = raw
         .replace(emailMatch ? emailMatch[0] : '', ' ')
         .replace(phoneMatch ? phoneMatch[0] : '', ' ')
-        .replace(/\b(?:name|email|e-?mail|phone|tel|mobile)\s*[:\-]?\s*/gi, ' ')
+        .replace(whatsappMatch ? whatsappMatch[0] : '', ' ')
+        .replace(/\b(?:name|email|e-?mail|phone|tel|mobile|whatsapp)\s*[:\-]?\s*/gi, ' ')
         .replace(/[,]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
@@ -353,12 +356,15 @@ function parseContactDetails(text, current = {}) {
   return {
     name,
     phone: phoneMatch ? String(phoneMatch[1] || phoneMatch[0]).replace(/\s+/g, ' ').trim() : current.phone || null,
+    whatsapp: whatsappMatch
+      ? String(whatsappMatch[1] || whatsappMatch[0]).replace(/\s+/g, ' ').trim()
+      : current.whatsapp || null,
     email: emailMatch ? String(emailMatch[1] || emailMatch[0]) : current.email || null,
   };
 }
 
 function contactFromHistory(messages = []) {
-  let contact = { name: null, phone: null, email: null };
+  let contact = { name: null, phone: null, email: null, whatsapp: null };
   for (const item of messages || []) {
     if (item.role !== 'user') continue;
     contact = parseContactDetails(item.content, contact);
@@ -499,6 +505,16 @@ function parseSellListingDetails(text, current = {}) {
   return next;
 }
 
+/** Show valuation/agent chips only while the visitor still needs to choose an action. */
+function sellFlowOptions(details = {}, message = '') {
+  const hasProperty = !!(details.type && details.location);
+  if (!hasProperty) return null;
+  if (!hasSellContact(details)) return null;
+  // Contact complete + CTA / "already shared" → flow finished, stop repeating chips.
+  if (isSellCta(message) || isAlreadySharedDetails(message)) return null;
+  return SELL_OPTIONS;
+}
+
 function sellClarificationReply(details = {}, message = '') {
   const typeLabel = details.type ? String(details.type).toLowerCase() : 'property';
   const loc = details.location || '';
@@ -511,7 +527,10 @@ function sellClarificationReply(details = {}, message = '') {
     if (cta && !/valuation/i.test(message)) {
       return `Thanks — I have your details for the ${loc} ${typeLabel}. I'll connect you with a listing agent.`;
     }
-    return `Thanks — I have your details for the ${loc} ${typeLabel}. I can connect you with a listing agent for a valuation.`;
+    if (cta || already) {
+      return `Thanks — I have your details for the ${loc} ${typeLabel}. I can connect you with a listing agent for a valuation.`;
+    }
+    return `Thanks — I have your details for the ${loc} ${typeLabel}. Would you like a quick valuation or to speak with a listing agent?`;
   }
 
   if (hasProperty && (cta || already)) {
@@ -1068,10 +1087,25 @@ function isAmbiguousListingQuery(text) {
   return /\b(show|find|search|looking|apartments?|villas?|townhouses?|properties|homes?|listings?)\b/.test(raw);
 }
 
+function isMultiPropertyServiceQuery(text) {
+  return /\b(\d+\s+properties|\d+\s+villas?|\d+\s+apartments?|multiple\s+properties|several\s+properties|portfolio|my\s+properties|all\s+my\s+properties)\b/i.test(
+    String(text || '')
+  );
+}
+
+function matchesServiceInquiryPhrase(text) {
+  const raw = String(text || '').trim();
+  if (/^property\s+management$/i.test(raw)) return true;
+  return /\b(property\s+management|management\s+services?|your\s+services?|(?:what|whta|wha?t)\s+(?:type\s+of\s+)?services?|services?\s+(?:you|do\s+you|are\s+you)\s+(?:provid\w*|offer)|rent\s+collection|tenant\s+screening|landlord\s+services?|maintain(?:ing)?\s+my\s+propert|manage\s+(?:my\s+|these\s+|your\s+|this\s+)?propert|can\s+you\s+manage)\b/i.test(
+    raw
+  );
+}
+
 function isListingFollowUp(text) {
   const raw = String(text || '').trim();
   if (!raw) return false;
   if (parseSellIntent(raw) || isSellCta(raw)) return false;
+  if (isMultiPropertyServiceQuery(raw) || matchesServiceInquiryPhrase(raw)) return false;
   if (parsePurposeFromMessage(raw)) return true;
   if (parsePropertyTypeChange(raw)) return true;
   if (wantsDifferentLocation(raw)) return true;
@@ -1093,6 +1127,192 @@ function isGeneralKnowledgeQuery(text) {
   return /\b(golden\s+visa|visa|eligib|buying\s+costs?|cost\s+of\s+buying|cost\s+to\s+buy|transfer\s+fee|dld|mortgage|property\s+management|service\s+charge|rera|freehold|tell\s+me\s+about|what\s+is|what\s+are|how\s+do(?:es)?|explain)\b/.test(
     raw
   );
+}
+
+/** Service / PM questions after a sell flow — may need same vs different location. */
+function isSellServiceTransitionQuery(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  if (parseSellIntent(raw) || isSellCta(raw)) return false;
+  if (parsePurposeFromMessage(raw)) return false;
+  return matchesServiceInquiryPhrase(raw) || isMultiPropertyServiceQuery(raw);
+}
+
+const SELL_SERVICE_LOCATION_OPTIONS = ['Same property', 'Different location'];
+
+function parseSellServiceLocationChoice(text) {
+  const raw = String(text || '').trim().toLowerCase();
+  if (/^same\s+(property|location|area)\b|^same\s*—|^same\b/.test(raw)) return 'same';
+  if (/^different\s+(property|location|area)\b|^different\s*—|^different\b|^other\s+(area|location)\b/.test(raw)) {
+    return 'different';
+  }
+  return null;
+}
+
+function sellServiceLocationReply(listing = {}, inquiry = {}) {
+  const typeLabel = listing.type ? String(listing.type).toLowerCase() : 'property';
+  const loc = listing.location || inquiry.referenceLocation || 'that area';
+  if (inquiry.propertyNote) {
+    return `You mentioned ${inquiry.propertyNote}. Should we focus on ${loc}, or do you need management across different areas?`;
+  }
+  return `Are you asking about this for your ${loc} ${typeLabel}, or for properties in a different area?`;
+}
+
+function emptyServiceInquiry() {
+  return {
+    intent: null,
+    locationScope: null,
+    referenceLocation: null,
+    propertyNote: null,
+    name: null,
+    email: null,
+    phone: null,
+    whatsapp: null,
+  };
+}
+
+function copyServiceInquiry(inquiry = {}) {
+  return {
+    intent: inquiry.intent || null,
+    locationScope: inquiry.locationScope || null,
+    referenceLocation: inquiry.referenceLocation || null,
+    propertyNote: inquiry.propertyNote || null,
+    name: inquiry.name || null,
+    email: inquiry.email || null,
+    phone: inquiry.phone || null,
+    whatsapp: inquiry.whatsapp || null,
+  };
+}
+
+function parsePropertyPortfolioNote(text) {
+  const raw = String(text || '');
+  const countMatch = raw.match(/\b(\d+)\s+(properties|villas|apartments|units)\b/i);
+  if (countMatch) return `${countMatch[1]} ${countMatch[2].toLowerCase()}`;
+  if (isMultiPropertyServiceQuery(raw)) return 'multiple properties';
+  return null;
+}
+
+function seedServiceInquiry(current = {}, sellListing = {}, history = [], message = '') {
+  const prior = copyServiceInquiry(current);
+  const fromHistory = contactFromHistory(history);
+  const fromSell = sellListing || {};
+  return {
+    intent: 'property_management',
+    locationScope: prior.locationScope || null,
+    referenceLocation: prior.referenceLocation || fromSell.location || null,
+    propertyNote: prior.propertyNote || parsePropertyPortfolioNote(message) || null,
+    name: prior.name || fromSell.name || fromHistory.name || null,
+    email: prior.email || fromSell.email || fromHistory.email || null,
+    phone: prior.phone || fromSell.phone || fromHistory.phone || null,
+    whatsapp: prior.whatsapp || fromHistory.whatsapp || null,
+  };
+}
+
+function parseServiceContactDetails(text, current = {}) {
+  const raw = String(text || '').trim();
+  if (/\b(same\s+(number|phone|whatsapp|no)|use\s+(the\s+)?same)\b/i.test(raw)) {
+    const phone = current.phone || current.whatsapp || null;
+    return {
+      ...current,
+      phone,
+      whatsapp: current.whatsapp || phone,
+    };
+  }
+  const parsed = parseContactDetails(text, current);
+  return {
+    ...current,
+    name: parsed.name || current.name || null,
+    email: parsed.email || current.email || null,
+    phone: parsed.phone || current.phone || null,
+    whatsapp: parsed.whatsapp || current.whatsapp || null,
+  };
+}
+
+function missingServiceContactFields(inquiry = {}) {
+  const missing = [];
+  if (!inquiry.name) missing.push('name');
+  if (!inquiry.phone && !inquiry.whatsapp) {
+    missing.push('phone and whatsapp');
+  } else {
+    if (!inquiry.whatsapp) missing.push('whatsapp');
+    if (!inquiry.phone) missing.push('phone');
+  }
+  return missing;
+}
+
+function hasServiceContact(inquiry = {}) {
+  return !!(inquiry.name && (inquiry.phone || inquiry.whatsapp));
+}
+
+function serviceContactPromptBlock() {
+  return `Please share your details in one message:
+
+name: Your name
+email: (optional)
+whatsapp: Your WhatsApp number
+phone: Your phone number`;
+}
+
+function propertyManagementIntroReply(inquiry = {}) {
+  let intro =
+    'Rocky Real Estate offers full property management — rent collection, maintenance coordination, tenant screening, inspections, and financial reporting.';
+  if (inquiry.propertyNote) {
+    intro += ` We can help with ${inquiry.propertyNote}.`;
+  } else if (inquiry.locationScope === 'same' && inquiry.referenceLocation) {
+    intro += ` We can help manage your property in ${inquiry.referenceLocation}.`;
+  } else if (inquiry.locationScope === 'different') {
+    intro += ' We manage properties across Dubai and can tailor a package to your portfolio.';
+  }
+  return intro;
+}
+
+function serviceContactReply(inquiry = {}) {
+  const missing = missingServiceContactFields(inquiry);
+  if (missing.length === 0) {
+    const loc = inquiry.referenceLocation ? ` in ${inquiry.referenceLocation}` : '';
+    return `Thanks — I have your details${loc}. Our property management team will reach out shortly.`;
+  }
+  const intro = propertyManagementIntroReply(inquiry);
+  if (missing.includes('name') && missing.includes('phone and whatsapp')) {
+    return `${intro}\n\n${serviceContactPromptBlock()}`;
+  }
+  if (missing.includes('name')) {
+    return `${intro}\n\nWhat name should our team use when they contact you?`;
+  }
+  if (missing.includes('phone and whatsapp')) {
+    return `${intro}\n\nCan you provide your WhatsApp number and phone number?`;
+  }
+  if (missing.length === 1 && missing[0] === 'whatsapp') {
+    return 'Can you provide your WhatsApp number?';
+  }
+  if (missing.includes('whatsapp')) {
+    return `${intro}\n\nCan you provide your WhatsApp number?`;
+  }
+  if (missing.includes('phone')) {
+    return `${intro}\n\nCan you provide your phone number?`;
+  }
+  return `${intro}\n\n${serviceContactPromptBlock()}`;
+}
+
+function buildServiceLeadIntent(inquiry = {}) {
+  const parts = ['Property management'];
+  if (inquiry.propertyNote) parts.push(inquiry.propertyNote);
+  if (inquiry.locationScope === 'same' && inquiry.referenceLocation) {
+    parts.push(`same area — ${inquiry.referenceLocation}`);
+  } else if (inquiry.locationScope === 'different') {
+    parts.push('different areas');
+  } else if (inquiry.referenceLocation) {
+    parts.push(inquiry.referenceLocation);
+  }
+  return parts.join(' - ');
+}
+
+function shouldCaptureServiceLead(inquiry = {}) {
+  return inquiry.intent === 'property_management' && hasServiceContact(inquiry);
+}
+
+function isServiceInquiryMessage(text) {
+  return matchesServiceInquiryPhrase(text) || isMultiPropertyServiceQuery(text);
 }
 
 /** True when this turn is not a listing follow-up and must not reuse last search filters. */
@@ -1750,9 +1970,14 @@ function looksCollected(value) {
   return true;
 }
 
-async function captureLead({ name, phone, email, intent }, sessionId, { leadAlreadyCaptured } = {}) {
+async function captureLead({ name, phone, email, intent, whatsapp, emailOptional }, sessionId, { leadAlreadyCaptured } = {}) {
+  const contactPhone = looksCollected(phone) ? phone : whatsapp;
+  const hasEmail = looksCollected(email);
   const hasFullDetails =
-    looksCollected(name) && looksCollected(phone) && looksCollected(email) && looksCollected(intent);
+    looksCollected(name) &&
+    looksCollected(contactPhone) &&
+    looksCollected(intent) &&
+    (emailOptional || hasEmail);
 
   if (leadAlreadyCaptured) {
     return {
@@ -1779,8 +2004,8 @@ async function captureLead({ name, phone, email, intent }, sessionId, { leadAlre
 
   const lead = await Lead.create({
     name: String(name).trim(),
-    phone: String(phone).trim(),
-    email: String(email).trim().toLowerCase(),
+    phone: String(contactPhone).trim(),
+    email: hasEmail ? String(email).trim().toLowerCase() : '',
     intent: String(intent).trim(),
     sessionId,
   });
@@ -1808,7 +2033,10 @@ async function executeTool(
   }
   if (name === 'search_content') return searchContent(args || {});
   if (name === 'capture_lead') {
-    return captureLead(args || {}, sessionId, { leadAlreadyCaptured });
+    const argsCopy = { ...(args || {}) };
+    const emailOptional = !!argsCopy.emailOptional;
+    delete argsCopy.emailOptional;
+    return captureLead({ ...argsCopy, emailOptional }, sessionId, { leadAlreadyCaptured });
   }
   return {
     propertyCards: [],
@@ -1827,11 +2055,29 @@ module.exports = {
   PURPOSE_SELECT,
   BEDROOM_OPTIONS,
   SELL_OPTIONS,
+  SELL_SERVICE_LOCATION_OPTIONS,
+  emptyServiceInquiry,
+  copyServiceInquiry,
+  seedServiceInquiry,
+  parseServiceContactDetails,
+  serviceContactReply,
+  propertyManagementIntroReply,
+  serviceContactPromptBlock,
+  buildServiceLeadIntent,
+  shouldCaptureServiceLead,
+  hasServiceContact,
+  isServiceInquiryMessage,
+  matchesServiceInquiryPhrase,
   parseSellIntent,
   isSellCta,
   isAlreadySharedDetails,
   parseSellListingDetails,
   sellClarificationReply,
+  sellFlowOptions,
+  isSellServiceTransitionQuery,
+  isMultiPropertyServiceQuery,
+  parseSellServiceLocationChoice,
+  sellServiceLocationReply,
   advanceSellListing,
   emptySellListing,
   copySellListing,

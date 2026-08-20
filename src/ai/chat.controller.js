@@ -1,7 +1,7 @@
 const OpenAI = require('openai');
 const { Conversation } = require('./chat.models');
 const { getSystemPrompt } = require('./chat.prompt');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, parseSellIntent, isSellCta, parseSellListingDetails, sellClarificationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -78,6 +78,7 @@ function mergeProfile(current, patch) {
       alternatives: current.slotFlow?.alternatives || null,
     },
     sellListing: copySellListing(current.sellListing || {}),
+    serviceInquiry: copyServiceInquiry(current.serviceInquiry || {}),
     leadCaptured: current.leadCaptured || false,
   };
 
@@ -112,6 +113,12 @@ function mergeProfile(current, patch) {
     next.sellListing = copySellListing({
       ...(next.sellListing || {}),
       ...patch.sellListing,
+    });
+  }
+  if (patch.serviceInquiry) {
+    next.serviceInquiry = copyServiceInquiry({
+      ...(next.serviceInquiry || {}),
+      ...patch.serviceInquiry,
     });
   }
   if (patch.leadCaptured) next.leadCaptured = true;
@@ -153,6 +160,7 @@ async function loadConversation(sessionId) {
         lastSearchFilters: emptySearchFilters(),
         slotFlow: { awaiting: null },
         sellListing: emptySellListing(),
+        serviceInquiry: emptyServiceInquiry(),
         leadCaptured: false,
       },
     });
@@ -198,13 +206,137 @@ function leaveSearchSlotForGeneralQuestion(profile) {
   };
 }
 
+function leaveSearchSlotForGeneralQuestion(profile) {
+  return {
+    type: 'delegate',
+    profile: mergeProfile(profile, {
+      slotFlow: { awaiting: null, alternatives: null },
+    }),
+  };
+}
+
+/** Leave sell context for a service/content answer without reusing the sell property in search filters. */
+function leaveSellForServiceQuestion(profile, scope = 'different') {
+  const patch = {
+    slotFlow: { awaiting: null, alternatives: null },
+  };
+  if (scope !== 'same') {
+    patch.lastSearchFilters = emptySearchFilters();
+  }
+  return {
+    type: 'delegate',
+    profile: mergeProfile(profile, patch),
+  };
+}
+
+/** Property management / service inquiry — runs before sell so PM never shows sell chips. */
+function applyServiceInquiryFlow(message, profile, history = []) {
+  const awaiting = profile.slotFlow?.awaiting;
+  const sellListing = profile.sellListing || {};
+
+  if (awaiting === 'serviceLocation') {
+    const choice = parseSellServiceLocationChoice(message);
+    const inquiry = copyServiceInquiry(profile.serviceInquiry || {});
+    if (!choice) {
+      return {
+        type: 'clarify',
+        profile,
+        reply: sellServiceLocationReply(sellListing, inquiry),
+        options: SELL_SERVICE_LOCATION_OPTIONS,
+      };
+    }
+    const nextInquiry = {
+      ...inquiry,
+      locationScope: choice,
+      referenceLocation: choice === 'same' ? inquiry.referenceLocation || sellListing.location : null,
+    };
+    return {
+      type: 'clarify',
+      profile: mergeProfile(profile, {
+        lastSearchFilters: emptySearchFilters(),
+        serviceInquiry: nextInquiry,
+        slotFlow: { awaiting: 'serviceContact', alternatives: null },
+      }),
+      reply: serviceContactReply(nextInquiry),
+    };
+  }
+
+  if (awaiting === 'serviceContact') {
+    const prior = copyServiceInquiry(profile.serviceInquiry || {});
+    const inquiry = parseServiceContactDetails(message, prior);
+    const reply = serviceContactReply(inquiry);
+    const complete = hasServiceContact(inquiry);
+    return {
+      type: 'clarify',
+      profile: mergeProfile(profile, {
+        serviceInquiry: inquiry,
+        slotFlow: { awaiting: complete ? null : 'serviceContact', alternatives: null },
+      }),
+      reply,
+    };
+  }
+
+  if (!isServiceInquiryMessage(message)) return null;
+
+  const inquiry = seedServiceInquiry(profile.serviceInquiry || {}, sellListing, history, message);
+  const hasReferenceLocation = !!(inquiry.referenceLocation || sellListing.location);
+
+  if (hasReferenceLocation && !inquiry.locationScope) {
+    return {
+      type: 'clarify',
+      profile: mergeProfile(profile, {
+        lastSearchFilters: emptySearchFilters(),
+        serviceInquiry: {
+          ...inquiry,
+          referenceLocation: inquiry.referenceLocation || sellListing.location,
+        },
+        slotFlow: { awaiting: 'serviceLocation', alternatives: null },
+      }),
+      reply: sellServiceLocationReply(sellListing, inquiry),
+      options: SELL_SERVICE_LOCATION_OPTIONS,
+    };
+  }
+
+  return {
+    type: 'clarify',
+    profile: mergeProfile(profile, {
+      lastSearchFilters: emptySearchFilters(),
+      serviceInquiry: inquiry,
+      slotFlow: { awaiting: 'serviceContact', alternatives: null },
+    }),
+    reply: serviceContactReply(inquiry),
+  };
+}
+
 function applySellFlow(message, profile, history = []) {
+  if (
+    isServiceInquiryMessage(message) ||
+    profile.slotFlow?.awaiting === 'serviceLocation' ||
+    profile.slotFlow?.awaiting === 'serviceContact'
+  ) {
+    return null;
+  }
   const awaitingSell = profile.slotFlow?.awaiting === 'sell';
   const inSell = awaitingSell || profile.sellListing?.intent === 'sell';
   const sellNow = parseSellIntent(message);
   const cta = isSellCta(message);
   if (!sellNow && !cta && !inSell) return null;
   if (cta && !inSell) return null;
+
+  const sellListing = profile.sellListing || {};
+  const hasSellProperty = !!(sellListing.type && sellListing.location);
+
+  if (profile.slotFlow?.awaiting === 'sellServiceLocation') {
+    const choice = parseSellServiceLocationChoice(message);
+    if (choice === 'same') return leaveSellForServiceQuestion(profile, 'same');
+    if (choice === 'different') return leaveSellForServiceQuestion(profile, 'different');
+    return {
+      type: 'clarify',
+      profile,
+      reply: sellServiceLocationReply(sellListing, profile.serviceInquiry || {}),
+      options: SELL_SERVICE_LOCATION_OPTIONS,
+    };
+  }
 
   const buyerSearch =
     inSell &&
@@ -226,7 +358,7 @@ function applySellFlow(message, profile, history = []) {
   }
 
   if (inSell && !sellNow && !cta && shouldSkipPropertySearch(message) && isGeneralKnowledgeQuery(message)) {
-    return leaveSearchSlotForGeneralQuestion(profile);
+    return leaveSellForServiceQuestion(profile, 'different');
   }
 
   const listing = advanceSellListing(
@@ -243,16 +375,19 @@ function applySellFlow(message, profile, history = []) {
     bedrooms: listing.bedrooms ?? previousFilters.bedrooms,
     purpose: null,
   });
+  const options = sellFlowOptions(listing, message);
+  const sellActionDone = hasSellContact(listing) && (cta || isAlreadySharedDetails(message));
 
   return {
     type: 'clarify',
     profile: mergeProfile(profile, {
       lastSearchFilters: filters,
       sellListing: listing,
-      slotFlow: { awaiting: 'sell', alternatives: null },
+      // Keep sellListing.intent locked; clear awaiting only after a completed CTA.
+      slotFlow: { awaiting: sellActionDone ? null : 'sell', alternatives: null },
     }),
     reply: sellClarificationReply(listing, message),
-    options: SELL_OPTIONS,
+    options: options || undefined,
   };
 }
 
@@ -341,6 +476,9 @@ function applyPropertyTypeChange(message, profile) {
 
 function resolvePendingSlots(message, profile, history = []) {
   const awaiting = profile.slotFlow?.awaiting;
+
+  const serviceFlow = applyServiceInquiryFlow(message, profile, history);
+  if (serviceFlow) return serviceFlow;
 
   const sellFlow = applySellFlow(message, profile, history);
   if (sellFlow) return sellFlow;
@@ -692,6 +830,30 @@ function bedroomClarifyIfNeeded(message, profile) {
   if (!listingLike) return null;
   last.purpose = purpose;
   return bedroomClarifyPayload(mergeProfile(profile, { purpose, lastSearchFilters: last }), purpose);
+}
+
+async function maybeCaptureServiceLead(sessionId, profile) {
+  const inquiry = profile.serviceInquiry || {};
+  if (!shouldCaptureServiceLead(inquiry)) {
+    return { profile, leadCaptured: false };
+  }
+  const result = await executeTool(
+    'capture_lead',
+    {
+      name: inquiry.name,
+      phone: inquiry.phone,
+      whatsapp: inquiry.whatsapp,
+      email: inquiry.email || '',
+      intent: buildServiceLeadIntent(inquiry),
+      emailOptional: true,
+    },
+    { sessionId, leadAlreadyCaptured: !!profile.leadCaptured }
+  );
+  let nextProfile = profile;
+  if (result.profilePatch) {
+    nextProfile = mergeProfile(profile, result.profilePatch);
+  }
+  return { profile: nextProfile, leadCaptured: !!result.leadCaptured };
 }
 
 async function maybeCaptureSellLead(sessionId, profile, message) {
@@ -1068,14 +1230,24 @@ const chat = async (req, res) => {
     const slotResult = resolvePendingSlots(message, profile, conversation.messages || []);
 
     if (slotResult?.type === 'clarify') {
-      const captured = await maybeCaptureSellLead(sessionId, slotResult.profile, message);
+      let profileForResponse = slotResult.profile;
+      let leadCaptured = false;
+      if (shouldCaptureServiceLead(profileForResponse.serviceInquiry || {})) {
+        const captured = await maybeCaptureServiceLead(sessionId, profileForResponse);
+        profileForResponse = captured.profile;
+        leadCaptured = captured.leadCaptured;
+      } else {
+        const captured = await maybeCaptureSellLead(sessionId, profileForResponse, message);
+        profileForResponse = captured.profile;
+        leadCaptured = captured.leadCaptured;
+      }
       return clarificationResponse(res, {
         reply: slotResult.reply,
-        profile: captured.profile,
+        profile: profileForResponse,
         conversation,
         message,
         options: slotResult.options,
-        leadCaptured: captured.leadCaptured,
+        leadCaptured,
       });
     }
 
