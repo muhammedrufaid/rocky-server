@@ -1,7 +1,7 @@
 const OpenAI = require('openai');
 const { Conversation } = require('./chat.models');
 const { getSystemPrompt } = require('./chat.prompt');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, parseSellIntent, isSellCta, parseSellListingDetails, sellClarificationReply, advanceSellListing, emptySellListing, copySellListing, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -77,6 +77,7 @@ function mergeProfile(current, patch) {
       awaiting: current.slotFlow?.awaiting || null,
       alternatives: current.slotFlow?.alternatives || null,
     },
+    sellListing: copySellListing(current.sellListing || {}),
     leadCaptured: current.leadCaptured || false,
   };
 
@@ -106,6 +107,12 @@ function mergeProfile(current, patch) {
       awaiting: patch.slotFlow.awaiting || null,
       alternatives: patch.slotFlow.alternatives ?? null,
     };
+  }
+  if (patch.sellListing) {
+    next.sellListing = copySellListing({
+      ...(next.sellListing || {}),
+      ...patch.sellListing,
+    });
   }
   if (patch.leadCaptured) next.leadCaptured = true;
 
@@ -145,6 +152,7 @@ async function loadConversation(sessionId) {
         lastPropertyCards: [],
         lastSearchFilters: emptySearchFilters(),
         slotFlow: { awaiting: null },
+        sellListing: emptySellListing(),
         leadCaptured: false,
       },
     });
@@ -187,6 +195,64 @@ function leaveSearchSlotForGeneralQuestion(profile) {
     profile: mergeProfile(profile, {
       slotFlow: { awaiting: null, alternatives: null },
     }),
+  };
+}
+
+function applySellFlow(message, profile, history = []) {
+  const awaitingSell = profile.slotFlow?.awaiting === 'sell';
+  const inSell = awaitingSell || profile.sellListing?.intent === 'sell';
+  const sellNow = parseSellIntent(message);
+  const cta = isSellCta(message);
+  if (!sellNow && !cta && !inSell) return null;
+  if (cta && !inSell) return null;
+
+  const buyerSearch =
+    inSell &&
+    !sellNow &&
+    !cta &&
+    (parsePurposeFromMessage(message) === 'Buy' ||
+      parsePurposeFromMessage(message) === 'Rent' ||
+      parsePurposeFromMessage(message) === 'Off-plan' ||
+      (/^\s*(show|find|search)\b/i.test(message) && isListingFollowUp(message)));
+  if (buyerSearch) {
+    return {
+      type: 'continue',
+      profile: mergeProfile(profile, {
+        lastSearchFilters: emptySearchFilters(),
+        sellListing: emptySellListing(),
+        slotFlow: { awaiting: null, alternatives: null },
+      }),
+    };
+  }
+
+  if (inSell && !sellNow && !cta && shouldSkipPropertySearch(message) && isGeneralKnowledgeQuery(message)) {
+    return leaveSearchSlotForGeneralQuestion(profile);
+  }
+
+  const listing = advanceSellListing(
+    message,
+    profile.sellListing || {},
+    history,
+    profile.lastSearchFilters || {}
+  );
+  const previousFilters = profile.lastSearchFilters || emptySearchFilters();
+  const filters = copySearchFilters({
+    ...previousFilters,
+    type: listing.type || previousFilters.type,
+    location: listing.location || previousFilters.location,
+    bedrooms: listing.bedrooms ?? previousFilters.bedrooms,
+    purpose: null,
+  });
+
+  return {
+    type: 'clarify',
+    profile: mergeProfile(profile, {
+      lastSearchFilters: filters,
+      sellListing: listing,
+      slotFlow: { awaiting: 'sell', alternatives: null },
+    }),
+    reply: sellClarificationReply(listing, message),
+    options: SELL_OPTIONS,
   };
 }
 
@@ -273,8 +339,11 @@ function applyPropertyTypeChange(message, profile) {
   };
 }
 
-function resolvePendingSlots(message, profile) {
+function resolvePendingSlots(message, profile, history = []) {
   const awaiting = profile.slotFlow?.awaiting;
+
+  const sellFlow = applySellFlow(message, profile, history);
+  if (sellFlow) return sellFlow;
 
   // "villa in another location" — reset location and keep type/bedrooms/purpose
   const relocation = applyRelocationIntent(message, profile);
@@ -606,6 +675,9 @@ function applyNewLocationSearch(message, profile) {
 }
 
 function bedroomClarifyIfNeeded(message, profile) {
+  if (parseSellIntent(message) || profile.slotFlow?.awaiting === 'sell' || profile.sellListing?.intent === 'sell') {
+    return null;
+  }
   if (shouldSkipPropertySearch(message) || isGeneralKnowledgeQuery(message)) return null;
   if (parseBedroomChoice(message)) return null;
   const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
@@ -970,7 +1042,7 @@ const chat = async (req, res) => {
     const { sessionId, message } = req.body;
     const conversation = await loadConversation(sessionId);
     let profile = conversation.userProfile || {};
-    const slotResult = resolvePendingSlots(message, profile);
+    const slotResult = resolvePendingSlots(message, profile, conversation.messages || []);
 
     if (slotResult?.type === 'clarify') {
       return clarificationResponse(res, {
