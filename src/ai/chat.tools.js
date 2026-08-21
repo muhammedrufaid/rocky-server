@@ -472,17 +472,37 @@ const SELL_AREA_ALIASES = [
   { match: /\barabian\s+ranches\b/i, canonical: 'Arabian Ranches' },
   { match: /\bbusiness\s+bay\b/i, canonical: 'Business Bay' },
   { match: /\bjvc\b|\bjumeirah\s+village\s+circle\b/i, canonical: 'JVC' },
+  { match: /\bsheikh\s+zayed\s+road\b|\bszr\b/i, canonical: 'Sheikh Zayed Road' },
+  { match: /\bjebel\s+ali\b/i, canonical: 'Jebel Ali' },
+  { match: /\bpalm\s+jumeirah\b/i, canonical: 'Palm Jumeirah' },
+  { match: /\bdowntown(\s+dubai)?\b/i, canonical: 'Downtown Dubai' },
+  { match: /\bjbr\b|\bjumeirah\s+beach\s+residence\b/i, canonical: 'JBR' },
 ];
 
 function parseSellLocation(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
   for (const row of SELL_AREA_ALIASES) {
-    if (row.match.test(text || '')) return row.canonical;
+    if (row.match.test(raw)) return row.canonical;
   }
-  const named = parseLocationFromMessage(text);
+  const named = parseLocationFromMessage(raw);
   if (named && !isUnspecifiedLocationPhrase(named) && !/^(call|amount|discuss|later)$/i.test(named)) {
     return named;
   }
-  return null;
+  // Bare area replies while collecting sell details ("Sheikh Zayed Road", "Mudon").
+  // Do not treat full sell-intent sentences or type replies as locations.
+  if (parseSellIntent(raw)) return null;
+  if (/^(type|property\s+type)\s+is\b/i.test(raw)) return null;
+  if (/\b(sell|selling|buy|rent|need|want|show|find|looking|valuation|agent)\b/i.test(raw)) return null;
+  if (normalizePropertyType(raw) && raw.split(/\s+/).length <= 3 && !/\b(in|near|at|on)\b/i.test(raw)) {
+    return null;
+  }
+  if (raw.split(/\s+/).length > 6) return null;
+  const reply = parseLocationReply(raw);
+  if (!reply) return null;
+  if (normalizePropertyType(reply) && reply.split(/\s+/).length <= 2) return null;
+  if (parsePurposeFromMessage(reply) || isSellCta(reply)) return null;
+  return reply;
 }
 
 function parseSellPriceNote(text) {
@@ -514,12 +534,11 @@ function parseSellListingDetails(text, current = {}) {
   return next;
 }
 
-/** Show valuation/agent chips only while the visitor still needs to choose an action. */
+/** Show valuation/agent chips once type+area are known, until a CTA is chosen. */
 function sellFlowOptions(details = {}, message = '') {
   const hasProperty = !!(details.type && details.location);
   if (!hasProperty) return null;
-  if (!hasSellContact(details)) return null;
-  // Contact complete + CTA / "already shared" → flow finished, stop repeating chips.
+  // CTA / "already shared" → collecting contact or done; don't repeat chips this turn.
   if (isSellCta(message) || isAlreadySharedDetails(message)) return null;
   return SELL_OPTIONS;
 }
@@ -572,6 +591,10 @@ function sellClarificationReply(details = {}, message = '') {
   }
   if (!details.type && details.location) {
     return `I can help you sell your property in ${details.location}. Is it an apartment, villa, or townhouse?`;
+  }
+  // Type + area known, contact not yet — offer CTAs. Never re-loop the same line on "yes".
+  if (isVagueConfirm(message)) {
+    return 'Just to confirm — would you like the valuation, or to speak with an agent?';
   }
   return `I can help you sell your ${typeLabel} in ${loc}. Would you like a quick valuation or to speak with a listing agent?`;
 }

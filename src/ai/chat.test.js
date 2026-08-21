@@ -164,6 +164,15 @@ test('fresh sell does not inherit search or content locations', () => {
   assert.match(sellClarificationReply(listing, 'I need to sell my property'), /What type is it, and which area/i);
 });
 
+test('sell accepts bare area names including Sheikh Zayed Road', () => {
+  let listing = advanceSellListing('type is office', { intent: 'sell' }, []);
+  assert.equal(listing.type, 'Office');
+  assert.equal(listing.location, null);
+  listing = advanceSellListing('sheikh zayed road', listing, []);
+  assert.equal(listing.location, 'Sheikh Zayed Road');
+  assert.match(sellClarificationReply(listing, 'sheikh zayed road'), /office.*Sheikh Zayed Road|Sheikh Zayed Road.*office/i);
+});
+
 test('off-plan financing and articles are content, not Off-plan purpose', () => {
   assert.equal(parsePurposeFromMessage('Off-plan financing options in Dubai'), null);
   assert.equal(isGeneralKnowledgeQuery('Off-plan financing options in Dubai'), true);
@@ -194,6 +203,13 @@ test('vague yes on sell CTA asks short clarification', () => {
     email: 'a@test.com',
   };
   assert.match(sellClarificationReply(listing, 'yes'), /Just to confirm/i);
+});
+
+test('vague yes before sell contact asks clarification not the same loop', () => {
+  const listing = { intent: 'sell', type: 'Apartment', location: 'Dubai Hills' };
+  assert.match(sellClarificationReply(listing, 'yes'), /Just to confirm/i);
+  assert.deepEqual(sellFlowOptions(listing, 'yes'), SELL_OPTIONS);
+  assert.deepEqual(sellFlowOptions(listing, 'dubai hills'), SELL_OPTIONS);
 });
 
 test('related buttons come only from embedding hits', () => {
