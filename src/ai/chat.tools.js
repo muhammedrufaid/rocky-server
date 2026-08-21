@@ -54,7 +54,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'search_content',
       description:
-        'Search Rocky website content (blogs, area guides, FAQs, services). Use for Golden Visa, flexi rent / flexible payment plans, buying costs, property management, process, eligibility, and any question that might be answered on our site. Do not use this for live listing prices or availability. After results, write MAXIMUM 2 short sentences with the single key fact only — never paste or expand the chunks.',
+        'Search Rocky website content (blogs, area guides, FAQs, services, company info). Use for Golden Visa, flexi rent / flexible payment plans, buying costs, property management overview, company facts, process, eligibility, and any question that might be answered on our site. Do not use this for live listing prices or availability. After results, write MAXIMUM 2 short sentences with the single key fact only — never paste or expand the chunks.',
       parameters: {
         type: 'object',
         properties: {
@@ -118,6 +118,7 @@ function contentSourceKind(source = {}) {
   const type = String(source.sourceType || '').toLowerCase();
   if (type === 'blog' || /\/blogs?\//.test(url)) return 'blog';
   if (type === 'area_guide' || /\/area-guides?\//.test(url)) return 'area_guide';
+  if (type === 'company_info') return 'company_info';
   if (type === 'faq' || /\/faqs?\//.test(url)) return 'faq';
   if (type === 'service' || /\/services?\//.test(url)) return 'service';
   if (
@@ -144,7 +145,7 @@ function titledSource(source) {
 
 /**
  * Related-action buttons from live chatbot_knowledge hits only (CMS embeddings).
- * Prefer blog → area guide → FAQ → service → listing. Never homepage. Max 2 unique URLs.
+ * Prefer blog → area guide → company_info → FAQ → service → listing. Never homepage. Max 2 unique URLs.
  * No hardcoded topic → URL maps — new CMS content appears automatically after embed.
  */
 function rankRelatedContentSources(sources = []) {
@@ -155,6 +156,7 @@ function rankRelatedContentSources(sources = []) {
   const byKind = {
     blog: [],
     area_guide: [],
+    company_info: [],
     faq: [],
     service: [],
     listing: [],
@@ -174,7 +176,7 @@ function rankRelatedContentSources(sources = []) {
     ordered.push({ title: item.title, url: item.url });
   };
 
-  for (const kind of ['blog', 'area_guide', 'faq', 'service', 'listing', 'other']) {
+  for (const kind of ['blog', 'area_guide', 'company_info', 'faq', 'service', 'listing', 'other']) {
     for (const item of byKind[kind]) pick(item);
   }
   return ordered;
@@ -898,7 +900,7 @@ function isNonPlaceLocationToken(text) {
 }
 
 /**
- * Blog / FAQ / guide topics — must use search_content, not listing search or sell chips.
+ * Blog / FAQ / guide / company topics — must use search_content, not listing search or sell chips.
  */
 function isContentKnowledgeTopic(text) {
   const raw = String(text || '')
@@ -910,7 +912,7 @@ function isContentKnowledgeTopic(text) {
   }
   // Property-management lead flow owns these — not blog Q&A.
   if (isMultiPropertyServiceQuery(raw) || matchesServiceInquiryPhrase(raw)) return false;
-  return /\b(golden\s+visa|investor\s+visa|visa\s+eligib|buying\s+costs?|cost\s+of\s+buying|cost\s+to\s+buy|transfer\s+fee|dld|mortgage|service\s+charge|rera|freehold|leasehold|flexi\s*rent|flexible\s+rent|payment\s+plan|payable\s+options?|installments?|roi|invest(?:ing|ment|or)?|summer|winter|spring|autumn|season|prepare|tips?|advice|faq|area\s+guide|tell\s+me\s+about|what\s+is|what\s+are|how\s+(?:can|do|to|does|much)|need\s+to\s+know|transaction|market\s+(?:stats?|data|overview)|quarter\s*[1234]|q\s*[1234])\b/.test(
+  return /\b(golden\s+visa|investor\s+visa|visa\s+eligib|buying\s+costs?|cost\s+of\s+buying|cost\s+to\s+buy|transfer\s+fee|dld|mortgage|service\s+charge|rera|freehold|leasehold|flexi\s*rent|flexible\s+rent|payment\s+plan|payable\s+options?|installments?|roi|invest(?:ing|ment|or)?|summer|winter|spring|autumn|season|prepare|tips?|advice|faq|area\s+guide|tell\s+me\s+about|what\s+is|what\s+are|what'?s\s+(?:it\s+like|the\s+latest)|how\s+(?:can|do|to|does|much)|need\s+to\s+know|transaction|market\s+(?:stats?|data|overview)|quarter\s*[1234]|q\s*[1234]|blog|article|posts?|living\s+in|office\s+hours|book\s+(?:a\s+)?viewing|services?\s+(?:do\s+you|you\s+offer|offered|does)|do\s+you\s+(?:offer|help|provide)|company|founded|founder|years?\s+(?:in\s+)?(?:business|operation)|who\s+(?:founded|are\s+you|is\s+rocky)|areas?\s+(?:do\s+you\s+)?cover|contact\s+(?:us|for))\b/.test(
     raw
   );
 }
@@ -1135,8 +1137,19 @@ function matchesServiceInquiryPhrase(text) {
   if (/\b(summer|winter|spring|autumn|season|prepare|tips?|proof|heat|ac\b|air.?con)\b/i.test(raw)) {
     return false;
   }
+  // Catalog / FAQ style ("what services…", "do you help with PM") → search_content, not lead capture.
+  if (
+    /\b(what\s+(?:type\s+of\s+)?services?\b|what\s+does\b|do\s+you\s+(?:offer|help|provide)|tell\s+me\s+about|include[sd]?|offering)\b/i.test(
+      raw
+    ) &&
+    !/\b(manage\s+my|i\s+need\s+(?:you\s+to\s+)?manage|sign\s+me\s+up|i\s+want\s+(?:pm|property\s+management))\b/i.test(
+      raw
+    )
+  ) {
+    return false;
+  }
   if (/^property\s+management$/i.test(raw)) return true;
-  return /\b(property\s+management|management\s+services?|your\s+services?|(?:what|whta|wha?t)\s+(?:type\s+of\s+)?services?|services?\s+(?:you|do\s+you|are\s+you)\s+(?:provid\w*|offer)|rent\s+collection|tenant\s+screening|landlord\s+services?|maintain(?:ing)?\s+my\s+propert|manage\s+(?:my\s+|these\s+|your\s+|this\s+|our\s+)?propert|can\s+you\s+manage)\b/i.test(
+  return /\b(management\s+services?|rent\s+collection|tenant\s+screening|landlord\s+services?|maintain(?:ing)?\s+my\s+propert|manage\s+(?:my\s+|these\s+|your\s+|this\s+|our\s+)?propert|can\s+you\s+manage|i\s+need\s+property\s+management|property\s+management\s+for\s+my)\b/i.test(
     raw
   );
 }

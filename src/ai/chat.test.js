@@ -67,10 +67,16 @@ test('content questions skip property search (flexi rent, summer, golden visa)',
     'flexi rent',
     'how can we manage our property in summer',
     'is summer the best option to invest in dubai?',
+    "What's the latest blog post about Dubai real estate?",
+    "What's it like living in JVC?",
+    'What services does Rocky Real Estate offer?',
+    'Do you help with property management?',
+    'Who founded Rocky Real Estate?',
   ]) {
     assert.equal(isGeneralKnowledgeQuery(phrase), true, phrase);
     assert.equal(shouldSkipPropertySearch(phrase), true, phrase);
     assert.equal(isListingFollowUp(phrase), false, phrase);
+    assert.equal(isServiceInquiryMessage(phrase), false, phrase);
   }
 });
 

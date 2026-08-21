@@ -1,5 +1,5 @@
 /**
- * Embed blogs, area guides, FAQs, and services into chatbot_knowledge.
+ * Embed blogs, area guides, FAQs, services, and company info into chatbot_knowledge.
  * Skips factsheets (PDFs, no extractable text).
  *
  * Usage:
@@ -17,6 +17,7 @@ const Blog = require('../src/models/Blog');
 const AreaGuide = require('../src/models/AreaGuide');
 const Faq = require('../src/models/Faq');
 const Service = require('../src/models/Service');
+const CompanyInfo = require('../src/models/CompanyInfo');
 const ChatbotKnowledge = require('../src/models/ChatbotKnowledge');
 
 const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small';
@@ -114,10 +115,11 @@ function collectSources() {
     AreaGuide.find({ isActive: true }).lean(),
     Faq.find({ isActive: true }).lean(),
     Service.find({ isActive: true }).lean(),
+    CompanyInfo.find({ isActive: true }).lean(),
   ]);
 }
 
-function documentsToChunks(blogs, areaGuides, faqs, services) {
+function documentsToChunks(blogs, areaGuides, faqs, services, companyInfos = []) {
   const docs = [];
 
   for (const blog of blogs) {
@@ -189,6 +191,24 @@ function documentsToChunks(blogs, areaGuides, faqs, services) {
         sourceId: String(service._id),
         title: service.title,
         url: joinUrl(`/services/${service.slug}`),
+        content,
+        chunkIndex: index,
+      });
+    });
+  }
+
+  for (const info of companyInfos) {
+    const topicLine = info.topic ? `Topic: ${info.topic}` : '';
+    const categoryLine = info.category ? `Category: ${info.category}` : '';
+    const body = chunkText(
+      [topicLine, categoryLine, `Q: ${info.question}`, `A: ${info.answer}`].filter(Boolean).join('\n')
+    );
+    body.forEach((content, index) => {
+      docs.push({
+        sourceType: 'company_info',
+        sourceId: String(info._id),
+        title: info.topic || info.question,
+        url: '',
         content,
         chunkIndex: index,
       });
@@ -322,12 +342,12 @@ const run = async () => {
   await mongoose.connect(process.env.MONGO_URI);
   console.log(`Connected to database: ${mongoose.connection.name}`);
 
-  const [blogs, areaGuides, faqs, services] = await collectSources();
+  const [blogs, areaGuides, faqs, services, companyInfos] = await collectSources();
   console.log(
-    `Loaded ${blogs.length} blogs, ${areaGuides.length} area guides, ${faqs.length} FAQs, ${services.length} services`
+    `Loaded ${blogs.length} blogs, ${areaGuides.length} area guides, ${faqs.length} FAQs, ${services.length} services, ${companyInfos.length} company info`
   );
 
-  const chunks = documentsToChunks(blogs, areaGuides, faqs, services);
+  const chunks = documentsToChunks(blogs, areaGuides, faqs, services, companyInfos);
   await upsertChunks(chunks);
 
   await mongoose.disconnect();

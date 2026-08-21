@@ -2,7 +2,7 @@ const mongoose = require('mongoose');
 
 /**
  * Single embedding store for CMS content used by the chatbot:
- * blogs, area guides, FAQs, and services (sourceType).
+ * blogs, area guides, FAQs, services, and company_info (sourceType).
  * Collection: chatbot_knowledge (like property_embeddings for listings).
  */
 const chatbotKnowledgeSchema = new mongoose.Schema(

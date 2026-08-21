@@ -20,6 +20,7 @@ const faqRoutes = require('./routes/faqRoutes');
 const serviceRoutes = require('./routes/serviceRoutes');
 const blogRoutes = require('./routes/blogRoutes');
 const teamMemberRoutes = require('./routes/teamMemberRoutes');
+const companyInfoRoutes = require('./routes/companyInfo.routes');
 const chatRoutes = require('./ai/chat.routes');
 const { startSalesforceMigrateScheduler } = require('./jobs/salesforceMigrateScheduler');
 const { startTeamTailorSyncScheduler } = require('./jobs/teamtailorSyncScheduler');
@@ -73,6 +74,7 @@ app.use('/api/faqs', faqRoutes);
 app.use('/api/services', serviceRoutes);
 app.use('/api/blogs', blogRoutes);
 app.use('/api/team-members', teamMemberRoutes);
+app.use('/api/company-info', companyInfoRoutes);
 app.use('/api/chat', chatRoutes);
  
 // Error handler (e.g. Multer/Cloudinary errors)
