@@ -662,6 +662,18 @@ function resolvePendingSlots(message, profile, history = []) {
     if (chipPatch.type) next.type = chipPatch.type;
     if (chipPatch.bedroomChoice) {
       applyBedroomChoice(next, chipPatch.bedroomChoice);
+    } else if (
+      chipPatch.location &&
+      !chipPatch.type &&
+      nearbyAreaOptions(last.location).some(
+        (a) => a.toLowerCase() === String(chipPatch.location).trim().toLowerCase()
+      )
+    ) {
+      // Bare nearby-area chip after a location-empty offer — search any bedrooms there
+      next.bedrooms = null;
+      next.bedroomsMin = null;
+      next.bedroomsAny = true;
+      next.bedroomsResolved = true;
     }
     // Carry purpose forward
     const resolvedPurpose = next.purpose || profile.purpose || null;
@@ -760,13 +772,15 @@ function resolvePendingSlots(message, profile, history = []) {
 
 /**
  * Detects a new-location listing search ("Show me villas in Dubai Hills",
- * "Show me apartments in Dubai Marina", etc.) when we already have a prior
- * location in context, and the message explicitly names a DIFFERENT location.
+ * "Buy villas in Arabian Ranches under 5 million", etc.) when we already have
+ * a prior location in context, and the message explicitly names a DIFFERENT
+ * location — or when we are stuck in empty-results/alternatives and the user
+ * issues a fresh listing search (including same area, different type).
  *
  * When matched, returns a `{ type: 'continue', profile }` result that:
  *   - Updates location and type from the message
  *   - Resets bedrooms (unknown → will trigger bedroom chips)
- *   - Resets budget
+ *   - Resets budget unless stated in the message
  *   - Preserves purpose via the existing trustedPurpose rule
  *     (purpose from message if stated, else stored purpose)
  *
@@ -775,36 +789,57 @@ function resolvePendingSlots(message, profile, history = []) {
 function applyNewLocationSearch(message, profile) {
   if (wantsDifferentLocation(message)) return null;
   const mentionedLocation = parseLocationFromMessage(message);
-  if (!mentionedLocation) return null;
-
-  const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
-
-  // Only activate if we already have a different prior location — avoids
-  // triggering on the very first search message in a session.
-  if (!last.location) return null;
-  const locDiffers = mentionedLocation.trim().toLowerCase() !== last.location.trim().toLowerCase();
-  if (!locDiffers) return null;
-
-  // Must look like a listing search (contains a property type or listing keyword)
-  const looksLikeListing =
-    /\b(show|find|search|looking|apartment|villa|townhouse|penthouse|duplex|studio|flat|property|properties|home|listing)\b/i.test(message);
-  if (!looksLikeListing) return null;
-
   const mentionedType = parseDesiredPropertyType(message) || normalizePropertyType(message);
   const purposeFromMsg = parsePurposeFromMessage(message);
   const bedsFromMsg = parseBedroomChoice(message);
   const budget = parseBudgetFromMessage(message);
 
+  // Must look like a listing search (type nouns include plurals; Buy/Rent verbs count too)
+  const looksLikeListing =
+    /\b(show|find|search|looking|buy|purchase|rent|lease|for\s+sale|apartments?|villas?|townhouses?|penthouses?|duplexes?|studios?|flats?|propert(?:y|ies)|homes?|listings?)\b/i.test(
+      message
+    );
+  if (!looksLikeListing && !purposeFromMsg) return null;
+
+  const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+  const awaiting = profile.slotFlow?.awaiting;
+  const inEmptySlot = awaiting === 'emptyResults' || awaiting === 'alternatives';
+
+  // Only activate if we already have a prior location — avoids triggering on
+  // the very first search message in a session — unless escaping empty results.
+  if (!last.location && !inEmptySlot) return null;
+
+  const locDiffers =
+    !!(mentionedLocation && last.location) &&
+    mentionedLocation.trim().toLowerCase() !== last.location.trim().toLowerCase();
+  const typeDiffers =
+    !!(mentionedType && last.type) &&
+    mentionedType.trim().toLowerCase() !== last.type.trim().toLowerCase();
+
+  // Escape empty-results with a fresh listing statement even if location is unchanged.
+  const freshEscape =
+    inEmptySlot &&
+    !!(mentionedLocation || last.location) &&
+    !!(purposeFromMsg || mentionedType || bedsFromMsg || budget);
+
+  if (!locDiffers && !typeDiffers && !freshEscape) return null;
+  if (!mentionedLocation && !locDiffers && !(inEmptySlot && last.location && (typeDiffers || purposeFromMsg))) {
+    return null;
+  }
+
+  const resolvedLocation = mentionedLocation || last.location;
+  if (!resolvedLocation) return null;
+
   // Resolve purpose: explicit in message > stored purpose (existing rule: persist across location change)
   const resolvedPurpose = purposeFromMsg || last.purpose || profile.purpose || null;
 
   const newFilters = {
-    location: mentionedLocation,
-    type: mentionedType || null,
+    location: resolvedLocation,
+    type: mentionedType || (locDiffers ? null : last.type) || null,
     bedrooms: null,
     bedroomsMin: null,
     bedroomsAny: bedsFromMsg?.any === true,
-    bedroomsResolved: !!(bedsFromMsg && !bedsFromMsg.any),
+    bedroomsResolved: !!(bedsFromMsg && !bedsFromMsg.any) || bedsFromMsg?.any === true,
     budgetMin: null,
     budgetMax: null,
     purpose: resolvedPurpose,
@@ -824,6 +859,7 @@ function applyNewLocationSearch(message, profile) {
     slotFlow: { awaiting: null, alternatives: null },
   };
   if (resolvedPurpose) patch.purpose = resolvedPurpose;
+  if (resolvedLocation) patch.preferredAreas = [resolvedLocation];
 
   return {
     type: 'continue',

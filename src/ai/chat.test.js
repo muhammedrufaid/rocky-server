@@ -38,6 +38,8 @@ const {
   parsePropertyTypeChange,
   rankRelatedContentSources,
   isHomepageUrl,
+  emptyResultsReply,
+  locationEmptyNearbyReply,
 } = require('./chat.tools');
 
 function runSellTurns(messages) {
@@ -87,6 +89,30 @@ test('listing follow-ups still search', () => {
   }
 });
 
+test('Buy purpose phrases match Rent coverage', () => {
+  const buyCases = [
+    "I'm looking to buy an apartment in Business Bay",
+    'Show me 2 bedroom apartments in Dubai Marina for sale',
+    'Buy villas in Arabian Ranches under 5 million',
+    'I want to buy a villa',
+    'looking to buy an apartment',
+    'want to purchase a townhouse',
+  ];
+  for (const phrase of buyCases) {
+    assert.equal(parsePurposeFromMessage(phrase), 'Buy', phrase);
+  }
+  const rentCases = [
+    'I want to rent an apartment in JVC',
+    'Looking to rent a villa in The Springs',
+    "I'm looking to rent an apartment in JVC",
+  ];
+  for (const phrase of rentCases) {
+    assert.equal(parsePurposeFromMessage(phrase), 'Rent', phrase);
+  }
+  // Content FAQ must not become Buy just because it contains "buy"
+  assert.equal(parsePurposeFromMessage('Can foreigners buy property in Dubai?'), null);
+});
+
 // --- Location ---
 
 test('summer is not a location; real areas still parse', () => {
@@ -104,6 +130,19 @@ test('property type change prefers the intended type', () => {
 });
 
 // --- Related buttons (CMS embeddings only — no hardcoded blog URLs) ---
+
+test('empty-result copy avoids flat negatives', () => {
+  const reply = emptyResultsReply({ location: 'Dubai Marina', type: 'Apartment', bedrooms: 2 });
+  assert.match(reply, /Looking for/i);
+  assert.equal(/i don't have|i couldn't find|no matches/i.test(reply), false);
+  const nearby = locationEmptyNearbyReply({ location: 'Arabian Ranches' }, [
+    'Dubai Hills',
+    'Mudon',
+  ]);
+  assert.match(nearby, /near Arabian Ranches/i);
+  assert.match(nearby, /Dubai Hills/);
+  assert.equal(/i don't have|i couldn't find/i.test(nearby), false);
+});
 
 test('related buttons come only from embedding hits', () => {
   assert.deepEqual(rankRelatedContentSources([]), []);

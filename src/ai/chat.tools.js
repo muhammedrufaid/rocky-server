@@ -572,19 +572,32 @@ function parsePurposeFromMessage(text) {
   if (collapsed === 'offplan' || collapsed === 'offplanproperties') return 'Off-plan';
   if (/off[\s-_]*plan/.test(lower)) return 'Off-plan';
 
+  // Buy: start-anchored intents + mid-sentence parity with Rent ("looking to buy", "for sale", "I'm…")
   if (
-    /^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|looking\s+to\s+|looking\s+for\s+)?(buy|purchase|sale)\b/.test(
+    !/\brent\b|\blease\b|off[\s-_]*plan/.test(lower) &&
+    (/^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|i'?m\s+(looking\s+to\s+|looking\s+for\s+)?|i\s+am\s+(looking\s+to\s+|looking\s+for\s+)?|looking\s+to\s+|looking\s+for\s+)?(buy|purchase)\b/.test(
       lower
-    ) &&
-    !/\brent\b|\blease\b|off[\s-_]*plan/.test(lower)
+    ) ||
+      /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+to\s+buy\b/.test(lower) ||
+      /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+for\s+(?:a\s+|an\s+)?(?:to\s+)?buy\b/.test(lower) ||
+      /\b(?:want|would\s+like|('d\s+like))\s+to\s+buy\b/.test(lower) ||
+      /\b(?:want|would\s+like|('d\s+like))\s+to\s+purchase\b/.test(lower) ||
+      /\bto\s+purchase\b/.test(lower) ||
+      /\bfor\s+sale\b/.test(lower))
   ) {
     return 'Buy';
   }
+
+  // Rent: same coverage including "I'm looking to rent" / "for rent"
   if (
-    /^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|looking\s+to\s+|looking\s+for\s+)?(rent|rental|lease)\b/.test(
+    !/\bbuy\b|\bpurchase\b|\bfor\s+sale\b|off[\s-_]*plan/.test(lower) &&
+    (/^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|i'?m\s+(looking\s+to\s+|looking\s+for\s+)?|i\s+am\s+(looking\s+to\s+|looking\s+for\s+)?|looking\s+to\s+|looking\s+for\s+)?(rent|rental|lease)\b/.test(
       lower
-    ) &&
-    !/\bbuy\b|\bpurchase\b|off[\s-_]*plan/.test(lower)
+    ) ||
+      /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+to\s+rent\b/.test(lower) ||
+      /\b(?:want|would\s+like|('d\s+like))\s+to\s+rent\b/.test(lower) ||
+      /\bfor\s+rent\b/.test(lower) ||
+      /\bto\s+lease\b/.test(lower))
   ) {
     return 'Rent';
   }
@@ -733,7 +746,22 @@ function emptyResultsReply(filters = {}) {
   const beds = describeBedroomPhrase(filters).trim(); // e.g. "1-bedroom" or ""
   const type = describeTypeSingular(filters);         // e.g. "Villa" or "property"
   const bedsType = beds ? `${beds} ${type.toLowerCase()}` : type.toLowerCase();
-  return `I don't have a ${bedsType} available in ${loc} right now.`;
+  return `Looking for a ${bedsType} in ${loc} — let me check the closest options for you.`;
+}
+
+/** Soft nearby-offer copy when the requested location has zero inventory for purpose+type. */
+function locationEmptyNearbyReply(filters = {}, nearbyAreas = []) {
+  const loc = (filters.location || 'that area').toString().trim() || 'that area';
+  const areas = (nearbyAreas || []).map((a) => String(a).trim()).filter(Boolean);
+  if (!areas.length) {
+    return `Let me check what's available near ${loc} for you. Would you like to try a different area or adjust the search?`;
+  }
+  if (areas.length === 1) {
+    return `We don't currently have matching listings in ${loc}, but there are options nearby in ${areas[0]}. Would you like me to show those?`;
+  }
+  const head = areas.slice(0, -1).join(', ');
+  const tail = areas[areas.length - 1];
+  return `Let me check what's available near ${loc} for you. I can show nearby options in ${head}, or ${tail}. Which area would you like?`;
 }
 
 function emptyResultOptions(filters = {}) {
@@ -1719,10 +1747,54 @@ function parseAlternativeChip(text, currentFilters = {}) {
  * Probe all alternative categories (A/B/C) in parallel and return only those
  * with confirmed > 0 inventory.  Returns an array of { label, patch } entries
  * capped at MAX_ALT_CHIPS.
+ *
+ * When `nearbyOnly` is true (location has zero inventory for purpose+type at any
+ * bedroom count), only nearby-area chips are offered — never bedroom Try-N chips.
  */
 const MAX_ALT_CHIPS = 4;
 
-async function buildAlternativeChips(effectiveFilters) {
+async function locationHasInventoryForPurposeType(effectiveFilters) {
+  const location = (effectiveFilters.location || '').toString().trim();
+  if (!location || !effectiveFilters.purpose) return false;
+  const anyBedFilters = {
+    ...effectiveFilters,
+    bedrooms: null,
+    bedroomsMin: null,
+    bedroomsAny: true,
+    bedroomsResolved: true,
+  };
+  return (await countByFilters(anyBedFilters, location)) > 0;
+}
+
+async function buildNearbyAreaChips(effectiveFilters) {
+  const location = (effectiveFilters.location || '').trim();
+  const nearbyAreas = nearbyAreaOptions(location);
+  const probed = await Promise.all(
+    nearbyAreas.slice(0, 4).map(async (area) => {
+      const testFilters = {
+        ...effectiveFilters,
+        location: area,
+        bedrooms: null,
+        bedroomsMin: null,
+        bedroomsAny: true,
+        bedroomsResolved: true,
+      };
+      const count = await countByFilters(testFilters, area);
+      return { label: area, patch: { location: area }, count };
+    })
+  );
+  return probed
+    .filter((c) => c.count > 0)
+    .sort((a, b) => b.count - a.count)
+    .slice(0, MAX_ALT_CHIPS)
+    .map((c) => ({ label: c.label, patch: c.patch }));
+}
+
+async function buildAlternativeChips(effectiveFilters, { nearbyOnly = false } = {}) {
+  if (nearbyOnly) {
+    return buildNearbyAreaChips(effectiveFilters);
+  }
+
   const purpose = effectiveFilters.purpose;
   const location = (effectiveFilters.location || '').trim();
   const type = effectiveFilters.type || null;
@@ -1789,20 +1861,26 @@ async function buildAlternativeChips(effectiveFilters) {
 async function emptyResultsResult(effectiveFilters) {
   const location = (effectiveFilters.location || '').toString().trim();
 
-  const alternatives = await buildAlternativeChips(effectiveFilters);
+  const locationHasStock = await locationHasInventoryForPurposeType(effectiveFilters);
+  const locationEmpty = !!location && !locationHasStock;
+
+  const alternatives = await buildAlternativeChips(effectiveFilters, { nearbyOnly: locationEmpty });
 
   let reply;
   let options;
   let slotAwaiting;
 
-  if (alternatives.length > 0) {
+  if (locationEmpty) {
+    const nearbyLabels = alternatives.map((a) => a.label);
+    reply = locationEmptyNearbyReply(effectiveFilters, nearbyLabels);
+    options = nearbyLabels;
+    slotAwaiting = alternatives.length > 0 ? 'alternatives' : 'emptyResults';
+  } else if (alternatives.length > 0) {
     const locPart = location ? ` in ${location}` : '';
     if (alternatives.length === 1) {
-      // Single confirmed alternative — name it inline, avoiding location duplication
       const altLabel = alternatives[0].label;
-      // If the label already contains the location, don't append it again
       const labelHasLoc = location && altLabel.toLowerCase().includes(location.toLowerCase());
-      const locSuffix = labelHasLoc ? '' : (locPart ? locPart : '');
+      const locSuffix = labelHasLoc ? '' : locPart || '';
       reply = `${emptyResultsReply(effectiveFilters)} I found ${altLabel}${locSuffix} instead.`;
     } else {
       reply = `${emptyResultsReply(effectiveFilters)} Here are some options I found${locPart}:`;
@@ -1810,8 +1888,7 @@ async function emptyResultsResult(effectiveFilters) {
     options = alternatives.map((a) => a.label);
     slotAwaiting = 'alternatives';
   } else {
-    // No confirmed alternatives anywhere
-    reply = `${emptyResultsReply(effectiveFilters)} Let me know if you'd like to adjust the search.`;
+    reply = `${emptyResultsReply(effectiveFilters)} Would you like to adjust the area, bedrooms, or budget?`;
     options = [];
     slotAwaiting = 'emptyResults';
   }
@@ -1837,8 +1914,9 @@ async function emptyResultsResult(effectiveFilters) {
       count: 0,
       needsEmptyResults: true,
       requestedLocation: location || null,
+      locationEmpty: !!locationEmpty,
       instruction:
-        'No listings matched. Do not invent alternatives. The server has checked real inventory and will show chips for confirmed options. Do not write a follow-up question.',
+        'No listings matched. Do not invent alternatives. The server has checked real inventory and will show chips for confirmed options. Do not write a follow-up question. Do not use "I don\'t have" / "I couldn\'t find" phrasing.',
     },
   };
 }
@@ -2176,6 +2254,7 @@ module.exports = {
   parseEmptyResultChoice,
   emptyResultOptions,
   emptyResultsReply,
+  locationEmptyNearbyReply,
   nearbyAreaOptions,
   matchesNamedOption,
   foundListingsReply,
