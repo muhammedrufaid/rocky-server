@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const ChatbotKnowledge = require('../models/ChatbotKnowledge');
 
 const conversationSchema = new mongoose.Schema(
   {
@@ -101,27 +102,9 @@ const leadSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-const chatbotKnowledgeSchema = new mongoose.Schema(
-  {
-    sourceType: { type: String, required: true, trim: true, index: true },
-    sourceId: { type: String, required: true, trim: true, index: true },
-    title: { type: String, required: true, trim: true },
-    url: { type: String, default: '', trim: true },
-    content: { type: String, required: true },
-    embedding: { type: [Number], required: true },
-    embeddingHash: { type: String, required: true, index: true },
-  },
-  { timestamps: true }
-);
-
-chatbotKnowledgeSchema.index({ sourceType: 1, sourceId: 1, embeddingHash: 1 }, { unique: true });
-
 const Conversation =
   mongoose.models.Conversation || mongoose.model('Conversation', conversationSchema, 'conversations');
 const Lead = mongoose.models.Lead || mongoose.model('Lead', leadSchema, 'leads');
-const ChatbotKnowledge =
-  mongoose.models.ChatbotKnowledge ||
-  mongoose.model('ChatbotKnowledge', chatbotKnowledgeSchema, 'chatbot_knowledge');
 
 module.exports = {
   Conversation,

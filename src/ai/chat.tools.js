@@ -1,23 +1,13 @@
 const OpenAI = require('openai');
 const propertyDbService = require('../services/propertyDbService');
-const { Lead, ChatbotKnowledge } = require('./chat.models');
+const { Lead } = require('./chat.models');
+const ChatbotKnowledge = require('../models/ChatbotKnowledge');
 
 const VECTOR_INDEX_NAME = process.env.CHATBOT_VECTOR_INDEX || 'chatbot_knowledge_vector_index';
 const VECTOR_MIN_SCORE = Number(process.env.CHAT_VECTOR_MIN_SCORE) || 0.75;
-const CONTENT_LIMIT = 3;
+const CONTENT_LIMIT = 8;
 const PROPERTY_LIMIT = 6;
 const MAX_RELATED_CONTENT_ACTIONS = 2;
-
-const GOLDEN_VISA_RELATED_SOURCES = [
-  {
-    title: 'Dubai Updates Investor Visa: Key Information for You',
-    url: 'https://www.rockyrealestate.com/blogs/dubai-investor-visa',
-  },
-  {
-    title: 'Golden Visa Eligibility',
-    url: 'https://www.rockyrealestate.com/off-plan-properties/in-dubai',
-  },
-];
 
 const TOOL_DEFINITIONS = [
   {
@@ -127,6 +117,9 @@ function contentSourceKind(source = {}) {
   const url = normalizeContentUrl(source.url);
   const type = String(source.sourceType || '').toLowerCase();
   if (type === 'blog' || /\/blogs?\//.test(url)) return 'blog';
+  if (type === 'area_guide' || /\/area-guides?\//.test(url)) return 'area_guide';
+  if (type === 'faq' || /\/faqs?\//.test(url)) return 'faq';
+  if (type === 'service' || /\/services?\//.test(url)) return 'service';
   if (
     type === 'property' ||
     /\/off-plan/.test(url) ||
@@ -139,49 +132,51 @@ function contentSourceKind(source = {}) {
   return 'other';
 }
 
-function isGoldenVisaQuery(query) {
-  return /\b(golden\s+visa|investor\s+visa|visa\s+eligib)\b/i.test(String(query || ''));
-}
-
 function titledSource(source) {
   const url = String(source.url || '').trim();
   const title = String(source.title || '').trim();
-  if (title && !/^https?:\/\//i.test(title)) return { title, url };
+  const sourceType = source.sourceType || null;
+  if (title && !/^https?:\/\//i.test(title)) return { title, url, sourceType };
   const slug = url.replace(/\/+$/, '').split('/').pop() || 'Related page';
   const fromSlug = slug.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-  return { title: fromSlug, url };
+  return { title: fromSlug, url, sourceType };
 }
 
 /**
- * Related-action buttons for informational answers:
- * blog first, then a property/off-plan page. Never the homepage. Max 2 links.
+ * Related-action buttons from live chatbot_knowledge hits only (CMS embeddings).
+ * Prefer blog → area guide → FAQ → service → listing. Never homepage. Max 2 unique URLs.
+ * No hardcoded topic → URL maps — new CMS content appears automatically after embed.
  */
-function rankRelatedContentSources(sources = [], query = '') {
-  if (isGoldenVisaQuery(query)) {
-    return GOLDEN_VISA_RELATED_SOURCES.map(titledSource).slice(0, MAX_RELATED_CONTENT_ACTIONS);
-  }
-
+function rankRelatedContentSources(sources = []) {
   const cleaned = (sources || [])
     .filter((s) => s && s.url && !isHomepageUrl(s.url))
     .map(titledSource);
 
-  const blogs = cleaned.filter((s) => contentSourceKind(s) === 'blog');
-  const listings = cleaned.filter((s) => contentSourceKind(s) === 'listing');
-  const others = cleaned.filter((s) => contentSourceKind(s) === 'other');
+  const byKind = {
+    blog: [],
+    area_guide: [],
+    faq: [],
+    service: [],
+    listing: [],
+    other: [],
+  };
+  for (const item of cleaned) {
+    byKind[contentSourceKind(item)].push(item);
+  }
 
   const ordered = [];
   const seen = new Set();
   const pick = (item) => {
     if (!item || ordered.length >= MAX_RELATED_CONTENT_ACTIONS) return;
     const key = normalizeContentUrl(item.url);
-    if (seen.has(key)) return;
+    if (!key || seen.has(key)) return;
     seen.add(key);
-    ordered.push(item);
+    ordered.push({ title: item.title, url: item.url });
   };
 
-  pick(blogs[0]);
-  pick(listings[0]);
-  for (const item of [...blogs.slice(1), ...listings.slice(1), ...others]) pick(item);
+  for (const kind of ['blog', 'area_guide', 'faq', 'service', 'listing', 'other']) {
+    for (const item of byKind[kind]) pick(item);
+  }
   return ordered;
 }
 
@@ -882,6 +877,44 @@ function isUnspecifiedLocationPhrase(text) {
   );
 }
 
+/** Words that look like "in X" but are not Dubai communities. */
+function isNonPlaceLocationToken(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  if (!raw) return true;
+  if (
+    /^(summer|winter|spring|autumn|fall|general|cash|aed|dirhams?|call|person|question|advance|full|part|total|future|past|present|dubai\s+property)$/i.test(
+      raw
+    )
+  ) {
+    return true;
+  }
+  if (/^(january|february|march|april|may|june|july|august|september|october|november|december)$/i.test(raw)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Blog / FAQ / guide topics — must use search_content, not listing search or sell chips.
+ */
+function isContentKnowledgeTopic(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase();
+  if (!raw) return false;
+  if (/\b(show|find|search)\s+(me\s+)?(villas?|apartments?|townhouses?|properties|homes?|listings?)\b/.test(raw)) {
+    return false;
+  }
+  // Property-management lead flow owns these — not blog Q&A.
+  if (isMultiPropertyServiceQuery(raw) || matchesServiceInquiryPhrase(raw)) return false;
+  return /\b(golden\s+visa|investor\s+visa|visa\s+eligib|buying\s+costs?|cost\s+of\s+buying|cost\s+to\s+buy|transfer\s+fee|dld|mortgage|service\s+charge|rera|freehold|leasehold|flexi\s*rent|flexible\s+rent|payment\s+plan|payable\s+options?|installments?|roi|invest(?:ing|ment|or)?|summer|winter|spring|autumn|season|prepare|tips?|advice|faq|area\s+guide|tell\s+me\s+about|what\s+is|what\s+are|how\s+(?:can|do|to|does|much)|need\s+to\s+know|transaction|market\s+(?:stats?|data|overview)|quarter\s*[1234]|q\s*[1234])\b/.test(
+    raw
+  );
+}
+
 function wantsDifferentLocation(text) {
   return isUnspecifiedLocationPhrase(text);
 }
@@ -924,7 +957,9 @@ function parseLocationFromMessage(text) {
   const m = raw.match(/\bin\s+([A-Za-z0-9][A-Za-z0-9 '-]+?)(?:\s+(?:for|with|under|below|up\s+to|at|max)|$)/i);
   if (!m) return null;
   const loc = m[1].trim();
-  if (!loc || isUnspecifiedLocationPhrase(loc)) return null;
+  if (!loc || isUnspecifiedLocationPhrase(loc) || isNonPlaceLocationToken(loc)) return null;
+  // "in summer" / "in cash" etc. are not areas
+  if (isNonPlaceLocationToken(loc.split(/\s+/)[0])) return null;
   return loc;
 }
 
@@ -1095,8 +1130,13 @@ function isMultiPropertyServiceQuery(text) {
 
 function matchesServiceInquiryPhrase(text) {
   const raw = String(text || '').trim();
+  if (!raw) return false;
+  // Seasonal / how-to blog questions ("manage property in summer") are content, not PM lead flow.
+  if (/\b(summer|winter|spring|autumn|season|prepare|tips?|proof|heat|ac\b|air.?con)\b/i.test(raw)) {
+    return false;
+  }
   if (/^property\s+management$/i.test(raw)) return true;
-  return /\b(property\s+management|management\s+services?|your\s+services?|(?:what|whta|wha?t)\s+(?:type\s+of\s+)?services?|services?\s+(?:you|do\s+you|are\s+you)\s+(?:provid\w*|offer)|rent\s+collection|tenant\s+screening|landlord\s+services?|maintain(?:ing)?\s+my\s+propert|manage\s+(?:my\s+|these\s+|your\s+|this\s+)?propert|can\s+you\s+manage)\b/i.test(
+  return /\b(property\s+management|management\s+services?|your\s+services?|(?:what|whta|wha?t)\s+(?:type\s+of\s+)?services?|services?\s+(?:you|do\s+you|are\s+you)\s+(?:provid\w*|offer)|rent\s+collection|tenant\s+screening|landlord\s+services?|maintain(?:ing)?\s+my\s+propert|manage\s+(?:my\s+|these\s+|your\s+|this\s+|our\s+)?propert|can\s+you\s+manage)\b/i.test(
     raw
   );
 }
@@ -1105,6 +1145,7 @@ function isListingFollowUp(text) {
   const raw = String(text || '').trim();
   if (!raw) return false;
   if (parseSellIntent(raw) || isSellCta(raw)) return false;
+  if (isContentKnowledgeTopic(raw)) return false;
   if (isMultiPropertyServiceQuery(raw) || matchesServiceInquiryPhrase(raw)) return false;
   if (parsePurposeFromMessage(raw)) return true;
   if (parsePropertyTypeChange(raw)) return true;
@@ -1123,8 +1164,9 @@ function isGeneralKnowledgeQuery(text) {
     .trim()
     .toLowerCase();
   if (!raw) return false;
+  if (isContentKnowledgeTopic(raw)) return true;
   if (isListingFollowUp(raw)) return false;
-  return /\b(golden\s+visa|investor\s+visa|visa|eligib|buying\s+costs?|cost\s+of\s+buying|cost\s+to\s+buy|transfer\s+fee|dld|mortgage|property\s+management|service\s+charge|rera|freehold|flexi\s*rent|flexible\s+rent|payment\s+plan|payable\s+options?|installments?|roi|investment|tell\s+me\s+about|what\s+is|what\s+are|how\s+do(?:es)?|explain|need\s+to\s+know\s+about)\b/.test(
+  return /\b(property\s+management|tell\s+me\s+about|what\s+is|what\s+are|how\s+do(?:es)?|explain|need\s+to\s+know\s+about)\b/.test(
     raw
   );
 }
@@ -1910,7 +1952,7 @@ async function searchContent({ query }) {
         index: VECTOR_INDEX_NAME,
         path: 'embedding',
         queryVector,
-        numCandidates: 50,
+        numCandidates: 80,
         limit: CONTENT_LIMIT,
       },
     },
@@ -1938,8 +1980,11 @@ async function searchContent({ query }) {
   ]);
 
   const ranked = rankRelatedContentSources(
-    rows.map((row) => ({ title: row.title, url: row.url, sourceType: row.sourceType })),
-    q
+    rows.map((row) => ({
+      title: row.title,
+      url: row.url,
+      sourceType: row.sourceType,
+    }))
   );
 
   const shortChunks = rows.map((row) => ({
@@ -2101,6 +2146,8 @@ module.exports = {
   isAmbiguousListingQuery,
   isListingFollowUp,
   isGeneralKnowledgeQuery,
+  isContentKnowledgeTopic,
+  isNonPlaceLocationToken,
   shouldSkipPropertySearch,
   isVagueConfirm,
   normalizePropertyType,

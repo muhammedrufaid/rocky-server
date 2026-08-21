@@ -17,7 +17,7 @@ const Blog = require('../src/models/Blog');
 const AreaGuide = require('../src/models/AreaGuide');
 const Faq = require('../src/models/Faq');
 const Service = require('../src/models/Service');
-const { ChatbotKnowledge } = require('../src/ai/chat.models');
+const ChatbotKnowledge = require('../src/models/ChatbotKnowledge');
 
 const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small';
 const BATCH_SIZE = 64;

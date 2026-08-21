@@ -1337,11 +1337,11 @@ const chat = async (req, res) => {
     const suggestedCta = result.options
       ? null
       : pickSuggestedCta({
-          propertyCards: result.propertyCards,
-          sources: result.sources,
-          leadCaptured: result.leadCaptured || result.profile.leadCaptured,
-          turnIndex: conversation.messages.length,
-        });
+      propertyCards: result.propertyCards,
+      sources: result.sources,
+      leadCaptured: result.leadCaptured || result.profile.leadCaptured,
+      turnIndex: conversation.messages.length,
+    });
 
     conversation.messages.push({ role: 'user', content: message, createdAt: new Date() });
     conversation.messages.push({ role: 'assistant', content: reply, createdAt: new Date() });
