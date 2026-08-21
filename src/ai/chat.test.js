@@ -144,6 +144,58 @@ test('empty-result copy avoids flat negatives', () => {
   assert.equal(/i don't have|i couldn't find/i.test(nearby), false);
 });
 
+test('sell FAQ is content, not sell-listing intent', () => {
+  const faq = 'Can I sell my off-plan property before completion?';
+  assert.equal(parseSellIntent(faq), false);
+  assert.equal(isGeneralKnowledgeQuery(faq), true);
+  assert.equal(shouldSkipPropertySearch(faq), true);
+});
+
+test('fresh sell does not inherit search or content locations', () => {
+  const listing = advanceSellListing(
+    'I need to sell my property',
+    {},
+    [{ role: 'user', content: 'tell me about Dubai Marina' }],
+    { location: 'Dubai Marina', type: 'Apartment', purpose: 'Buy' }
+  );
+  assert.equal(listing.intent, 'sell');
+  assert.equal(listing.location, null);
+  assert.equal(listing.type, null);
+  assert.match(sellClarificationReply(listing, 'I need to sell my property'), /What type is it, and which area/i);
+});
+
+test('off-plan financing and articles are content, not Off-plan purpose', () => {
+  assert.equal(parsePurposeFromMessage('Off-plan financing options in Dubai'), null);
+  assert.equal(isGeneralKnowledgeQuery('Off-plan financing options in Dubai'), true);
+  assert.equal(parsePurposeFromMessage('Do you have any articles on off-plan investment?'), null);
+  assert.equal(shouldSkipPropertySearch('Do you have any articles on off-plan investment?'), true);
+});
+
+test('portfolio what-services is content, not PM lead capture', () => {
+  const msg = 'I have 20 properties, what services do you provide?';
+  assert.equal(isMultiPropertyServiceQuery(msg), true);
+  assert.equal(isServiceInquiryMessage(msg), false);
+  assert.equal(isGeneralKnowledgeQuery(msg), true);
+});
+
+test('service contact accepts short bare phone numbers', () => {
+  const parsed = parseServiceContactDetails('1234567', { name: 'Test' });
+  assert.equal(parsed.whatsapp, '1234567');
+  assert.equal(parsed.phone, '1234567');
+});
+
+test('vague yes on sell CTA asks short clarification', () => {
+  const listing = {
+    intent: 'sell',
+    type: 'Villa',
+    location: 'Al Barsha',
+    name: 'A',
+    phone: '0501234567',
+    email: 'a@test.com',
+  };
+  assert.match(sellClarificationReply(listing, 'yes'), /Just to confirm/i);
+});
+
 test('related buttons come only from embedding hits', () => {
   assert.deepEqual(rankRelatedContentSources([]), []);
   const ranked = rankRelatedContentSources([
@@ -229,8 +281,8 @@ test('PM after sell asks same vs different location', () => {
   assert.deepEqual(SELL_SERVICE_LOCATION_OPTIONS, ['Same property', 'Different location']);
 });
 
-test('multi-property service question is PM, not general content', () => {
-  const msg = 'i have 20 properties i need to know what type of services you are providing';
+test('multi-property manage request is still PM lead', () => {
+  const msg = 'i have 20 properties i need property management';
   assert.equal(isServiceInquiryMessage(msg), true);
   assert.equal(isMultiPropertyServiceQuery(msg), true);
   assert.equal(isGeneralKnowledgeQuery(msg), false);

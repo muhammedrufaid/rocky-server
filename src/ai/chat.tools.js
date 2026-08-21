@@ -54,7 +54,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'search_content',
       description:
-        'Search Rocky website content (blogs, area guides, FAQs, services, company info). Use for Golden Visa, flexi rent / flexible payment plans, buying costs, property management overview, company facts, process, eligibility, and any question that might be answered on our site. Do not use this for live listing prices or availability. After results, write MAXIMUM 2 short sentences with the single key fact only — never paste or expand the chunks.',
+        'Search Rocky website content (blogs, area guides, FAQs, services, company info). Use for Golden Visa, flexi rent / flexible payment plans, buying costs, off-plan financing, can-I-sell off-plan policy questions, property management overview, company facts, process, eligibility, and any question that might be answered on our site. Do not use this for live listing prices or availability. Answer only the visitor\'s latest question — do not reuse a prior article topic. After results, write MAXIMUM 2 short sentences with the single key fact only — never paste or expand the chunks.',
       parameters: {
         type: 'object',
         properties: {
@@ -271,6 +271,14 @@ function parseSellIntent(text) {
     .replace(/[.!?]/g, '');
   if (!raw) return false;
   if (isSellCta(raw)) return false;
+  // Policy / FAQ questions about selling (e.g. off-plan resale rules) — not list-my-property intent
+  if (
+    /\b(can\s+i\s+sell|could\s+i\s+sell|am\s+i\s+allowed\s+to\s+sell|is\s+it\s+(?:possible|allowed)\s+to\s+sell|before\s+completion|how\s+(?:do|can|does)\s+(?:i|one|you)\s+sell|what\s+happens\s+if\s+i\s+sell|rules?\s+for\s+sell|sell(?:ing)?\s+(?:before|after|rules?|process|fees?))\b/.test(
+      raw
+    )
+  ) {
+    return false;
+  }
   if (/\b(i\s+(need|want|have|'d like|would like)\s+to\s+sell|sell(ing)?\s+(my|our)|list(ing)?\s+(my|our)|market\s+(my|our))\b/.test(raw)) {
     return true;
   }
@@ -322,8 +330,11 @@ function parseContactDetails(text, current = {}) {
   const emailMatch =
     labeledEmail || raw.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/);
   const whatsappMatch = labeledWhatsapp;
+  const bareNumber = raw.match(/^\s*((?:\+|00)?\d[\d\s\-()]{5,18}\d|\d{7,15})\s*$/);
   const phoneMatch =
-    labeledPhone || (!labeledWhatsapp ? raw.match(/(?:\+|00)?\d[\d\s\-()]{7,14}\d/) : null);
+    labeledPhone ||
+    (!labeledWhatsapp ? raw.match(/(?:\+|00)?\d[\d\s\-()]{5,14}\d/) : null) ||
+    bareNumber;
   let name = current.name || null;
   if (labeledName) {
     name = labeledName[1].trim();
@@ -388,14 +399,15 @@ function propertyFromHistory(messages = []) {
 function persistSellListing(current = {}, lastSearchFilters = {}, history = []) {
   const prior = copySellListing(current);
   const fromHistory = contactFromHistory(history);
-  const fromPropertyHistory = propertyFromHistory(history);
-  const last = lastSearchFilters || {};
+  // Never seed type/location from lastSearchFilters or prior chat mentions —
+  // those leak Buy/Rent search areas and content questions (e.g. "tell me about Dubai Marina").
+  // Only keep fields already collected in this sellListing, plus contact from history.
   return {
     intent: 'sell',
-    type: prior.type || last.type || fromPropertyHistory.type || null,
-    location: prior.location || last.location || fromPropertyHistory.location || null,
-    bedrooms: prior.bedrooms ?? last.bedrooms ?? fromPropertyHistory.bedrooms ?? null,
-    priceNote: prior.priceNote || fromPropertyHistory.priceNote || null,
+    type: prior.type || null,
+    location: prior.location || null,
+    bedrooms: prior.bedrooms ?? null,
+    priceNote: prior.priceNote || null,
     name: prior.name || fromHistory.name || null,
     phone: prior.phone || fromHistory.phone || null,
     email: prior.email || fromHistory.email || null,
@@ -527,6 +539,10 @@ function sellClarificationReply(details = {}, message = '') {
     if (cta || already) {
       return `Thanks — I have your details for the ${loc} ${typeLabel}. I can connect you with a listing agent for a valuation.`;
     }
+    // Bare "yes" / "ok" — acknowledge and clarify which CTA, don't silently re-ask the same line
+    if (isVagueConfirm(message)) {
+      return 'Just to confirm — would you like the valuation, or to speak with an agent?';
+    }
     return `Thanks — I have your details for the ${loc} ${typeLabel}. Would you like a quick valuation or to speak with a listing agent?`;
   }
 
@@ -560,6 +576,12 @@ function sellClarificationReply(details = {}, message = '') {
   return `I can help you sell your ${typeLabel} in ${loc}. Would you like a quick valuation or to speak with a listing agent?`;
 }
 
+function isOffPlanInformationalQuery(lower) {
+  return /\b(financ|payment\s+plans?|articles?|blogs?|posts?|faq|can\s+i\s+sell|before\s+completion|how\s+(?:does|do|to|can)|what\s+(?:is|are|does)|options|costs?|eligib|invest(?:ment|ing)?|tell\s+me|explain|need\s+to\s+know)\b/.test(
+    lower
+  );
+}
+
 function parsePurposeFromMessage(text) {
   const raw = String(text || '').trim();
   if (!raw) return null;
@@ -570,7 +592,11 @@ function parsePurposeFromMessage(text) {
   const lower = raw.toLowerCase().replace(/[.!?]/g, '').trim();
   const collapsed = lower.replace(/[\s_-]+/g, '');
   if (collapsed === 'offplan' || collapsed === 'offplanproperties') return 'Off-plan';
-  if (/off[\s-_]*plan/.test(lower)) return 'Off-plan';
+  // "Off-plan financing / articles / can I sell off-plan…" are content, not listing purpose
+  if (/off[\s-_]*plan/.test(lower)) {
+    if (isOffPlanInformationalQuery(lower)) return null;
+    return 'Off-plan';
+  }
 
   // Buy: start-anchored intents + mid-sentence parity with Rent ("looking to buy", "for sale", "I'm…")
   if (
@@ -930,6 +956,12 @@ function isNonPlaceLocationToken(text) {
 /**
  * Blog / FAQ / guide / company topics — must use search_content, not listing search or sell chips.
  */
+function isServicesCatalogQuestion(text) {
+  return /\b(what\s+(?:type\s+of\s+)?services?\b|services?\s+(?:do\s+you|you\s+(?:offer|provide)|are\s+you\s+providing)|what\s+do\s+you\s+(?:offer|provide))\b/i.test(
+    String(text || '')
+  );
+}
+
 function isContentKnowledgeTopic(text) {
   const raw = String(text || '')
     .trim()
@@ -938,9 +970,11 @@ function isContentKnowledgeTopic(text) {
   if (/\b(show|find|search)\s+(me\s+)?(villas?|apartments?|townhouses?|properties|homes?|listings?)\b/.test(raw)) {
     return false;
   }
+  // Catalog "what services…" (even with a portfolio mention) is content, not PM lead capture
+  if (isServicesCatalogQuestion(raw)) return true;
   // Property-management lead flow owns these — not blog Q&A.
   if (isMultiPropertyServiceQuery(raw) || matchesServiceInquiryPhrase(raw)) return false;
-  return /\b(golden\s+visa|investor\s+visa|visa\s+eligib|buying\s+costs?|cost\s+of\s+buying|cost\s+to\s+buy|transfer\s+fee|dld|mortgage|service\s+charge|rera|freehold|leasehold|flexi\s*rent|flexible\s+rent|payment\s+plan|payable\s+options?|installments?|roi|invest(?:ing|ment|or)?|summer|winter|spring|autumn|season|prepare|tips?|advice|faq|area\s+guide|tell\s+me\s+about|what\s+is|what\s+are|what'?s\s+(?:it\s+like|the\s+latest)|how\s+(?:can|do|to|does|much)|need\s+to\s+know|transaction|market\s+(?:stats?|data|overview)|quarter\s*[1234]|q\s*[1234]|blog|article|posts?|living\s+in|office\s+hours|book\s+(?:a\s+)?viewing|services?\s+(?:do\s+you|you\s+offer|offered|does)|do\s+you\s+(?:offer|help|provide)|company|founded|founder|years?\s+(?:in\s+)?(?:business|operation)|who\s+(?:founded|are\s+you|is\s+rocky)|areas?\s+(?:do\s+you\s+)?cover|contact\s+(?:us|for))\b/.test(
+  return /\b(golden\s+visa|investor\s+visa|visa\s+eligib|buying\s+costs?|cost\s+of\s+buying|cost\s+to\s+buy|costs?\s+involved|transfer\s+fee|dld|mortgage|service\s+charge|rera|freehold|leasehold|flexi\s*rent|flexible\s+rent|payment\s+plans?|financ(?:e|ing|ial)?|payable\s+options?|installments?|roi|invest(?:ing|ment|or)?|summer|winter|spring|autumn|season|prepare|tips?|advice|faq|area\s+guide|tell\s+me\s+about|what\s+is|what\s+are|what\s+should\s+i\s+know|before\s+(?:renting|buying|leasing)|what'?s\s+(?:it\s+like|the\s+latest)|how\s+(?:can|do|to|does|much)|need\s+to\s+know|can\s+i\s+sell|before\s+completion|transaction|market\s+(?:stats?|data|overview)|quarter\s*[1234]|q\s*[1234]|blog|article|posts?|living\s+in|office\s+hours|book\s+(?:a\s+)?viewing|services?\s+(?:do\s+you|you\s+offer|offered|does)|do\s+you\s+(?:offer|help|provide)|company|founded|founder|years?\s+(?:in\s+)?(?:business|operation)|who\s+(?:founded|are\s+you|is\s+rocky)|areas?\s+(?:do\s+you\s+)?cover|contact\s+(?:us|for))\b/.test(
     raw
   );
 }
@@ -1205,6 +1239,7 @@ function isGeneralKnowledgeQuery(text) {
     .trim()
     .toLowerCase();
   if (!raw) return false;
+  if (isServiceInquiryMessage(raw)) return false;
   if (isContentKnowledgeTopic(raw)) return true;
   if (isListingFollowUp(raw)) return false;
   return /\b(property\s+management|tell\s+me\s+about|what\s+is|what\s+are|how\s+do(?:es)?|explain|need\s+to\s+know\s+about)\b/.test(
@@ -1302,12 +1337,21 @@ function parseServiceContactDetails(text, current = {}) {
     };
   }
   const parsed = parseContactDetails(text, current);
+  let phone = parsed.phone || current.phone || null;
+  let whatsapp = parsed.whatsapp || current.whatsapp || null;
+  // Bare digits while collecting contact — accept as WhatsApp and phone (7+ digits)
+  const bare = raw.match(/^((?:\+|00)?\d[\d\s\-()]{5,18}\d|\d{7,15})$/);
+  if (bare) {
+    const num = bare[1].replace(/\s+/g, ' ').trim();
+    whatsapp = whatsapp || num;
+    phone = phone || num;
+  }
   return {
     ...current,
     name: parsed.name || current.name || null,
     email: parsed.email || current.email || null,
-    phone: parsed.phone || current.phone || null,
-    whatsapp: parsed.whatsapp || current.whatsapp || null,
+    phone,
+    whatsapp,
   };
 }
 
@@ -1395,6 +1439,8 @@ function shouldCaptureServiceLead(inquiry = {}) {
 }
 
 function isServiceInquiryMessage(text) {
+  // "what services do you provide" (incl. with a portfolio mention) → content, not lead capture
+  if (isServicesCatalogQuestion(text)) return false;
   return matchesServiceInquiryPhrase(text) || isMultiPropertyServiceQuery(text);
 }
 
@@ -2095,7 +2141,7 @@ async function searchContent({ query }) {
       count: rows.length,
       chunks: shortChunks,
       instruction:
-        'CRITICAL: Reply in AT MOST 2 short sentences (about 40 words total). Use only the key fact from the chunks (e.g. Golden Visa: commonly AED 2 million property investment for a 10-year visa; Flexi Rent: flexible payment options for tenants). Do NOT write "General guidance". Do NOT expand, lecture, or list every detail. No bullet lists. Do not include URLs — related pages are buttons. End with one short question such as "Would you like more details?"',
+        "CRITICAL: Reply in AT MOST 2 short sentences (about 40 words total). Use only the key fact from the chunks that answers the visitor's LATEST question — do not drift into a previous topic from earlier in the chat. Do NOT write \"General guidance\". Do NOT expand, lecture, or list every detail. No bullet lists. Do not include URLs — related pages are buttons. End with one short question such as \"Would you like more details?\"",
     },
   };
 }

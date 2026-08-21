@@ -8,10 +8,33 @@ const MAX_STORED_MESSAGES = 40;
 const MAX_TOOL_ROUNDS = 4;
 const TOOL_MAX_TOKENS = 1024;
 const REPLY_MAX_TOKENS = 600;
-const CONTENT_REPLY_MAX_TOKENS = 110;
+/** Content replies need enough tokens after reasoning models — 110 was truncating to empty content. */
+const CONTENT_REPLY_MAX_TOKENS = 600;
+const FRIENDLY_CHAT_ERROR = "Sorry, I couldn't pull that up — try again in a moment";
 
 const PROPERTY_CTAS = ['View listing', 'Book a viewing', 'See similar properties'];
 const CONTENT_CTAS = ['Talk to an agent', 'Explore related properties'];
+
+function synthesizeContentReply(chunks = [], sources = []) {
+  const first = (chunks || []).find((c) => String(c?.content || '').trim());
+  if (first) {
+    const excerpt = String(first.content)
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 220)
+      .replace(/\s+\S*$/, '');
+    const title = String(first.title || '').trim();
+    if (excerpt) {
+      return title
+        ? `${excerpt}. Would you like more details from “${title}”?`
+        : `${excerpt}. Would you like more details?`;
+    }
+  }
+  if ((sources || []).length) {
+    return 'I found related information for you — see the links below. Would you like more details?';
+  }
+  return '';
+}
 
 function getOpenAI() {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -263,8 +286,25 @@ function applyServiceInquiryFlow(message, profile, history = []) {
 
   if (awaiting === 'serviceContact') {
     const prior = copyServiceInquiry(profile.serviceInquiry || {});
-    const inquiry = parseServiceContactDetails(message, prior);
-    const reply = serviceContactReply(inquiry);
+    // Allow type/location corrections mid contact-collection (e.g. "Actually a villa in Arabian Ranches")
+    const typeChange = parsePropertyTypeChange(message) || normalizePropertyType(message);
+    const locChange = parseLocationFromMessage(message) || parseSellListingDetails(message, {}).location;
+    const correctionBits = [];
+    let nextPrior = { ...prior };
+    if (typeChange) {
+      nextPrior.propertyNote = [prior.propertyNote, typeChange].filter(Boolean).join(' — ');
+      correctionBits.push(typeChange.toLowerCase());
+    }
+    if (locChange) {
+      nextPrior.referenceLocation = locChange;
+      nextPrior.locationScope = nextPrior.locationScope || 'different';
+      correctionBits.push(locChange);
+    }
+    const inquiry = parseServiceContactDetails(message, nextPrior);
+    let reply = serviceContactReply(inquiry);
+    if (correctionBits.length) {
+      reply = `Got it — I've updated that to ${correctionBits.join(' in ')}.\n\n${reply}`;
+    }
     const complete = hasServiceContact(inquiry);
     return {
       type: 'clarify',
@@ -386,14 +426,14 @@ function applySellFlow(message, profile, history = []) {
     history,
     profile.lastSearchFilters || {}
   );
-  const previousFilters = profile.lastSearchFilters || emptySearchFilters();
-  const filters = copySearchFilters({
-    ...previousFilters,
-    type: listing.type || previousFilters.type,
-    location: listing.location || previousFilters.location,
-    bedrooms: listing.bedrooms ?? previousFilters.bedrooms,
+  // Do not copy Buy/Rent search filters into the sell profile — that leaks area/type
+  const filters = {
+    ...emptySearchFilters(),
+    type: listing.type || null,
+    location: listing.location || null,
+    bedrooms: listing.bedrooms ?? null,
     purpose: null,
-  });
+  };
   const options = sellFlowOptions(listing, message);
   const sellActionDone = hasSellContact(listing) && (cta || isAlreadySharedDetails(message));
 
@@ -934,14 +974,15 @@ async function maybeCaptureSellLead(sessionId, profile, message) {
 }
 
 async function clarificationResponse(res, { reply, profile, conversation, message, options, leadCaptured = false }) {
+  const safeReply = String(reply || '').trim() || FRIENDLY_CHAT_ERROR;
   conversation.messages.push({ role: 'user', content: message, createdAt: new Date() });
-  conversation.messages.push({ role: 'assistant', content: reply, createdAt: new Date() });
+  conversation.messages.push({ role: 'assistant', content: safeReply, createdAt: new Date() });
   conversation.messages = conversation.messages.slice(-MAX_STORED_MESSAGES);
   conversation.userProfile = profile;
   await conversation.save();
 
   const body = {
-    reply,
+    reply: safeReply,
     leadCaptured,
     ...emptyClarificationPayload(),
   };
@@ -1070,16 +1111,21 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   let clarificationOptions = null;
   let usedSearchContent = false;
   let usedSearchProperties = false;
+  let lastContentChunks = [];
+  let searchContentHits = 0;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     const hasToolResults = messages.some((m) => m.role === 'tool');
     const contentOnlyReply =
       hasToolResults && usedSearchContent && !usedSearchProperties && propertyCards.length === 0;
+    // After a successful content search, force a text answer — models otherwise re-call
+    // search_content until MAX_TOOL_ROUNDS and the user sees "could not finish".
+    const forceContentAnswer = contentOnlyReply && searchContentHits > 0;
     const completion = await openai.chat.completions.create({
       model,
       messages,
       tools: TOOL_DEFINITIONS,
-      tool_choice: 'auto',
+      tool_choice: forceContentAnswer ? 'none' : 'auto',
       max_completion_tokens: contentOnlyReply
         ? CONTENT_REPLY_MAX_TOKENS
         : hasToolResults
@@ -1106,8 +1152,15 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
 
     const toolCalls = msg.tool_calls;
     if (!toolCalls || !toolCalls.length) {
+      let reply = String(msg.content || '').trim();
+      if (!reply && usedSearchContent) {
+        reply = synthesizeContentReply(lastContentChunks, sources) || FRIENDLY_CHAT_ERROR;
+      }
+      if (!reply) {
+        reply = FRIENDLY_CHAT_ERROR;
+      }
       return {
-        reply: (msg.content || '').trim(),
+        reply,
         propertyCards: uniqueBy(propertyCards, (c) => c.id),
         sources: uniqueBy(sources, (s) => s.url || s.title),
         leadCaptured,
@@ -1122,6 +1175,26 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         args = JSON.parse(call.function?.arguments || '{}');
       } catch (err) {
         args = {};
+      }
+
+      // Ignore repeat search_content once we already have chunks — answer instead next round
+      if (
+        call.function?.name === 'search_content' &&
+        searchContentHits > 0 &&
+        lastContentChunks.length > 0 &&
+        !usedSearchProperties
+      ) {
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          content: JSON.stringify({
+            count: lastContentChunks.length,
+            chunks: lastContentChunks,
+            instruction:
+              'You already have matching content. Do NOT call tools again. Answer the visitor now in at most 2 short sentences.',
+          }),
+        });
+        continue;
       }
 
       let result;
@@ -1152,7 +1225,14 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         result.propertyCards?.length ?? 0
       );
 
-      if (call.function?.name === 'search_content') usedSearchContent = true;
+      if (call.function?.name === 'search_content') {
+        usedSearchContent = true;
+        const chunks = Array.isArray(result.modelPayload?.chunks) ? result.modelPayload.chunks : [];
+        if (chunks.length) {
+          lastContentChunks = chunks;
+          searchContentHits += 1;
+        }
+      }
       if (call.function?.name === 'search_properties') usedSearchProperties = true;
 
       if (result.propertyCards?.length) propertyCards.push(...result.propertyCards);
@@ -1267,8 +1347,15 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
     }
   }
 
+  // Max rounds exhausted — still return useful content if we have it
+  const fallbackReply =
+    synthesizeContentReply(lastContentChunks, sources) ||
+    (usedSearchContent
+      ? FRIENDLY_CHAT_ERROR
+      : 'Sorry, I could not finish that just now. Please try again.');
+
   return {
-    reply: 'Sorry, I could not finish that just now. Please try again.',
+    reply: fallbackReply,
     propertyCards: uniqueBy(propertyCards, (c) => c.id),
     sources: uniqueBy(sources, (s) => s.url || s.title),
     leadCaptured,
@@ -1331,14 +1418,15 @@ const chat = async (req, res) => {
 
     if (canSearchNow) {
       const forced = await runForcedPropertySearch({ sessionId, profile, userMessage: message });
+      const forcedReply = String(forced.reply || '').trim() || FRIENDLY_CHAT_ERROR;
       conversation.messages.push({ role: 'user', content: message, createdAt: new Date() });
-      conversation.messages.push({ role: 'assistant', content: forced.reply, createdAt: new Date() });
+      conversation.messages.push({ role: 'assistant', content: forcedReply, createdAt: new Date() });
       conversation.messages = conversation.messages.slice(-MAX_STORED_MESSAGES);
       conversation.userProfile = forced.profile;
       await conversation.save();
 
       const payload = {
-        reply: forced.reply,
+        reply: forcedReply,
         propertyCards: forced.propertyCards || [],
         sources: forced.sources || [],
         suggestedCta: forced.options
@@ -1369,7 +1457,9 @@ const chat = async (req, res) => {
       turnIndex: conversation.messages.length,
     });
 
-    const reply = result.reply || 'How can I help you with Dubai property today?';
+    const reply =
+      String(result.reply || '').trim() ||
+      FRIENDLY_CHAT_ERROR;
     const suggestedCta = result.options
       ? null
       : pickSuggestedCta({
@@ -1401,9 +1491,14 @@ const chat = async (req, res) => {
     return res.status(200).json(payload);
   } catch (error) {
     console.error('POST /api/chat error:', error);
-    return res.status(500).json({
-      success: false,
-      message: error.message || 'Failed to process chat',
+    const isValidation =
+      /validation failed|Path `content` is required/i.test(String(error?.message || ''));
+    return res.status(isValidation ? 200 : 500).json({
+      success: !isValidation,
+      reply: FRIENDLY_CHAT_ERROR,
+      message: FRIENDLY_CHAT_ERROR,
+      propertyCards: [],
+      sources: [],
     });
   }
 };
