@@ -339,6 +339,12 @@ test('same number reuses phone as whatsapp', () => {
   assert.equal(hasServiceContact(inquiry), true);
 });
 
+test('after sell contact is complete, flexi rent leaves sell and is a content question', () => {
+  assert.equal(isGeneralKnowledgeQuery('ok next need to know about flexi rent payable options'), true);
+  assert.equal(shouldSkipPropertySearch('ok next need to know about flexi rent payable options'), true);
+  assert.equal(isListingFollowUp('ok next need to know about flexi rent payable options'), false);
+});
+
 test('Test E: I already gave you my details does not repeat the contact ask when complete', () => {
   const { listing, reply } = runSellTurns([
     'I need to sell my property',

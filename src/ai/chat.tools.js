@@ -64,7 +64,7 @@ const TOOL_DEFINITIONS = [
     function: {
       name: 'search_content',
       description:
-        'Search Rocky website content (blogs, area guides, FAQs, services). Use for company, area, process, Golden Visa, costs, property management, and service questions. Do not use this for live listing prices or availability. After results, write 2–3 short sentences with the key fact only, then offer more details — never paste the full chunks.',
+        'Search Rocky website content (blogs, area guides, FAQs, services). Use for Golden Visa, flexi rent / flexible payment plans, buying costs, property management, process, eligibility, and any question that might be answered on our site. Do not use this for live listing prices or availability. After results, write MAXIMUM 2 short sentences with the single key fact only — never paste or expand the chunks.',
       parameters: {
         type: 'object',
         properties: {
@@ -1124,7 +1124,7 @@ function isGeneralKnowledgeQuery(text) {
     .toLowerCase();
   if (!raw) return false;
   if (isListingFollowUp(raw)) return false;
-  return /\b(golden\s+visa|visa|eligib|buying\s+costs?|cost\s+of\s+buying|cost\s+to\s+buy|transfer\s+fee|dld|mortgage|property\s+management|service\s+charge|rera|freehold|tell\s+me\s+about|what\s+is|what\s+are|how\s+do(?:es)?|explain)\b/.test(
+  return /\b(golden\s+visa|investor\s+visa|visa|eligib|buying\s+costs?|cost\s+of\s+buying|cost\s+to\s+buy|transfer\s+fee|dld|mortgage|property\s+management|service\s+charge|rera|freehold|flexi\s*rent|flexible\s+rent|payment\s+plan|payable\s+options?|installments?|roi|investment|tell\s+me\s+about|what\s+is|what\s+are|how\s+do(?:es)?|explain|need\s+to\s+know\s+about)\b/.test(
     raw
   );
 }
@@ -1942,6 +1942,14 @@ async function searchContent({ query }) {
     q
   );
 
+  const shortChunks = rows.map((row) => ({
+    sourceType: row.sourceType,
+    title: row.title,
+    url: row.url,
+    // Keep only a short excerpt so the model cannot dump a long blog into the reply.
+    content: String(row.content || '').replace(/\s+/g, ' ').trim().slice(0, 420),
+  }));
+
   return {
     propertyCards: [],
     sources: ranked,
@@ -1949,14 +1957,9 @@ async function searchContent({ query }) {
     profilePatch: {},
     modelPayload: {
       count: rows.length,
-      chunks: rows.map((row) => ({
-        sourceType: row.sourceType,
-        title: row.title,
-        url: row.url,
-        content: row.content,
-      })),
+      chunks: shortChunks,
       instruction:
-        'Answer in 2–3 short sentences only. Lead with the single most important fact from the chunks (e.g. Golden Visa: 10-year visa, commonly AED 2 million property investment). No bullet lists, no long recap of every chunk. Do not include URLs in the reply — related pages are attached separately as buttons. End with one question such as "Would you like more details?" or "Would you like to check the eligibility requirements?"',
+        'CRITICAL: Reply in AT MOST 2 short sentences (about 40 words total). Use only the key fact from the chunks (e.g. Golden Visa: commonly AED 2 million property investment for a 10-year visa; Flexi Rent: flexible payment options for tenants). Do NOT write "General guidance". Do NOT expand, lecture, or list every detail. No bullet lists. Do not include URLs — related pages are buttons. End with one short question such as "Would you like more details?"',
     },
   };
 }

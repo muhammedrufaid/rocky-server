@@ -14,6 +14,8 @@ test('general questions after a search must not reuse listing filters', () => {
     'golden visa eligibility',
     'what are the buying costs?',
     'tell me about property management',
+    'flexi rent',
+    'ok next need to know about flexi rent payable options',
   ];
   for (const phrase of general) {
     assert.equal(isGeneralKnowledgeQuery(phrase), true, phrase);
