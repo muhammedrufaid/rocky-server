@@ -56,6 +56,28 @@ const validateContent = (content) => {
   return null;
 };
 
+const validateFaqs = (faqs) => {
+  if (faqs === undefined) return null;
+  if (!Array.isArray(faqs)) {
+    return 'faqs must be an array';
+  }
+
+  for (let i = 0; i < faqs.length; i += 1) {
+    const faq = faqs[i];
+    if (!faq || typeof faq !== 'object' || Array.isArray(faq)) {
+      return `faqs[${i}] must be an object`;
+    }
+    if (typeof faq.question !== 'string' || !faq.question.trim()) {
+      return `faqs[${i}] must include a question string`;
+    }
+    if (typeof faq.answer !== 'string' || !faq.answer.trim()) {
+      return `faqs[${i}] must include an answer string`;
+    }
+  }
+
+  return null;
+};
+
 const normalizeSlug = (slug) => String(slug || '').trim().toLowerCase();
 
 const slugFromPath = (path) => {
@@ -78,6 +100,7 @@ const createBlog = async (req, res) => {
       path,
       isFeatured,
       content,
+      faqs,
       isActive,
     } = req.body;
 
@@ -111,6 +134,14 @@ const createBlog = async (req, res) => {
       });
     }
 
+    const faqsError = validateFaqs(faqs);
+    if (faqsError) {
+      return res.status(400).json({
+        success: false,
+        message: faqsError,
+      });
+    }
+
     const existingSlug = await Blog.findOne({ slug: resolvedSlug });
     if (existingSlug) {
       return res.status(400).json({
@@ -129,6 +160,7 @@ const createBlog = async (req, res) => {
       path: path || `/blogs/${resolvedSlug}`,
       isFeatured: isFeatured !== undefined ? isFeatured : false,
       content: content || [],
+      faqs: faqs || [],
       isActive: isActive !== undefined ? isActive : true,
     });
 
@@ -281,6 +313,7 @@ const updateBlog = async (req, res) => {
       'path',
       'isFeatured',
       'content',
+      'faqs',
       'isActive',
     ];
 
@@ -305,6 +338,14 @@ const updateBlog = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: contentError,
+      });
+    }
+
+    const faqsError = validateFaqs(updates.faqs);
+    if (faqsError) {
+      return res.status(400).json({
+        success: false,
+        message: faqsError,
       });
     }
 

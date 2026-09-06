@@ -17,6 +17,22 @@ const contentBlockSchema = new mongoose.Schema(
   { _id: false, strict: false }
 );
 
+const faqSchema = new mongoose.Schema(
+  {
+    question: {
+      type: String,
+      required: [true, 'FAQ question is required'],
+      trim: true,
+    },
+    answer: {
+      type: String,
+      required: [true, 'FAQ answer is required'],
+      trim: true,
+    },
+  },
+  { _id: false }
+);
+
 const blogSchema = new mongoose.Schema(
   {
     slug: {
@@ -61,6 +77,10 @@ const blogSchema = new mongoose.Schema(
     },
     content: {
       type: [contentBlockSchema],
+      default: [],
+    },
+    faqs: {
+      type: [faqSchema],
       default: [],
     },
     isActive: {
