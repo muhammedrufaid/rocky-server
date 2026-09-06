@@ -6,7 +6,6 @@ const ZAPIER_SOURCES = {
   PROPERTY_MANAGEMENT_LEAD: 'Property Management Lead',
   // JEWEL_TOWER_LEAD: 'Jewel Tower Lead',
   // CAREERS: 'Careers',
-  // DUBAI_SOUTH_LEAD: 'Dubai South Lead',
 };
 
 /**
