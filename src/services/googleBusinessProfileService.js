@@ -294,46 +294,141 @@ async function listBusinessAccounts() {
     pageToken = response.data.nextPageToken;
   } while (pageToken);
 
-  return accounts;
-}
-
-async function listBusinessLocations(accountName) {
-  if (!accountName) {
-    throw new Error('A Google Business Profile account name is required to list locations');
+  const v4 = await fetchMyBusinessV4Accounts(auth);
+  if (!v4.accounts.length) {
+    return accounts;
   }
 
-  const auth = await getAuthenticatedClient();
+  const byName = new Map();
+  for (const account of [...accounts, ...v4.accounts]) {
+    if (account?.name) byName.set(account.name, account);
+  }
+  return Array.from(byName.values());
+}
+
+async function fetchMyBusinessV4Accounts(auth) {
+  const accounts = [];
+  let pageToken;
+
+  try {
+    do {
+      const response = await auth.request({
+        url: 'https://mybusiness.googleapis.com/v4/accounts',
+        params: {
+          pageSize: 100,
+          ...(pageToken ? { pageToken } : {}),
+        },
+      });
+      accounts.push(
+        ...(response.data.accounts || []).map((account) => ({
+          name: account.name,
+          accountName: account.accountName || account.accountNumber || null,
+          type: account.type || null,
+        }))
+      );
+      pageToken = response.data.nextPageToken;
+    } while (pageToken);
+
+    return { accounts, error: null };
+  } catch (error) {
+    return {
+      accounts,
+      error: sanitizeGoogleApiError(error),
+    };
+  }
+}
+
+function sanitizeGoogleApiError(error) {
+  const status = error.response?.status || null;
+  const data = error.response?.data;
+  const googleMessage = data?.error?.message;
+  if (googleMessage) {
+    return {
+      status,
+      message: googleMessage,
+    };
+  }
+
+  const htmlBody = typeof data === 'string' ? data : '';
+  if (htmlBody.includes('<html') || htmlBody.includes('<!DOCTYPE html>')) {
+    return {
+      status,
+      message:
+        `Google returned HTTP ${status} HTML for this request. ` +
+        'This usually means the Google My Business API (mybusiness.googleapis.com) is not enabled on the OAuth Cloud project.',
+    };
+  }
+
+  return {
+    status,
+    message: error.message || 'Google Business Profile API request failed',
+  };
+}
+
+function toPublicLocation(location) {
+  if (!location) return null;
+  return {
+    name: location.name || null,
+    title: location.title || location.locationName || null,
+    storeCode: location.storeCode || null,
+    metadata: location.metadata
+      ? {
+          placeId: location.metadata.placeId || null,
+          mapsUri: location.metadata.mapsUri || null,
+          newReviewUri: location.metadata.newReviewUri || null,
+          canDelete: location.metadata.canDelete ?? null,
+          canHaveFoodMenus: location.metadata.canHaveFoodMenus ?? null,
+        }
+      : null,
+  };
+}
+
+async function fetchBusinessInformationLocations(auth, accountName) {
   const businessInformation = google.mybusinessbusinessinformation({
     version: 'v1',
     auth,
   });
 
   const locations = [];
+  const pages = [];
   let pageToken;
 
-  do {
-    const response = await businessInformation.accounts.locations.list({
-      parent: accountName,
-      readMask: 'name,title',
-      pageSize: 100,
-      pageToken,
-    });
-    locations.push(...(response.data.locations || []));
-    pageToken = response.data.nextPageToken;
-  } while (pageToken);
+  try {
+    do {
+      const response = await businessInformation.accounts.locations.list({
+        parent: accountName,
+        readMask: 'name,title,storeCode,metadata',
+        pageSize: 100,
+        pageToken,
+      });
+      const pageLocations = response.data.locations || [];
+      locations.push(...pageLocations);
+      pages.push({
+        api: 'mybusinessbusinessinformation.accounts.locations.list',
+        httpStatus: response.status,
+        locationCount: pageLocations.length,
+        responseKeys: Object.keys(response.data || {}),
+        nextPageToken: Boolean(response.data.nextPageToken),
+      });
+      pageToken = response.data.nextPageToken;
+    } while (pageToken);
 
-  if (locations.length) {
-    return locations;
+    return { locations, pages, error: null };
+  } catch (error) {
+    return {
+      locations,
+      pages,
+      error: sanitizeGoogleApiError(error),
+    };
   }
-
-  return listBusinessLocationsV4(auth, accountName);
 }
 
-async function listBusinessLocationsV4(auth, accountName) {
-  try {
-    const locations = [];
-    let pageToken;
+async function fetchMyBusinessV4Locations(auth, accountName) {
+  const locations = [];
+  const pages = [];
+  let pageToken;
 
+  try {
     do {
       const response = await auth.request({
         url: `https://mybusiness.googleapis.com/v4/${accountName}/locations`,
@@ -342,33 +437,196 @@ async function listBusinessLocationsV4(auth, accountName) {
           ...(pageToken ? { pageToken } : {}),
         },
       });
-      const page = response.data.locations || [];
+      const pageLocations = response.data.locations || [];
       locations.push(
-        ...page.map((location) => ({
+        ...pageLocations.map((location) => ({
           name: location.name,
           title: location.locationName || location.title || null,
+          storeCode: location.storeCode || location.storeInfo?.storeCode || null,
+          metadata: location.metadata || null,
         }))
       );
+      pages.push({
+        api: 'mybusiness.googleapis.com/v4/{account}/locations',
+        httpStatus: response.status,
+        locationCount: pageLocations.length,
+        responseKeys: Object.keys(response.data || {}),
+        nextPageToken: Boolean(response.data.nextPageToken),
+      });
       pageToken = response.data.nextPageToken;
     } while (pageToken);
 
-    return locations;
+    return { locations, pages, error: null };
   } catch (error) {
-    const status = error.response?.status;
-    if (status === 404) return [];
-    const message = error.response?.data?.error?.message || error.message;
+    return {
+      locations,
+      pages,
+      error: sanitizeGoogleApiError(error),
+    };
+  }
+}
+
+async function listBusinessLocations(accountName) {
+  if (!accountName) {
+    throw new Error('A Google Business Profile account name is required to list locations');
+  }
+
+  const auth = await getAuthenticatedClient();
+  const v1 = await fetchBusinessInformationLocations(auth, accountName);
+  if (v1.error) {
     throw new Error(
-      status
-        ? `Google locations API failed (${status}): ${message}`
-        : `Google locations API failed: ${message}`
+      v1.error.status
+        ? `Google locations API failed (${v1.error.status}): ${v1.error.message}`
+        : v1.error.message
     );
   }
+  if (v1.locations.length) {
+    return v1.locations;
+  }
+
+  const v4 = await fetchMyBusinessV4Locations(auth, accountName);
+  if (v4.error && v4.error.status !== 404) {
+    throw new Error(
+      v4.error.status
+        ? `Google locations API failed (${v4.error.status}): ${v4.error.message}`
+        : v4.error.message
+    );
+  }
+  return v4.locations;
+}
+
+function explainMissingLocations({ accounts, locationCount, accountDiagnostics }) {
+  if (accounts.length === 0) {
+    return 'Google returned no Business Profile accounts for this OAuth connection. Reconnect with a Google account that manages the company listing.';
+  }
+  if (locationCount > 0) return null;
+
+  const v4Disabled = accountDiagnostics.some(
+    (item) => item.myBusinessV4Api?.error?.status === 404
+  );
+  const personalOnly = accounts.every((account) => account.type === 'PERSONAL');
+  const reasons = [
+    'Google returned accounts, but no locations were attached to them.',
+  ];
+  if (personalOnly) {
+    reasons.push(
+      'Only a PERSONAL account was returned. Company listings usually appear under a LOCATION_GROUP or ORGANIZATION account that this Google user can manage.'
+    );
+  }
+  if (v4Disabled) {
+    reasons.push(
+      'Google My Business API v4 returned 404, so reviews/locations on mybusiness.googleapis.com are not available on this Cloud project yet.'
+    );
+  }
+  reasons.push(
+    'The connected Google user must be an owner or manager of the Google Business Profile listing, and My Business Account Management API plus My Business Business Information API must be enabled.'
+  );
+  return reasons.join(' ');
+}
+
+async function inspectGoogleBusinessProfiles() {
+  const connection = await getSafeConnectionStatus();
+  if (!connection.connected) {
+    return {
+      connected: false,
+      success: false,
+      accounts: [],
+      locations: [],
+      message:
+        'Google Business Profile is not connected. Complete GET /auth/google before listing accounts and locations.',
+      diagnostics: null,
+    };
+  }
+
+  const accounts = await listBusinessAccounts();
+  const auth = await getAuthenticatedClient();
+  const accountDiagnostics = [];
+  const publicAccounts = [];
+  const publicLocations = [];
+
+  for (const account of accounts) {
+    const v1 = await fetchBusinessInformationLocations(auth, account.name);
+    const v4 =
+      v1.locations.length || v1.error
+        ? { locations: [], pages: [], error: null }
+        : await fetchMyBusinessV4Locations(auth, account.name);
+
+    const locations = v1.locations.length ? v1.locations : v4.locations;
+
+    publicAccounts.push({
+      name: account.name || null,
+      title: account.accountName || null,
+      type: account.type || null,
+    });
+
+    for (const location of locations) {
+      const publicLocation = toPublicLocation(location);
+      if (!publicLocation) continue;
+      publicLocations.push({
+        name: publicLocation.name,
+        title: publicLocation.title,
+        accountName: account.name || null,
+        storeCode: publicLocation.storeCode,
+        metadata: publicLocation.metadata,
+      });
+    }
+
+    accountDiagnostics.push({
+      account: account.name,
+      businessInformationApi: v1.error
+        ? { error: v1.error, pages: v1.pages }
+        : { error: null, pages: v1.pages, locationCount: v1.locations.length },
+      myBusinessV4Api: v1.locations.length
+        ? { skipped: true, reason: 'Business Information API already returned locations' }
+        : v4.error
+          ? { error: v4.error, pages: v4.pages }
+          : { error: null, pages: v4.pages, locationCount: v4.locations.length },
+    });
+  }
+
+  const locationCount = publicLocations.length;
+  const zeroLocationMessage =
+    'The connected Google account does not currently have access to any Google Business Profile locations.';
+
+  return {
+    connected: true,
+    success: true,
+    accounts: publicAccounts,
+    locations: publicLocations,
+    message:
+      locationCount === 0
+        ? zeroLocationMessage
+        : `Google returned ${publicAccounts.length} account(s) and ${locationCount} location(s).`,
+    diagnostics: {
+      accountCount: publicAccounts.length,
+      locationCount,
+      google: accountDiagnostics,
+      explanation: explainMissingLocations({
+        accounts,
+        locationCount,
+        accountDiagnostics,
+      }),
+    },
+  };
+}
+
+function resourceNamesMatch(itemName, configuredName) {
+  if (!itemName || !configuredName) return false;
+  if (itemName === configuredName) return true;
+
+  const itemParts = String(itemName).split('/').filter(Boolean);
+  const configuredParts = String(configuredName).split('/').filter(Boolean);
+  const itemTail = itemParts.slice(-2).join('/');
+  const configuredTail = configuredParts.slice(-2).join('/');
+  if (itemTail && configuredTail && itemTail === configuredTail) return true;
+
+  return itemParts.pop() === configuredParts.pop();
 }
 
 function pickConfiguredResource(items, configuredName, resourceLabel, summarize) {
   if (!configuredName) return null;
 
-  const match = items.find((item) => item?.name === configuredName);
+  const match = items.find((item) => resourceNamesMatch(item?.name, configuredName));
   if (match) return match;
 
   const summaries = items.map(summarize);
@@ -383,8 +641,8 @@ function pickConfiguredResource(items, configuredName, resourceLabel, summarize)
 function requireSingleResource(items, resourceLabel, summarize) {
   if (!items.length) {
     throw new Error(
-      `No Google Business Profile ${resourceLabel}s were found for this connection. ` +
-        'Confirm the connected Google account manages the listing, and that the My Business Account Management API, My Business Business Information API, and Google My Business API are enabled.'
+      `Google returned no Business Profile ${resourceLabel}s for this OAuth connection. ` +
+        'Reconnect with a Google account that manages the company listing. Do not invent resource names.'
     );
   }
 
@@ -393,8 +651,8 @@ function requireSingleResource(items, resourceLabel, summarize) {
   const summaries = items.map(summarize);
   console.warn(`[google-business-profile] Multiple ${resourceLabel}s found:`, summaries);
   throw new Error(
-    `Multiple Google Business Profile ${resourceLabel}s were found. ` +
-      `Set GOOGLE_BUSINESS_${resourceLabel.toUpperCase()}_NAME to one of: ` +
+    `Google returned multiple Business Profile ${resourceLabel}s. ` +
+      'Do not auto-select. Available names: ' +
       summaries.map((item) => item.name).filter(Boolean).join(', ')
   );
 }
@@ -406,18 +664,22 @@ async function getGoogleBusinessLocation() {
     pickConfiguredResource(accounts, configuredAccountName, 'account', summarizeAccount) ||
     requireSingleResource(accounts, 'account', summarizeAccount);
 
+  console.log('[google-reviews] Found account:', account.name);
+
   const locations = await listBusinessLocations(account.name);
   const configuredLocationName = (process.env.GOOGLE_BUSINESS_LOCATION_NAME || '').trim();
   const location =
     pickConfiguredResource(locations, configuredLocationName, 'location', summarizeLocation) ||
     requireSingleResource(locations, 'location', summarizeLocation);
 
+  console.log('[google-reviews] Found location:', location.name);
+
   return {
     account,
     location,
     accountName: account.name,
     locationName: location.name,
-    locationTitle: location.title || null,
+    locationTitle: location.title || location.locationName || null,
   };
 }
 
@@ -475,6 +737,7 @@ module.exports = {
   listBusinessAccounts,
   listBusinessLocations,
   getGoogleBusinessLocation,
+  inspectGoogleBusinessProfiles,
   hydrateAccountMetadata,
   getSafeConnectionStatus,
 };

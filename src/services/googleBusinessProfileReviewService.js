@@ -150,10 +150,8 @@ async function syncGoogleBusinessProfileReviews() {
     };
   }
 
-  console.log('[google-reviews] Sync started');
+  console.log('[google-reviews] Starting review sync...');
   const { accountName, locationName, locationTitle, reviews } = await getGoogleReviews();
-  console.log('[google-reviews] Account resolved', accountName);
-  console.log('[google-reviews] Location resolved', locationTitle || locationName);
   console.log('[google-reviews] Reviews fetched:', reviews.length);
 
   const fetchedAt = new Date();
