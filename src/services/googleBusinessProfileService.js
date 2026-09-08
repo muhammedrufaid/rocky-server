@@ -256,14 +256,169 @@ async function refreshStoredAccessToken() {
   };
 }
 
+function summarizeAccount(account) {
+  return {
+    name: account?.name || null,
+    accountName: account?.accountName || null,
+    type: account?.type || null,
+  };
+}
+
+function summarizeLocation(location) {
+  return {
+    name: location?.name || null,
+    title: location?.title || null,
+  };
+}
+
 async function listAccounts() {
+  return listBusinessAccounts();
+}
+
+async function listBusinessAccounts() {
   const auth = await getAuthenticatedClient();
   const accountManagement = google.mybusinessaccountmanagement({
     version: 'v1',
     auth,
   });
-  const response = await accountManagement.accounts.list();
-  return response.data.accounts || [];
+
+  const accounts = [];
+  let pageToken;
+
+  do {
+    const response = await accountManagement.accounts.list({
+      pageSize: 20,
+      pageToken,
+    });
+    accounts.push(...(response.data.accounts || []));
+    pageToken = response.data.nextPageToken;
+  } while (pageToken);
+
+  return accounts;
+}
+
+async function listBusinessLocations(accountName) {
+  if (!accountName) {
+    throw new Error('A Google Business Profile account name is required to list locations');
+  }
+
+  const auth = await getAuthenticatedClient();
+  const businessInformation = google.mybusinessbusinessinformation({
+    version: 'v1',
+    auth,
+  });
+
+  const locations = [];
+  let pageToken;
+
+  do {
+    const response = await businessInformation.accounts.locations.list({
+      parent: accountName,
+      readMask: 'name,title',
+      pageSize: 100,
+      pageToken,
+    });
+    locations.push(...(response.data.locations || []));
+    pageToken = response.data.nextPageToken;
+  } while (pageToken);
+
+  if (locations.length) {
+    return locations;
+  }
+
+  return listBusinessLocationsV4(auth, accountName);
+}
+
+async function listBusinessLocationsV4(auth, accountName) {
+  try {
+    const locations = [];
+    let pageToken;
+
+    do {
+      const response = await auth.request({
+        url: `https://mybusiness.googleapis.com/v4/${accountName}/locations`,
+        params: {
+          pageSize: 100,
+          ...(pageToken ? { pageToken } : {}),
+        },
+      });
+      const page = response.data.locations || [];
+      locations.push(
+        ...page.map((location) => ({
+          name: location.name,
+          title: location.locationName || location.title || null,
+        }))
+      );
+      pageToken = response.data.nextPageToken;
+    } while (pageToken);
+
+    return locations;
+  } catch (error) {
+    const status = error.response?.status;
+    if (status === 404) return [];
+    const message = error.response?.data?.error?.message || error.message;
+    throw new Error(
+      status
+        ? `Google locations API failed (${status}): ${message}`
+        : `Google locations API failed: ${message}`
+    );
+  }
+}
+
+function pickConfiguredResource(items, configuredName, resourceLabel, summarize) {
+  if (!configuredName) return null;
+
+  const match = items.find((item) => item?.name === configuredName);
+  if (match) return match;
+
+  const summaries = items.map(summarize);
+  console.warn(`[google-business-profile] Configured ${resourceLabel} not found:`, configuredName);
+  console.warn(`[google-business-profile] Available ${resourceLabel}s:`, summaries);
+  throw new Error(
+    `Configured Google Business Profile ${resourceLabel} "${configuredName}" was not found. ` +
+      `Available: ${summaries.map((item) => item.name).filter(Boolean).join(', ') || '(none)'}`
+  );
+}
+
+function requireSingleResource(items, resourceLabel, summarize) {
+  if (!items.length) {
+    throw new Error(
+      `No Google Business Profile ${resourceLabel}s were found for this connection. ` +
+        'Confirm the connected Google account manages the listing, and that the My Business Account Management API, My Business Business Information API, and Google My Business API are enabled.'
+    );
+  }
+
+  if (items.length === 1) return items[0];
+
+  const summaries = items.map(summarize);
+  console.warn(`[google-business-profile] Multiple ${resourceLabel}s found:`, summaries);
+  throw new Error(
+    `Multiple Google Business Profile ${resourceLabel}s were found. ` +
+      `Set GOOGLE_BUSINESS_${resourceLabel.toUpperCase()}_NAME to one of: ` +
+      summaries.map((item) => item.name).filter(Boolean).join(', ')
+  );
+}
+
+async function getGoogleBusinessLocation() {
+  const accounts = await listBusinessAccounts();
+  const configuredAccountName = (process.env.GOOGLE_BUSINESS_ACCOUNT_NAME || '').trim();
+  const account =
+    pickConfiguredResource(accounts, configuredAccountName, 'account', summarizeAccount) ||
+    requireSingleResource(accounts, 'account', summarizeAccount);
+
+  const locations = await listBusinessLocations(account.name);
+  const configuredLocationName = (process.env.GOOGLE_BUSINESS_LOCATION_NAME || '').trim();
+  const location =
+    pickConfiguredResource(locations, configuredLocationName, 'location', summarizeLocation) ||
+    requireSingleResource(locations, 'location', summarizeLocation);
+
+  return {
+    account,
+    location,
+    accountName: account.name,
+    locationName: location.name,
+    locationTitle: location.title || null,
+  };
 }
 
 async function hydrateAccountMetadata() {
@@ -317,6 +472,9 @@ module.exports = {
   getAuthenticatedClient,
   refreshStoredAccessToken,
   listAccounts,
+  listBusinessAccounts,
+  listBusinessLocations,
+  getGoogleBusinessLocation,
   hydrateAccountMetadata,
   getSafeConnectionStatus,
 };
