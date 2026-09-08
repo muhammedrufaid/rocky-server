@@ -78,6 +78,26 @@ const validateFaqs = (faqs) => {
   return null;
 };
 
+const validateKeywords = (keywords) => {
+  if (keywords === undefined) return null;
+  if (!Array.isArray(keywords)) {
+    return 'keywords must be an array';
+  }
+
+  for (let i = 0; i < keywords.length; i += 1) {
+    if (typeof keywords[i] !== 'string' || !keywords[i].trim()) {
+      return `keywords[${i}] must be a non-empty string`;
+    }
+  }
+
+  return null;
+};
+
+const normalizeKeywords = (keywords) =>
+  Array.isArray(keywords)
+    ? keywords.map((keyword) => String(keyword).trim()).filter(Boolean)
+    : [];
+
 const normalizeSlug = (slug) => String(slug || '').trim().toLowerCase();
 
 const slugFromPath = (path) => {
@@ -101,6 +121,7 @@ const createBlog = async (req, res) => {
       isFeatured,
       content,
       faqs,
+      keywords,
       isActive,
     } = req.body;
 
@@ -142,6 +163,14 @@ const createBlog = async (req, res) => {
       });
     }
 
+    const keywordsError = validateKeywords(keywords);
+    if (keywordsError) {
+      return res.status(400).json({
+        success: false,
+        message: keywordsError,
+      });
+    }
+
     const existingSlug = await Blog.findOne({ slug: resolvedSlug });
     if (existingSlug) {
       return res.status(400).json({
@@ -161,6 +190,7 @@ const createBlog = async (req, res) => {
       isFeatured: isFeatured !== undefined ? isFeatured : false,
       content: content || [],
       faqs: faqs || [],
+      keywords: normalizeKeywords(keywords),
       isActive: isActive !== undefined ? isActive : true,
     });
 
@@ -314,6 +344,7 @@ const updateBlog = async (req, res) => {
       'isFeatured',
       'content',
       'faqs',
+      'keywords',
       'isActive',
     ];
 
@@ -347,6 +378,18 @@ const updateBlog = async (req, res) => {
         success: false,
         message: faqsError,
       });
+    }
+
+    const keywordsError = validateKeywords(updates.keywords);
+    if (keywordsError) {
+      return res.status(400).json({
+        success: false,
+        message: keywordsError,
+      });
+    }
+
+    if (updates.keywords !== undefined) {
+      updates.keywords = normalizeKeywords(updates.keywords);
     }
 
     if (updates.slug) {

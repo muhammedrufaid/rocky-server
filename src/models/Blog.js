@@ -83,6 +83,10 @@ const blogSchema = new mongoose.Schema(
       type: [faqSchema],
       default: [],
     },
+    keywords: {
+      type: [String],
+      default: [],
+    },
     isActive: {
       type: Boolean,
       default: true,
