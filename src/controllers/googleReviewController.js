@@ -1,5 +1,6 @@
 const { parsePaginationParams } = require('../utils/paginationUtils');
 const { listStoredGoogleReviews } = require('../services/googleBusinessProfileReviewService');
+const { inspectGoogleBusinessProfiles } = require('../services/googleBusinessProfileService');
 
 function toPublicReview(review) {
   return {
@@ -60,6 +61,28 @@ const getGoogleBusinessProfileReviews = async (req, res) => {
   }
 };
 
+// GET /api/reviews/google/business-profiles
+const getGoogleBusinessProfiles = async (req, res) => {
+  try {
+    const result = await inspectGoogleBusinessProfiles();
+    const status = result.connected ? 200 : 409;
+    return res.status(status).json({
+      success: Boolean(result.success),
+      accounts: result.accounts,
+      locations: result.locations,
+      message: result.message,
+      diagnostics: result.diagnostics,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to list Google Business Profile accounts and locations',
+      accounts: [],
+    });
+  }
+};
+
 module.exports = {
   getGoogleBusinessProfileReviews,
+  getGoogleBusinessProfiles,
 };
