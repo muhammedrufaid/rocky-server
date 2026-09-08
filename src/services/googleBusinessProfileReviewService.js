@@ -6,6 +6,7 @@ const {
 } = require('./googleBusinessProfileService');
 
 const REVIEWS_PAGE_SIZE = 50;
+const FIVE_STAR_RATING = 5;
 const STAR_RATING_MAP = {
   ONE: 1,
   TWO: 2,
@@ -122,18 +123,27 @@ async function getGoogleReviews() {
     pageToken = data.nextPageToken;
   } while (pageToken);
 
+  const normalized = reviews
+    .map((review) =>
+      normalizeGoogleReview(review, {
+        accountName: resolved.accountName,
+        locationName: resolved.locationName,
+      })
+    )
+    .filter(Boolean);
+
+  const fiveStarReviews = normalized.filter((review) => review.starRating === FIVE_STAR_RATING);
+  const discardedReviewIds = normalized
+    .filter((review) => review.starRating !== FIVE_STAR_RATING)
+    .map((review) => review.googleReviewId);
+
   return {
     accountName: resolved.accountName,
     locationName: resolved.locationName,
     locationTitle: resolved.locationTitle,
-    reviews: reviews
-      .map((review) =>
-        normalizeGoogleReview(review, {
-          accountName: resolved.accountName,
-          locationName: resolved.locationName,
-        })
-      )
-      .filter(Boolean),
+    fetchedTotal: normalized.length,
+    reviews: fiveStarReviews,
+    discardedReviewIds,
   };
 }
 
@@ -144,15 +154,29 @@ async function syncGoogleBusinessProfileReviews() {
       skipped: true,
       reason: 'Google Business Profile is not connected',
       fetched: 0,
+      fiveStar: 0,
       inserted: 0,
       updated: 0,
       unchanged: 0,
+      removed: 0,
     };
   }
 
   console.log('[google-reviews] Starting review sync...');
-  const { accountName, locationName, locationTitle, reviews } = await getGoogleReviews();
-  console.log('[google-reviews] Reviews fetched:', reviews.length);
+  const { reviews, fetchedTotal, discardedReviewIds } = await getGoogleReviews();
+  console.log('[google-reviews] Reviews fetched:', fetchedTotal);
+  console.log('[google-reviews] 5-star reviews kept:', reviews.length);
+
+  const removedBelowFive = await GoogleBusinessProfileReview.deleteMany({
+    $or: [
+      { starRating: { $ne: FIVE_STAR_RATING } },
+      { starRating: null },
+      { googleReviewId: { $in: discardedReviewIds } },
+    ],
+  });
+  if (removedBelowFive.deletedCount) {
+    console.log('[google-reviews] Removed non-5-star reviews:', removedBelowFive.deletedCount);
+  }
 
   const fetchedAt = new Date();
   const reviewIds = reviews.map((review) => review.googleReviewId);
@@ -202,24 +226,23 @@ async function syncGoogleBusinessProfileReviews() {
 
   const stats = {
     skipped: false,
-    fetched: reviews.length,
+    fetched: fetchedTotal,
+    fiveStar: reviews.length,
     inserted,
     updated,
     unchanged,
+    removed: removedBelowFive.deletedCount || 0,
   };
 
   console.log(
-    `[google-reviews] Sync finished: inserted=${inserted} updated=${updated} unchanged=${unchanged}`
+    `[google-reviews] Sync finished: inserted=${inserted} updated=${updated} unchanged=${unchanged} removed=${stats.removed}`
   );
 
   return stats;
 }
 
-async function listStoredGoogleReviews({ page = 1, limit = 20, rating } = {}) {
-  const filter = {};
-  if (rating !== undefined) {
-    filter.starRating = rating;
-  }
+async function listStoredGoogleReviews({ page = 1, limit = 20 } = {}) {
+  const filter = { starRating: FIVE_STAR_RATING };
 
   const skip = (page - 1) * limit;
   const [total, reviews] = await Promise.all([
