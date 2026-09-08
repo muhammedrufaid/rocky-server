@@ -23,8 +23,10 @@ const teamMemberRoutes = require('./routes/teamMemberRoutes');
 const companyInfoRoutes = require('./routes/companyInfo.routes');
 const chatRoutes = require('./ai/chat.routes');
 const googleBusinessProfileAuthRoutes = require('./routes/googleBusinessProfileAuthRoutes');
+const googleReviewRoutes = require('./routes/googleReviewRoutes');
 const { startSalesforceMigrateScheduler } = require('./jobs/salesforceMigrateScheduler');
 const { startTeamTailorSyncScheduler } = require('./jobs/teamtailorSyncScheduler');
+const { startGoogleReviewsSyncScheduler } = require('./jobs/googleReviewsSyncScheduler');
 const { requireApiKey } = require('./middleware/apiKeyMiddleware');
 
 const app = express();
@@ -77,6 +79,7 @@ app.use('/api/blogs', blogRoutes);
 app.use('/api/team-members', teamMemberRoutes);
 app.use('/api/company-info', companyInfoRoutes);
 app.use('/api/chat', chatRoutes);
+app.use('/api/reviews', googleReviewRoutes);
 
 // Google Business Profile OAuth (company integration, not website login).
 // Must stay outside /api so the shared API key middleware does not block Google's redirect.
@@ -102,6 +105,7 @@ const bootstrap = async () => {
   await connectDB();
   startSalesforceMigrateScheduler();
   startTeamTailorSyncScheduler();
+  startGoogleReviewsSyncScheduler();
 
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
