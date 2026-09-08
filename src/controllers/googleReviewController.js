@@ -4,31 +4,14 @@ const { inspectGoogleBusinessProfiles } = require('../services/googleBusinessPro
 
 function toPublicReview(review) {
   return {
-    id: review.googleReviewId,
-    reviewerName: review.reviewerName,
-    reviewerPhotoUrl: review.reviewerPhotoUrl,
+    _id: review._id,
     starRating: review.starRating,
+    reviewerName: review.reviewerName,
     comment: review.comment,
-    createTime: review.createTime,
-    updateTime: review.updateTime,
-    reviewReply: review.reviewReply,
   };
 }
 
-function parseRatingFilter(value) {
-  if (value === undefined || value === null || value === '') return undefined;
-
-  const rating = Number(value);
-  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
-    const error = new Error('rating must be an integer between 1 and 5');
-    error.statusCode = 400;
-    throw error;
-  }
-
-  return rating;
-}
-
-// GET /api/reviews/google
+// GET /api/reviews/google — 5-star reviews only
 const getGoogleBusinessProfileReviews = async (req, res) => {
   try {
     if (req.query.accountId || req.query.locationId || req.query.accountName || req.query.locationName) {
@@ -39,8 +22,7 @@ const getGoogleBusinessProfileReviews = async (req, res) => {
     }
 
     const { page, limit } = parsePaginationParams(req, { defaultLimit: 20 });
-    const rating = parseRatingFilter(req.query.rating);
-    const result = await listStoredGoogleReviews({ page, limit, rating });
+    const result = await listStoredGoogleReviews({ page, limit, rating: 5 });
 
     return res.status(200).json({
       success: true,
