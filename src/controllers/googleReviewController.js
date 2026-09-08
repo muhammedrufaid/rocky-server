@@ -22,7 +22,7 @@ const getGoogleBusinessProfileReviews = async (req, res) => {
     }
 
     const { page, limit } = parsePaginationParams(req, { defaultLimit: 20 });
-    const result = await listStoredGoogleReviews({ page, limit, rating: 5 });
+    const result = await listStoredGoogleReviews({ page, limit });
 
     return res.status(200).json({
       success: true,
