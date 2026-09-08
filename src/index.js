@@ -22,6 +22,7 @@ const blogRoutes = require('./routes/blogRoutes');
 const teamMemberRoutes = require('./routes/teamMemberRoutes');
 const companyInfoRoutes = require('./routes/companyInfo.routes');
 const chatRoutes = require('./ai/chat.routes');
+const googleBusinessProfileAuthRoutes = require('./routes/googleBusinessProfileAuthRoutes');
 const { startSalesforceMigrateScheduler } = require('./jobs/salesforceMigrateScheduler');
 const { startTeamTailorSyncScheduler } = require('./jobs/teamtailorSyncScheduler');
 const { requireApiKey } = require('./middleware/apiKeyMiddleware');
@@ -76,7 +77,11 @@ app.use('/api/blogs', blogRoutes);
 app.use('/api/team-members', teamMemberRoutes);
 app.use('/api/company-info', companyInfoRoutes);
 app.use('/api/chat', chatRoutes);
- 
+
+// Google Business Profile OAuth (company integration, not website login).
+// Must stay outside /api so the shared API key middleware does not block Google's redirect.
+app.use('/auth/google', googleBusinessProfileAuthRoutes);
+
 // Error handler (e.g. Multer/Cloudinary errors)
 app.use((err, req, res, next) => {
   if (!err) return next();
