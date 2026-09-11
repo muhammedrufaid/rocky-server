@@ -28,6 +28,7 @@ const conversationSchema = new mongoose.Schema(
       },
       bedrooms: { type: Number, default: null },
       purpose: { type: String, default: null, trim: true },
+      intent: { type: String, default: null, trim: true },
       lastPropertyCards: {
         type: [
           {
@@ -53,6 +54,7 @@ const conversationSchema = new mongoose.Schema(
         budgetMax: { type: Number, default: null },
         type: { type: String, default: null, trim: true },
         purpose: { type: String, default: null, trim: true },
+        furnished: { type: String, default: null, trim: true },
       },
       slotFlow: {
         awaiting: { type: String, default: null, trim: true },
@@ -64,15 +66,19 @@ const conversationSchema = new mongoose.Schema(
         location: { type: String, default: null, trim: true },
         bedrooms: { type: Number, default: null },
         priceNote: { type: String, default: null, trim: true },
+        occupancy: { type: String, default: null, trim: true },
         name: { type: String, default: null, trim: true },
         phone: { type: String, default: null, trim: true },
         email: { type: String, default: null, trim: true },
       },
       serviceInquiry: {
         intent: { type: String, default: null, trim: true },
+        need: { type: String, default: null, trim: true },
         locationScope: { type: String, default: null, trim: true },
         referenceLocation: { type: String, default: null, trim: true },
         propertyNote: { type: String, default: null, trim: true },
+        propertyType: { type: String, default: null, trim: true },
+        bedrooms: { type: Number, default: null },
         name: { type: String, default: null, trim: true },
         email: { type: String, default: null, trim: true },
         phone: { type: String, default: null, trim: true },

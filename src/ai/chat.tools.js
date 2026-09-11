@@ -244,6 +244,117 @@ const PURPOSE_OPTIONS = ['Buy', 'Rent', 'Off-plan'];
 const PURPOSE_SELECT = 'single';
 const BEDROOM_OPTIONS = ['Studio', '1 BR', '2 BR', '3 BR', '4+ BR', 'Any'];
 const SELL_OPTIONS = ['Get a valuation', 'Talk to an agent'];
+const SELL_TYPE_OPTIONS = ['Apartment', 'Villa', 'Townhouse', 'Penthouse'];
+const PM_NEED_OPTIONS = [
+  'Full property management',
+  'Tenant management',
+  'Rent collection',
+  'Maintenance',
+  'Inspections',
+];
+
+const CONVERSATION_INTENTS = {
+  BUY: 'BUY',
+  RENT: 'RENT',
+  OFF_PLAN: 'OFF_PLAN',
+  SELL_PROPERTY: 'SELL_PROPERTY',
+  PROPERTY_MANAGEMENT: 'PROPERTY_MANAGEMENT',
+};
+
+const LISTING_INTENTS = new Set([
+  CONVERSATION_INTENTS.BUY,
+  CONVERSATION_INTENTS.RENT,
+  CONVERSATION_INTENTS.OFF_PLAN,
+]);
+
+function emptySearchFilters() {
+  return {
+    location: null,
+    bedrooms: null,
+    bedroomsMin: null,
+    bedroomsAny: false,
+    bedroomsResolved: false,
+    budgetMin: null,
+    budgetMax: null,
+    type: null,
+    purpose: null,
+    furnished: null,
+  };
+}
+
+function copySearchFilters(filters = {}) {
+  return {
+    location: filters.location || null,
+    bedrooms: filters.bedrooms ?? null,
+    bedroomsMin: filters.bedroomsMin ?? null,
+    bedroomsAny: !!filters.bedroomsAny,
+    bedroomsResolved: !!filters.bedroomsResolved,
+    budgetMin: filters.budgetMin ?? null,
+    budgetMax: filters.budgetMax ?? null,
+    type: filters.type || null,
+    purpose: filters.purpose || null,
+    furnished: filters.furnished || null,
+  };
+}
+
+function purposeToIntent(purpose) {
+  const p = normalizePurpose(purpose);
+  if (p === 'Buy') return CONVERSATION_INTENTS.BUY;
+  if (p === 'Rent') return CONVERSATION_INTENTS.RENT;
+  if (p === 'Off-plan') return CONVERSATION_INTENTS.OFF_PLAN;
+  return null;
+}
+
+function intentToPurpose(intent) {
+  if (intent === CONVERSATION_INTENTS.BUY) return 'Buy';
+  if (intent === CONVERSATION_INTENTS.RENT) return 'Rent';
+  if (intent === CONVERSATION_INTENTS.OFF_PLAN) return 'Off-plan';
+  return null;
+}
+
+function isListingIntent(intent) {
+  return LISTING_INTENTS.has(intent);
+}
+
+function normalizeIntentValue(value) {
+  const raw = String(value || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, '_');
+  if (!raw) return null;
+  if (raw === 'BUY' || raw === 'PURCHASE' || raw === 'SALE') return CONVERSATION_INTENTS.BUY;
+  if (raw === 'RENT' || raw === 'RENTAL' || raw === 'LEASE') return CONVERSATION_INTENTS.RENT;
+  if (raw === 'OFF_PLAN' || raw === 'OFFPLAN') return CONVERSATION_INTENTS.OFF_PLAN;
+  if (raw === 'SELL_PROPERTY' || raw === 'SELL' || raw === 'SELLING') {
+    return CONVERSATION_INTENTS.SELL_PROPERTY;
+  }
+  if (
+    raw === 'PROPERTY_MANAGEMENT' ||
+    raw === 'PROPERTYMANAGEMENT' ||
+    raw === 'PM' ||
+    raw === 'MANAGEMENT'
+  ) {
+    return CONVERSATION_INTENTS.PROPERTY_MANAGEMENT;
+  }
+  return CONVERSATION_INTENTS[raw] || null;
+}
+
+function isExplicitIntentStarter(text) {
+  const raw = String(text || '')
+    .trim()
+    .replace(/[.!?]/g, '');
+  if (!raw) return false;
+  if (/^(buy a property|buy property|i want to buy a property)$/i.test(raw)) return true;
+  if (/^(rent a property|rent property|i want to rent a property)$/i.test(raw)) return true;
+  if (/^(off[-\s]?plan|off[-\s]?plan properties)$/i.test(raw)) return true;
+  if (/^(sell my property|sell property|i want to sell my property)$/i.test(raw)) return true;
+  if (/^property management$/i.test(raw)) return true;
+  return false;
+}
+
+function isPurposeChipReply(text) {
+  return /^(buy|rent|off[-\s]?plan)$/i.test(String(text || '').trim());
+}
 
 function normalizePurpose(value) {
   const v = String(value || '')
@@ -282,6 +393,9 @@ function parseSellIntent(text) {
   if (/\b(i\s+(need|want|have|'d like|would like)\s+to\s+sell|sell(ing)?\s+(my|our)|list(ing)?\s+(my|our)|market\s+(my|our))\b/.test(raw)) {
     return true;
   }
+  if (/\b(apartment|villa|townhouse|penthouse|property|home|house|flat)\b.{0,40}\b(i\s+want\s+to\s+sell|to\s+sell|for\s+sale)\b/.test(raw)) {
+    return true;
+  }
   if (/\b(sell|selling|list|listing)\b.{0,24}\b(property|properties|home|house|villa|apartment|flat|townhouse)\b/.test(raw)) {
     return true;
   }
@@ -302,6 +416,7 @@ function emptySellListing() {
     location: null,
     bedrooms: null,
     priceNote: null,
+    occupancy: null,
     name: null,
     phone: null,
     email: null,
@@ -315,6 +430,7 @@ function copySellListing(listing = {}) {
     location: listing.location || null,
     bedrooms: listing.bedrooms ?? null,
     priceNote: listing.priceNote || null,
+    occupancy: listing.occupancy || null,
     name: listing.name || null,
     phone: listing.phone || null,
     email: listing.email || null,
@@ -408,6 +524,7 @@ function persistSellListing(current = {}, lastSearchFilters = {}, history = []) 
     location: prior.location || null,
     bedrooms: prior.bedrooms ?? null,
     priceNote: prior.priceNote || null,
+    occupancy: prior.occupancy || null,
     name: prior.name || fromHistory.name || null,
     phone: prior.phone || fromHistory.phone || null,
     email: prior.email || fromHistory.email || null,
@@ -428,6 +545,7 @@ function advanceSellListing(message, current = {}, history = [], lastSearchFilte
   listing.email = contact.email || seeded.email;
   listing.type = listing.type || seeded.type;
   listing.location = listing.location || seeded.location;
+  listing.occupancy = listing.occupancy || seeded.occupancy;
   return listing;
 }
 
@@ -507,7 +625,7 @@ function parseSellLocation(text) {
 
 function parseSellPriceNote(text) {
   const raw = String(text || '').toLowerCase();
-  if (/\b(discuss|on\s+the\s+call|in\s+(a\s+)?call|later|negotiable|tbd|not\s+sure)\b/.test(raw)) {
+  if (/\b(discuss|on\s+the\s+call|in\s+(a\s+)?call|later|negotiable|tbd|not\s+sure|skip|unsure)\b/.test(raw)) {
     return 'discuss';
   }
   const budget = parseBudgetFromMessage(text);
@@ -515,16 +633,33 @@ function parseSellPriceNote(text) {
   return null;
 }
 
+function parseOccupancyFromMessage(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  if (!raw) return null;
+  if (/^(not sure|unsure|skip|n\/?a|any|doesn'?t matter)$/i.test(raw)) return 'unknown';
+  if (/\bvacant\b|\bempty\b|\bunoccupied\b/.test(raw)) return 'vacant';
+  if (/\btenanted\b|\brented\s+out\b|\bwith\s+(a\s+)?tenant\b|\binvestor\b/.test(raw)) return 'tenanted';
+  if (/\bowner[-\s]?occupied\b|\bi\s+live\s+(in|there)\b|\bwe\s+live\s+(in|there)\b/.test(raw)) {
+    return 'owner-occupied';
+  }
+  return null;
+}
+
 function parseSellListingDetails(text, current = {}) {
   const type = parseDesiredPropertyType(text) || normalizePropertyType(text) || current.type || null;
   const location = parseSellLocation(text) || current.location || null;
   const priceNote = parseSellPriceNote(text) || current.priceNote || null;
+  const occupancy = parseOccupancyFromMessage(text) || current.occupancy || null;
   const beds = parseBedroomChoice(text);
   const next = {
     ...current,
     type,
     location,
     priceNote,
+    occupancy,
     purpose: null,
   };
   if (beds && !beds.any && String(text || '').length < 80) {
@@ -534,12 +669,22 @@ function parseSellListingDetails(text, current = {}) {
   return next;
 }
 
-/** Show valuation/agent chips once type+area are known, until a CTA is chosen. */
+function hasSellBedrooms(details = {}) {
+  return details.bedrooms != null || details.bedroomsMin != null;
+}
+
+function sellReadyForCta(details = {}) {
+  return !!(details.type && details.location && hasSellBedrooms(details) && details.priceNote && details.occupancy);
+}
+
+/** Progressive chips: type → bedrooms → occupancy → valuation/agent. */
 function sellFlowOptions(details = {}, message = '') {
-  const hasProperty = !!(details.type && details.location);
-  if (!hasProperty) return null;
-  // CTA / "already shared" → collecting contact or done; don't repeat chips this turn.
   if (isSellCta(message) || isAlreadySharedDetails(message)) return null;
+  if (!details.type) return SELL_TYPE_OPTIONS;
+  if (!details.location) return null;
+  if (!hasSellBedrooms(details)) return BEDROOM_OPTIONS;
+  if (!details.priceNote) return null;
+  if (!details.occupancy) return ['Vacant', 'Owner-occupied', 'Tenanted'];
   return SELL_OPTIONS;
 }
 
@@ -584,15 +729,32 @@ function sellClarificationReply(details = {}, message = '') {
   }
 
   if (!details.type && !details.location) {
-    return 'I can help you sell your property. What type is it, and which area is it in?';
+    return 'I can help you sell your property. What type of property are you looking to sell — apartment, villa, townhouse, penthouse, or another type?';
   }
   if (details.type && !details.location) {
-    return `I can help you sell your ${typeLabel}. Which area is it in?`;
+    return `Understood — a ${typeLabel}. Which area or community is it in?`;
   }
   if (!details.type && details.location) {
-    return `I can help you sell your property in ${details.location}. Is it an apartment, villa, or townhouse?`;
+    return `Understood — a property in ${details.location}. What type of property are you looking to sell — apartment, villa, townhouse, penthouse, or another type?`;
   }
-  // Type + area known, contact not yet — offer CTAs. Never re-loop the same line on "yes".
+  if (hasProperty && !hasSellBedrooms(details) && !cta && !already) {
+    return `A ${typeLabel} in ${loc} — how many bedrooms does it have?`;
+  }
+  if (hasProperty && !details.priceNote && !cta && !already) {
+    const bedsLabel =
+      details.bedrooms === 0
+        ? 'studio '
+        : Number.isFinite(Number(details.bedrooms))
+          ? `${details.bedrooms}-bedroom `
+          : details.bedroomsMin
+            ? `${details.bedroomsMin}+ bedroom `
+            : '';
+    const spec = `${bedsLabel}${typeLabel}`.replace(/\s+/g, ' ').trim();
+    return `For your ${spec} in ${loc}, do you have an expected selling price, or would you prefer to discuss valuation with an agent?`;
+  }
+  if (hasProperty && !details.occupancy && !cta && !already) {
+    return 'Is the property currently vacant, owner-occupied, or tenanted?';
+  }
   if (isVagueConfirm(message)) {
     return 'Just to confirm — would you like the valuation, or to speak with an agent?';
   }
@@ -637,15 +799,19 @@ function parsePurposeFromMessage(text) {
     return 'Buy';
   }
 
-  // Rent: same coverage including "I'm looking to rent" / "for rent"
+  // Rent: same coverage including "I'm looking to rent" / "for rent" / "apartment to rent"
   if (
     !/\bbuy\b|\bpurchase\b|\bfor\s+sale\b|off[\s-_]*plan/.test(lower) &&
     (/^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|i'?m\s+(looking\s+to\s+|looking\s+for\s+)?|i\s+am\s+(looking\s+to\s+|looking\s+for\s+)?|looking\s+to\s+|looking\s+for\s+)?(rent|rental|lease)\b/.test(
       lower
     ) ||
       /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+to\s+rent\b/.test(lower) ||
+      /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+for\b.{0,60}\b(to\s+rent|for\s+rent|rental)\b/.test(lower) ||
       /\b(?:want|would\s+like|('d\s+like))\s+to\s+rent\b/.test(lower) ||
+      /\bneed\s+a\b.{0,40}\b(for\s+rent|to\s+rent)\b/.test(lower) ||
+      /\b(apartment|villa|townhouse|penthouse|studio|flat|property|home)\s+to\s+rent\b/.test(lower) ||
       /\bfor\s+rent\b/.test(lower) ||
+      /\bto\s+rent\b/.test(lower) ||
       /\bto\s+lease\b/.test(lower))
   ) {
     return 'Rent';
@@ -1167,7 +1333,8 @@ function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
       bedroomsResolved: false,
       budgetMin: null,
       budgetMax: null,
-      purpose: null,
+      furnished: last.furnished || null,
+      purpose: last.purpose || null,
     };
   }
 
@@ -1181,6 +1348,7 @@ function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
       bedroomsResolved: last.bedroomsResolved === true,
       budgetMin: last.budgetMin ?? null,
       budgetMax: last.budgetMax ?? null,
+      furnished: last.furnished || null,
       purpose: last.purpose || null,
     };
   }
@@ -1194,6 +1362,7 @@ function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
     bedroomsResolved: last.bedroomsResolved === true,
     budgetMin: last.budgetMin ?? null,
     budgetMax: last.budgetMax ?? null,
+    furnished: coalesceFilter(filters.furnished, last.furnished),
     purpose: last.purpose || null,
   };
 }
@@ -1234,7 +1403,7 @@ function matchesServiceInquiryPhrase(text) {
     return false;
   }
   if (/^property\s+management$/i.test(raw)) return true;
-  return /\b(management\s+services?|rent\s+collection|tenant\s+screening|landlord\s+services?|maintain(?:ing)?\s+my\s+propert|manage\s+(?:my\s+|these\s+|your\s+|this\s+|our\s+)?propert|can\s+you\s+manage|i\s+need\s+property\s+management|property\s+management\s+for\s+my)\b/i.test(
+  return /\b(management\s+services?|rent\s+collection|tenant\s+screening|landlord\s+services?|maintain(?:ing)?\s+my\s+propert(?:y|ies)|manage\s+(?:my\s+|these\s+|your\s+|this\s+|our\s+|the\s+)?propert(?:y|ies)|someone\s+to\s+manage|can\s+you\s+manage|i\s+need\s+(?:someone\s+to\s+)?(?:you\s+to\s+)?manage|i\s+need\s+property\s+management|property\s+management\s+for\s+my)\b/i.test(
     raw
   );
 }
@@ -1302,9 +1471,12 @@ function sellServiceLocationReply(listing = {}, inquiry = {}) {
 function emptyServiceInquiry() {
   return {
     intent: null,
+    need: null,
     locationScope: null,
     referenceLocation: null,
     propertyNote: null,
+    propertyType: null,
+    bedrooms: null,
     name: null,
     email: null,
     phone: null,
@@ -1315,9 +1487,12 @@ function emptyServiceInquiry() {
 function copyServiceInquiry(inquiry = {}) {
   return {
     intent: inquiry.intent || null,
+    need: inquiry.need || null,
     locationScope: inquiry.locationScope || null,
     referenceLocation: inquiry.referenceLocation || null,
     propertyNote: inquiry.propertyNote || null,
+    propertyType: inquiry.propertyType || null,
+    bedrooms: inquiry.bedrooms ?? null,
     name: inquiry.name || null,
     email: inquiry.email || null,
     phone: inquiry.phone || null,
@@ -1337,11 +1512,16 @@ function seedServiceInquiry(current = {}, sellListing = {}, history = [], messag
   const prior = copyServiceInquiry(current);
   const fromHistory = contactFromHistory(history);
   const fromSell = sellListing || {};
+  const parsed = parseSellListingDetails(message, {});
   return {
     intent: 'property_management',
+    need: prior.need || parsePmNeedChoice(message),
     locationScope: prior.locationScope || null,
-    referenceLocation: prior.referenceLocation || fromSell.location || null,
+    referenceLocation:
+      prior.referenceLocation || parsed.location || fromSell.location || null,
     propertyNote: prior.propertyNote || parsePropertyPortfolioNote(message) || null,
+    propertyType: prior.propertyType || parsed.type || null,
+    bedrooms: prior.bedrooms ?? parsed.bedrooms ?? null,
     name: prior.name || fromSell.name || fromHistory.name || null,
     email: prior.email || fromSell.email || fromHistory.email || null,
     phone: prior.phone || fromSell.phone || fromHistory.phone || null,
@@ -1467,6 +1647,224 @@ function isServiceInquiryMessage(text) {
   return matchesServiceInquiryPhrase(text) || isMultiPropertyServiceQuery(text);
 }
 
+function parsePmNeedChoice(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  if (!raw) return null;
+  if (/^full property management$/.test(raw) || /\bfull(\s+property)?\s+management\b/.test(raw)) {
+    return 'full';
+  }
+  if (/\btenant\b/.test(raw)) return 'tenant';
+  if (/\brent\s+collection\b/.test(raw)) return 'rent_collection';
+  if (/\bmaintenance\b/.test(raw)) return 'maintenance';
+  if (/\binspect/.test(raw)) return 'inspections';
+  return null;
+}
+
+function pmNeedLabel(need) {
+  if (need === 'full') return 'full property management';
+  if (need === 'tenant') return 'tenant management';
+  if (need === 'rent_collection') return 'rent collection';
+  if (need === 'maintenance') return 'maintenance';
+  if (need === 'inspections') return 'inspections';
+  return 'property management';
+}
+
+function pmNeedReply() {
+  return 'Are you looking for full property management for a property you own, or do you need help with a specific service such as tenant management, rent collection, maintenance, or inspections?';
+}
+
+function pmPropertyReply(inquiry = {}) {
+  const need = pmNeedLabel(inquiry.need);
+  if (inquiry.propertyType && !inquiry.referenceLocation) {
+    return `Understood — ${need} for a ${String(inquiry.propertyType).toLowerCase()}. Which area or community is the property in?`;
+  }
+  if (!inquiry.propertyType && inquiry.referenceLocation) {
+    return `Understood — ${need} in ${inquiry.referenceLocation}. What type of property is it — apartment, villa, townhouse, or another type?`;
+  }
+  return `Understood — ${need}. What type of property should we manage, and which area or community is it in?`;
+}
+
+function hasPmPropertyContext(inquiry = {}) {
+  return !!(inquiry.referenceLocation || inquiry.propertyType || inquiry.propertyNote);
+}
+
+function applyPmPropertyDetails(message, inquiry = {}) {
+  const next = copyServiceInquiry(inquiry);
+  const parsed = parseSellListingDetails(message, {
+    type: next.propertyType,
+    location: next.referenceLocation,
+    bedrooms: next.bedrooms,
+  });
+  if (parsed.type) next.propertyType = parsed.type;
+  if (parsed.location) next.referenceLocation = parsed.location;
+  if (parsed.bedrooms != null) next.bedrooms = parsed.bedrooms;
+  const note = parsePropertyPortfolioNote(message);
+  if (note) next.propertyNote = note;
+  next.intent = 'property_management';
+  return next;
+}
+
+function parseFurnishedFromMessage(text) {
+  const raw = String(text || '').toLowerCase();
+  if (!raw) return null;
+  if (/\bunfurnished\b/.test(raw)) return 'Unfurnished';
+  if (/\b(semi[-\s]?furnished|part(?:ly)?[-\s]?furnished)\b/.test(raw)) return 'Semi-furnished';
+  if (/\bfurnished\b/.test(raw)) return 'Furnished';
+  return null;
+}
+
+function applyMessageToSearchFilters(filters, message) {
+  const next = copySearchFilters(filters);
+  const type = parseDesiredPropertyType(message) || normalizePropertyType(message);
+  const location = parseLocationFromMessage(message);
+  const beds = parseBedroomChoice(message);
+  const budget = parseBudgetFromMessage(message);
+  const furnished = parseFurnishedFromMessage(message);
+  const purpose = parsePurposeFromMessage(message);
+  if (type) next.type = type;
+  if (location) next.location = location;
+  if (beds) applyBedroomChoice(next, beds);
+  if (budget) applyBudgetChoice(next, budget);
+  if (furnished) next.furnished = furnished;
+  if (purpose) next.purpose = purpose;
+  return next;
+}
+
+function listingIntakeReply(intent) {
+  if (intent === CONVERSATION_INTENTS.RENT) {
+    return 'What type of property would you like to rent — apartment, villa, townhouse, or another type — and which area are you interested in? If you have a bedroom count or furnishing preference, you can include those too.';
+  }
+  if (intent === CONVERSATION_INTENTS.OFF_PLAN) {
+    return 'Which area are you considering for an off-plan property? If you have a preferred property type, bedroom count, budget, or developer, you can include those too.';
+  }
+  return 'What type of property are you looking to buy — apartment, villa, townhouse, penthouse, or another type — and which area are you interested in?';
+}
+
+function needsListingIntake(filters = {}) {
+  return !filters.location && !filters.type;
+}
+
+function parseConversationIntent(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  if (isServiceInquiryMessage(raw)) return CONVERSATION_INTENTS.PROPERTY_MANAGEMENT;
+  if (parseSellIntent(raw) || /^(sell my property|sell property)$/i.test(raw)) {
+    return CONVERSATION_INTENTS.SELL_PROPERTY;
+  }
+  const purpose = parsePurposeFromMessage(raw);
+  if (purpose) return purposeToIntent(purpose);
+  if (isExplicitIntentStarter(raw)) {
+    const lower = raw.toLowerCase();
+    if (/\brent/.test(lower)) return CONVERSATION_INTENTS.RENT;
+    if (/off/.test(lower)) return CONVERSATION_INTENTS.OFF_PLAN;
+    if (/\bsell/.test(lower)) return CONVERSATION_INTENTS.SELL_PROPERTY;
+    if (/management/.test(lower)) return CONVERSATION_INTENTS.PROPERTY_MANAGEMENT;
+    if (/\bbuy/.test(lower)) return CONVERSATION_INTENTS.BUY;
+  }
+  return null;
+}
+
+function currentConversationIntent(profile = {}) {
+  return (
+    normalizeIntentValue(profile.intent) ||
+    purposeToIntent(profile.purpose || profile.lastSearchFilters?.purpose) ||
+    (profile.sellListing?.intent === 'sell' ? CONVERSATION_INTENTS.SELL_PROPERTY : null) ||
+    (profile.serviceInquiry?.intent === 'property_management'
+      ? CONVERSATION_INTENTS.PROPERTY_MANAGEMENT
+      : null)
+  );
+}
+
+function startFreshIntent(intent, message, currentProfile = {}) {
+  const profile = {
+    preferredAreas: [],
+    budget: { min: null, max: null },
+    bedrooms: null,
+    purpose: intentToPurpose(intent),
+    intent,
+    lastPropertyCards: [],
+    lastSearchFilters: emptySearchFilters(),
+    slotFlow: { awaiting: null, alternatives: null },
+    sellListing: emptySellListing(),
+    serviceInquiry: emptyServiceInquiry(),
+    leadCaptured: !!currentProfile.leadCaptured,
+  };
+
+  if (isListingIntent(intent)) {
+    profile.lastSearchFilters.purpose = profile.purpose;
+    profile.lastSearchFilters = applyMessageToSearchFilters(profile.lastSearchFilters, message);
+    profile.lastSearchFilters.purpose = profile.purpose;
+    if (profile.lastSearchFilters.location) {
+      profile.preferredAreas = [profile.lastSearchFilters.location];
+    }
+    if (profile.lastSearchFilters.bedrooms != null) {
+      profile.bedrooms = profile.lastSearchFilters.bedrooms;
+    } else if (profile.lastSearchFilters.bedroomsMin != null) {
+      profile.bedrooms = profile.lastSearchFilters.bedroomsMin;
+    }
+    if (needsListingIntake(profile.lastSearchFilters)) {
+      profile.slotFlow = { awaiting: 'listingIntake', alternatives: null };
+    }
+    return profile;
+  }
+
+  if (intent === CONVERSATION_INTENTS.SELL_PROPERTY) {
+    profile.sellListing = advanceSellListing(message, { intent: 'sell' }, []);
+    profile.slotFlow = { awaiting: 'sell', alternatives: null };
+    return profile;
+  }
+
+  if (intent === CONVERSATION_INTENTS.PROPERTY_MANAGEMENT) {
+    const inquiry = seedServiceInquiry({}, {}, [], isExplicitIntentStarter(message) ? '' : message);
+    inquiry.intent = 'property_management';
+    if (isExplicitIntentStarter(message)) {
+      inquiry.need = null;
+    }
+    profile.serviceInquiry = inquiry;
+    if (!inquiry.need) {
+      profile.slotFlow = { awaiting: 'pmNeed', alternatives: null };
+    } else if (!hasPmPropertyContext(inquiry)) {
+      profile.slotFlow = { awaiting: 'pmProperty', alternatives: null };
+    } else {
+      profile.slotFlow = { awaiting: 'serviceContact', alternatives: null };
+    }
+    return profile;
+  }
+
+  return profile;
+}
+
+function listingStartReply(intent, profile = {}, message = '') {
+  if (intent === CONVERSATION_INTENTS.SELL_PROPERTY) {
+    return sellClarificationReply(profile.sellListing || {}, message);
+  }
+  if (intent === CONVERSATION_INTENTS.PROPERTY_MANAGEMENT) {
+    const inquiry = profile.serviceInquiry || {};
+    if (!inquiry.need) return pmNeedReply();
+    if (!hasPmPropertyContext(inquiry)) return pmPropertyReply(inquiry);
+    return serviceContactReply(inquiry);
+  }
+  if (needsListingIntake(profile.lastSearchFilters || {})) {
+    return listingIntakeReply(intent);
+  }
+  return null;
+}
+
+function listingStartOptions(intent, profile = {}, message = '') {
+  if (intent === CONVERSATION_INTENTS.SELL_PROPERTY) {
+    return sellFlowOptions(profile.sellListing || {}, message) || undefined;
+  }
+  if (intent === CONVERSATION_INTENTS.PROPERTY_MANAGEMENT) {
+    const awaiting = profile.slotFlow?.awaiting;
+    if (awaiting === 'pmNeed') return PM_NEED_OPTIONS;
+    return undefined;
+  }
+  return undefined;
+}
+
 /** True when this turn is not a listing follow-up and must not reuse last search filters. */
 function shouldSkipPropertySearch(text) {
   if (!String(text || '').trim()) return false;
@@ -1475,21 +1873,20 @@ function shouldSkipPropertySearch(text) {
   return isGeneralKnowledgeQuery(text);
 }
 
-function trustedPurpose({ lastSearchFilters = {}, userMessage, slotFlow } = {}) {
+function trustedPurpose({ lastSearchFilters = {}, userMessage, slotFlow, intent } = {}) {
+  if (parseSellIntent(userMessage) || isServiceInquiryMessage(userMessage)) return null;
+
   const fromMessage = parsePurposeFromMessage(userMessage);
   if (fromMessage) return fromMessage;
 
-  const lastPurpose = normalizePurpose(lastSearchFilters?.purpose);
-  if (!lastPurpose) return null;
+  const locked = intentToPurpose(intent) || normalizePurpose(lastSearchFilters?.purpose);
+  if (!locked) return null;
 
-  if (slotFlow?.awaiting === 'bedrooms') return lastPurpose;
-  if (parseBedroomChoice(userMessage)) return lastPurpose;
-  // Property-type change is a refinement — keep stored purpose
-  if (parsePropertyTypeChange(userMessage)) return lastPurpose;
+  if (slotFlow?.awaiting === 'bedrooms' || slotFlow?.awaiting === 'listingIntake') return locked;
+  if (parseBedroomChoice(userMessage)) return locked;
+  if (parsePropertyTypeChange(userMessage)) return locked;
 
-  if (isAmbiguousListingQuery(userMessage)) return null;
-
-  return lastPurpose;
+  return locked;
 }
 
 function purposeClarificationFields() {
@@ -1519,7 +1916,10 @@ function profilePatchFromPropertyFilters(filters) {
     };
   }
   const purpose = normalizePurpose(filters.purpose);
-  if (purpose) patch.purpose = purpose;
+  if (purpose) {
+    patch.purpose = purpose;
+    patch.intent = purposeToIntent(purpose);
+  }
   return patch;
 }
 
@@ -1539,13 +1939,17 @@ function listingQueryOpts(filters, search) {
     queryFilters.priceMax = filters.budgetMax;
   }
   if (filters.type) queryFilters.propertyType = filters.type;
+  if (filters.furnished) queryFilters.furnished = filters.furnished;
   return { page: 1, limit: PROPERTY_LIMIT, search, filters: queryFilters };
 }
 
 async function fetchByPurpose(purpose, opts) {
   if (purpose === 'Rent') return propertyDbService.fetchRentProperties(opts);
   if (purpose === 'Off-plan') return propertyDbService.fetchOffPlanProperties(opts);
-  if (purpose === 'Buy') return propertyDbService.fetchBuyProperties(opts);
+  if (purpose === 'Buy') {
+    const filters = { ...(opts.filters || {}), offPlan: 'No' };
+    return propertyDbService.fetchBuyProperties({ ...opts, filters });
+  }
   return { properties: [], total: 0 };
 }
 
@@ -1555,22 +1959,10 @@ async function fetchPropertyCards(filters, search) {
   if (!requested) {
     return { propertyCards: [], usedPurpose: null, total: 0 };
   }
-  let result = await fetchByPurpose(requested, opts);
-  let usedPurpose = requested;
-
-  // If the model infers Rent and that inventory is empty, retry Buy with the same
-  // location/beds/type/budget filters. Explicit Buy / Off-plan searches are unchanged.
-  if (!(result.properties || []).length && requested === 'Rent') {
-    const buyResult = await fetchByPurpose('Buy', opts);
-    if ((buyResult.properties || []).length) {
-      result = buyResult;
-      usedPurpose = 'Buy';
-    }
-  }
-
+  const result = await fetchByPurpose(requested, opts);
   return {
     propertyCards: (result.properties || []).map(toPropertyCard),
-    usedPurpose,
+    usedPurpose: requested,
     total: result.total || 0,
   };
 }
@@ -1992,9 +2384,19 @@ async function emptyResultsResult(effectiveFilters) {
 
 async function searchProperties(
   filters = {},
-  { lastSearchFilters, slotFlow, userMessage } = {}
+  { lastSearchFilters, slotFlow, userMessage, intent } = {}
 ) {
-  if (shouldSkipPropertySearch(userMessage) || slotFlow?.awaiting === 'sell') {
+  const lockedIntent = normalizeIntentValue(intent);
+  if (
+    shouldSkipPropertySearch(userMessage) ||
+    slotFlow?.awaiting === 'sell' ||
+    slotFlow?.awaiting === 'pmNeed' ||
+    slotFlow?.awaiting === 'pmProperty' ||
+    slotFlow?.awaiting === 'serviceContact' ||
+    slotFlow?.awaiting === 'serviceLocation' ||
+    lockedIntent === CONVERSATION_INTENTS.SELL_PROPERTY ||
+    lockedIntent === CONVERSATION_INTENTS.PROPERTY_MANAGEMENT
+  ) {
     return {
       propertyCards: [],
       sources: [],
@@ -2021,7 +2423,10 @@ async function searchProperties(
   });
   if (budgetChoice) applyBudgetChoice(effectiveFilters, budgetChoice);
 
-  const purpose = trustedPurpose({ lastSearchFilters, userMessage, slotFlow });
+  const furnished = parseFurnishedFromMessage(userMessage);
+  if (furnished) effectiveFilters.furnished = furnished;
+
+  const purpose = trustedPurpose({ lastSearchFilters, userMessage, slotFlow, intent: lockedIntent });
   effectiveFilters.purpose = purpose;
 
   console.log(
@@ -2230,13 +2635,14 @@ async function captureLead({ name, phone, email, intent, whatsapp, emailOptional
 async function executeTool(
   name,
   args,
-  { sessionId, lastSearchFilters, leadAlreadyCaptured, slotFlow, userMessage } = {}
+  { sessionId, lastSearchFilters, leadAlreadyCaptured, slotFlow, userMessage, intent } = {}
 ) {
   if (name === 'search_properties') {
     return searchProperties(args || {}, {
       lastSearchFilters,
       slotFlow,
       userMessage,
+      intent,
     });
   }
   if (name === 'search_content') return searchContent(args || {});
@@ -2263,7 +2669,12 @@ module.exports = {
   PURPOSE_SELECT,
   BEDROOM_OPTIONS,
   SELL_OPTIONS,
+  SELL_TYPE_OPTIONS,
   SELL_SERVICE_LOCATION_OPTIONS,
+  PM_NEED_OPTIONS,
+  CONVERSATION_INTENTS,
+  emptySearchFilters,
+  copySearchFilters,
   emptyServiceInquiry,
   copyServiceInquiry,
   seedServiceInquiry,
@@ -2276,6 +2687,27 @@ module.exports = {
   hasServiceContact,
   isServiceInquiryMessage,
   matchesServiceInquiryPhrase,
+  parsePmNeedChoice,
+  pmNeedReply,
+  pmPropertyReply,
+  hasPmPropertyContext,
+  applyPmPropertyDetails,
+  parseConversationIntent,
+  currentConversationIntent,
+  isExplicitIntentStarter,
+  isPurposeChipReply,
+  isListingIntent,
+  purposeToIntent,
+  intentToPurpose,
+  normalizeIntentValue,
+  startFreshIntent,
+  listingStartReply,
+  listingStartOptions,
+  listingIntakeReply,
+  needsListingIntake,
+  applyMessageToSearchFilters,
+  parseFurnishedFromMessage,
+  parseOccupancyFromMessage,
   parseSellIntent,
   isSellCta,
   isAlreadySharedDetails,

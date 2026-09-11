@@ -18,7 +18,6 @@ const {
   hasSellContact,
   shouldCaptureSellLead,
   sellFlowOptions,
-  SELL_OPTIONS,
   SELL_SERVICE_LOCATION_OPTIONS,
   isSellServiceTransitionQuery,
   isMultiPropertyServiceQuery,
@@ -40,6 +39,16 @@ const {
   isHomepageUrl,
   emptyResultsReply,
   locationEmptyNearbyReply,
+  CONVERSATION_INTENTS,
+  parseConversationIntent,
+  isExplicitIntentStarter,
+  startFreshIntent,
+  listingStartReply,
+  pmNeedReply,
+  PM_NEED_OPTIONS,
+  parsePmNeedChoice,
+  needsListingIntake,
+  applyMessageToSearchFilters,
 } = require('./chat.tools');
 
 function runSellTurns(messages) {
@@ -105,6 +114,9 @@ test('Buy purpose phrases match Rent coverage', () => {
     'I want to rent an apartment in JVC',
     'Looking to rent a villa in The Springs',
     "I'm looking to rent an apartment in JVC",
+    'I need a 2 bed for rent',
+    "I'm looking for an apartment to rent in Marina",
+    'Rent a Property',
   ];
   for (const phrase of rentCases) {
     assert.equal(parsePurposeFromMessage(phrase), 'Rent', phrase);
@@ -161,7 +173,10 @@ test('fresh sell does not inherit search or content locations', () => {
   assert.equal(listing.intent, 'sell');
   assert.equal(listing.location, null);
   assert.equal(listing.type, null);
-  assert.match(sellClarificationReply(listing, 'I need to sell my property'), /What type is it, and which area/i);
+  assert.match(
+    sellClarificationReply(listing, 'I need to sell my property'),
+    /What type of property are you looking to sell/i
+  );
 });
 
 test('sell accepts bare area names including Sheikh Zayed Road', () => {
@@ -205,11 +220,10 @@ test('vague yes on sell CTA asks short clarification', () => {
   assert.match(sellClarificationReply(listing, 'yes'), /Just to confirm/i);
 });
 
-test('vague yes before sell contact asks clarification not the same loop', () => {
+test('vague yes before sell contact asks next missing selling detail', () => {
   const listing = { intent: 'sell', type: 'Apartment', location: 'Dubai Hills' };
-  assert.match(sellClarificationReply(listing, 'yes'), /Just to confirm/i);
-  assert.deepEqual(sellFlowOptions(listing, 'yes'), SELL_OPTIONS);
-  assert.deepEqual(sellFlowOptions(listing, 'dubai hills'), SELL_OPTIONS);
+  assert.match(sellClarificationReply(listing, 'yes'), /how many bedrooms/i);
+  assert.deepEqual(sellFlowOptions(listing, 'yes'), ['Studio', '1 BR', '2 BR', '3 BR', '4+ BR', 'Any']);
 });
 
 test('related buttons come only from embedding hits', () => {
@@ -251,7 +265,6 @@ test('sell CTA reuses contact and does not repeat chips', () => {
   assert.match(listing.name, /test ruf/i);
   assert.match(reply, /I'll connect you with a listing agent/i);
   assert.equal(sellFlowOptions(listing, 'Talk to an agent'), null);
-  assert.deepEqual(sellFlowOptions(listing, contact), SELL_OPTIONS);
   assert.equal(shouldCaptureSellLead('Talk to an agent', listing), true);
   assert.equal(hasSellContact(listing), true);
 });
@@ -321,4 +334,111 @@ test('PM contact reuses phone as whatsapp on "same number"', () => {
   });
   assert.equal(reused.whatsapp, '0501234567');
   assert.equal(hasServiceContact(reused), true);
+});
+
+test('natural language maps to the five conversation intents', () => {
+  assert.equal(parseConversationIntent('I want to buy a 2 bedroom apartment.'), CONVERSATION_INTENTS.BUY);
+  assert.equal(parseConversationIntent('I need a 2 bed for rent.'), CONVERSATION_INTENTS.RENT);
+  assert.equal(parseConversationIntent("I'm looking for an apartment to rent in Marina."), CONVERSATION_INTENTS.RENT);
+  assert.equal(parseConversationIntent('I want something off plan.'), CONVERSATION_INTENTS.OFF_PLAN);
+  assert.equal(parseConversationIntent('I have an apartment I want to sell.'), CONVERSATION_INTENTS.SELL_PROPERTY);
+  assert.equal(parseConversationIntent('I need someone to manage my property.'), CONVERSATION_INTENTS.PROPERTY_MANAGEMENT);
+  assert.equal(parsePurposeFromMessage('I want something off plan.'), 'Off-plan');
+});
+
+test('menu starters reset previous listing state', () => {
+  const buyProfile = startFreshIntent(
+    CONVERSATION_INTENTS.BUY,
+    '2 bedroom apartment in Dubai Marina',
+    {}
+  );
+  assert.equal(buyProfile.intent, CONVERSATION_INTENTS.BUY);
+  assert.equal(buyProfile.lastSearchFilters.purpose, 'Buy');
+  assert.equal(buyProfile.lastSearchFilters.bedrooms, 2);
+  assert.equal(buyProfile.lastSearchFilters.type, 'Apartment');
+  assert.equal(buyProfile.lastSearchFilters.location, 'Dubai Marina');
+
+  const afterReset = startFreshIntent(CONVERSATION_INTENTS.RENT, 'Rent a Property', buyProfile);
+  assert.equal(afterReset.intent, CONVERSATION_INTENTS.RENT);
+  assert.equal(afterReset.lastSearchFilters.purpose, 'Rent');
+  assert.equal(afterReset.lastSearchFilters.bedrooms, null);
+  assert.equal(afterReset.lastSearchFilters.type, null);
+  assert.equal(afterReset.lastSearchFilters.location, null);
+  assert.equal(afterReset.sellListing.intent, null);
+  assert.match(listingStartReply(CONVERSATION_INTENTS.RENT, afterReset, 'Rent a Property'), /rent/i);
+  assert.equal(isExplicitIntentStarter('Rent a Property'), true);
+  assert.equal(isExplicitIntentStarter('Buy a Property'), true);
+  assert.equal(isExplicitIntentStarter('Off-Plan'), true);
+  assert.equal(isExplicitIntentStarter('Sell My Property'), true);
+  assert.equal(isExplicitIntentStarter('Property Management'), true);
+});
+
+test('switching buy to off-plan establishes a fresh off-plan intent', () => {
+  const buyProfile = startFreshIntent(CONVERSATION_INTENTS.BUY, 'Buy a Property', {});
+  const offPlan = startFreshIntent(CONVERSATION_INTENTS.OFF_PLAN, 'Off-Plan', buyProfile);
+  assert.equal(offPlan.intent, CONVERSATION_INTENTS.OFF_PLAN);
+  assert.equal(offPlan.lastSearchFilters.purpose, 'Off-plan');
+  assert.equal(offPlan.lastSearchFilters.location, null);
+  assert.match(listingStartReply(CONVERSATION_INTENTS.OFF_PLAN, offPlan, 'Off-Plan'), /off-plan/i);
+});
+
+test('sell flow asks for a clear property type first, then area', () => {
+  const { listing, reply } = runSellTurns(['Sell My Property']);
+  assert.match(reply, /What type of property are you looking to sell/i);
+  assert.equal(listing.location, null);
+  const next = runSellTurns(['Sell My Property', 'apartment']);
+  assert.equal(next.listing.type, 'Apartment');
+  assert.match(next.reply, /area or community/i);
+  const marina = runSellTurns(['Sell My Property', 'apartment', 'Dubai Marina']);
+  assert.equal(marina.listing.location, 'Dubai Marina');
+  assert.match(marina.reply, /bedrooms/i);
+});
+
+test('sell understands a combined natural listing description', () => {
+  const { listing, reply } = runSellTurns(['I have a 2 bedroom apartment in Dubai Marina.']);
+  assert.equal(listing.type, 'Apartment');
+  assert.equal(listing.location, 'Dubai Marina');
+  assert.equal(listing.bedrooms, 2);
+  assert.match(reply, /expected selling price|valuation/i);
+});
+
+test('property management starts with a service question, not a contact form', () => {
+  const profile = startFreshIntent(CONVERSATION_INTENTS.PROPERTY_MANAGEMENT, 'Property Management', {});
+  assert.equal(profile.intent, CONVERSATION_INTENTS.PROPERTY_MANAGEMENT);
+  assert.equal(profile.slotFlow.awaiting, 'pmNeed');
+  const reply = listingStartReply(CONVERSATION_INTENTS.PROPERTY_MANAGEMENT, profile, 'Property Management');
+  assert.match(reply, /full property management/i);
+  assert.match(reply, /tenant management|rent collection|maintenance|inspections/i);
+  assert.equal(/name:|whatsapp:|email:/i.test(reply), false);
+  assert.deepEqual(PM_NEED_OPTIONS.length > 0, true);
+  assert.equal(parsePmNeedChoice('Full property management'), 'full');
+  assert.equal(parsePmNeedChoice('Rent collection'), 'rent_collection');
+});
+
+test('listing intake is required until type or area is known', () => {
+  const profile = startFreshIntent(CONVERSATION_INTENTS.BUY, 'Buy a Property', {});
+  assert.equal(needsListingIntake(profile.lastSearchFilters), true);
+  assert.equal(profile.slotFlow.awaiting, 'listingIntake');
+  const withType = startFreshIntent(CONVERSATION_INTENTS.BUY, 'I want to buy a villa in Arabian Ranches', {});
+  assert.equal(needsListingIntake(withType.lastSearchFilters), false);
+  assert.equal(withType.lastSearchFilters.type, 'Villa');
+  assert.equal(withType.lastSearchFilters.location, 'Arabian Ranches');
+});
+
+test('Buy then 2 bedroom keeps BUY filters; Rent restart does not', () => {
+  const buy = startFreshIntent(CONVERSATION_INTENTS.BUY, 'Buy a Property', {});
+  const afterBeds = applyMessageToSearchFilters(buy.lastSearchFilters, '2 bedroom');
+  afterBeds.purpose = buy.lastSearchFilters.purpose;
+  assert.equal(afterBeds.purpose, 'Buy');
+  assert.equal(afterBeds.bedrooms, 2);
+  assert.equal(afterBeds.bedroomsResolved, true);
+
+  const rent = startFreshIntent(CONVERSATION_INTENTS.RENT, 'Rent a Property', {
+    ...buy,
+    lastSearchFilters: afterBeds,
+  });
+  assert.equal(rent.intent, CONVERSATION_INTENTS.RENT);
+  assert.equal(rent.lastSearchFilters.purpose, 'Rent');
+  assert.equal(rent.lastSearchFilters.bedrooms, null);
+  assert.equal(rent.lastSearchFilters.bedroomsResolved, false);
 });

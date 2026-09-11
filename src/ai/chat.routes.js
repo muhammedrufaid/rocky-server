@@ -54,7 +54,21 @@ function validateChat(req, res, next) {
   }
 
   req.body.sessionId = sessionId.trim();
-  req.body.message = message.trim();
+  if (typeof message === 'string' && message.trim()) {
+    req.body.message = message.trim();
+  }
+  const intent = req.body?.intent;
+  if (intent != null && intent !== '') {
+    if (typeof intent !== 'string') {
+      return res.status(400).json({ success: false, message: 'intent must be a string' });
+    }
+    const allowed = ['BUY', 'RENT', 'OFF_PLAN', 'SELL_PROPERTY', 'PROPERTY_MANAGEMENT'];
+    const normalized = intent.trim().toUpperCase().replace(/[\s-]+/g, '_');
+    if (!allowed.includes(normalized)) {
+      return res.status(400).json({ success: false, message: 'intent is not recognised' });
+    }
+    req.body.intent = normalized;
+  }
   return next();
 }
 
