@@ -53,9 +53,11 @@ const conversationSchema = new mongoose.Schema(
         budgetMin: { type: Number, default: null },
         budgetMax: { type: Number, default: null },
         type: { type: String, default: null, trim: true },
+        types: { type: [String], default: [] },
         purpose: { type: String, default: null, trim: true },
         furnished: { type: String, default: null, trim: true },
       },
+      shownPropertyIds: { type: [String], default: [] },
       slotFlow: {
         awaiting: { type: String, default: null, trim: true },
         alternatives: { type: String, default: null },

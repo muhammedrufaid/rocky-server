@@ -1,7 +1,7 @@
 const OpenAI = require('openai');
 const { Conversation } = require('./chat.models');
 const { getSystemPrompt } = require('./chat.prompt');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -68,6 +68,7 @@ function mergeProfile(current, patch) {
     purpose: current.purpose || null,
     intent: current.intent || null,
     lastPropertyCards: toStoredPropertyCards(current.lastPropertyCards),
+    shownPropertyIds: uniqueIdList(current.shownPropertyIds),
     lastSearchFilters: copySearchFilters(current.lastSearchFilters || emptySearchFilters()),
     slotFlow: {
       awaiting: current.slotFlow?.awaiting || null,
@@ -96,6 +97,12 @@ function mergeProfile(current, patch) {
   if (patch.intent) next.intent = patch.intent;
   if (Array.isArray(patch.lastPropertyCards)) {
     next.lastPropertyCards = toStoredPropertyCards(patch.lastPropertyCards);
+  }
+  if (patch.resetShownPropertyIds) {
+    next.shownPropertyIds = [];
+  }
+  if (Array.isArray(patch.shownPropertyIds)) {
+    next.shownPropertyIds = uniqueIdList([...(next.shownPropertyIds || []), ...patch.shownPropertyIds]);
   }
   if (patch.lastSearchFilters) {
     next.lastSearchFilters = copySearchFilters(patch.lastSearchFilters);
@@ -155,6 +162,7 @@ async function loadConversation(sessionId) {
         purpose: null,
         intent: null,
         lastPropertyCards: [],
+        shownPropertyIds: [],
         lastSearchFilters: emptySearchFilters(),
         slotFlow: { awaiting: null },
         sellListing: emptySellListing(),
@@ -574,10 +582,10 @@ function applyRelocationIntent(message, profile) {
   const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
   if (!last.purpose && !last.location && !last.type && !profile.purpose) return null;
 
-  const newType = parsePropertyTypeChange(message) || parseDesiredPropertyType(message);
+  const newTypes = parsePropertyTypesFromMessage(message);
   const previousLocation = last.location;
   last.location = null;
-  if (newType) last.type = newType;
+  if (newTypes.length) applyTypesToFilters(last, newTypes);
   const resolvedPurpose = last.purpose || profile.purpose || null;
   if (resolvedPurpose) last.purpose = resolvedPurpose;
 
@@ -594,26 +602,46 @@ function applyRelocationIntent(message, profile) {
 }
 
 function applyPropertyTypeChange(message, profile) {
-  const newType = parsePropertyTypeChange(message);
-  if (!newType) return null;
-
+  const incoming = parsePropertyTypesFromMessage(message);
   const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
-  // Only treat it as a type change if we already have at least purpose or location in context
-  if (!last.purpose && !last.location && !profile.purpose) return null;
-  // Do not override if the type is already the same
-  if (last.type && last.type.toLowerCase() === newType.toLowerCase() && last.location) return null;
+  if (!last.purpose && !last.location && !profile.purpose && !isListingIntent(profile.intent)) return null;
 
-  // If the message mentions a DIFFERENT named location, this is a new-location search, not a
-  // type-only refinement. Let it fall through so applyNewLocationSearch can handle it.
   const mentionedLocation = parseLocationFromMessage(message);
   if (mentionedLocation && last.location) {
     const locDiffers = mentionedLocation.trim().toLowerCase() !== last.location.trim().toLowerCase();
     if (locDiffers) return null;
   }
 
-  // Carry purpose from top-level profile into lastSearchFilters so trustedPurpose can read it
+  if (incoming.length > 1) {
+    applyTypesToFilters(last, mergePropertyTypes(typesFromFilters(last), incoming, message));
+    const resolvedPurpose = last.purpose || profile.purpose || null;
+    if (resolvedPurpose) last.purpose = resolvedPurpose;
+    if (mentionedLocation && !last.location) last.location = mentionedLocation;
+    const beds = parseBedroomChoice(message);
+    if (beds) applyBedroomChoice(last, beds);
+    const budget = parseBudgetFromMessage(message);
+    if (budget) applyBudgetChoice(last, budget);
+    return {
+      type: 'continue',
+      profile: mergeProfile(profile, {
+        purpose: resolvedPurpose || profile.purpose,
+        preferredAreas: last.location ? [last.location] : undefined,
+        lastSearchFilters: last,
+        slotFlow: { awaiting: null, alternatives: null },
+      }),
+    };
+  }
+
+  const newType = parsePropertyTypeChange(message) || (incoming.length === 1 ? incoming[0] : null);
+  if (!newType) return null;
+
+  const currentTypes = typesFromFilters(last);
+  if (currentTypes.length === 1 && currentTypes[0].toLowerCase() === newType.toLowerCase() && last.location) {
+    return null;
+  }
+
   const resolvedPurpose = last.purpose || profile.purpose || null;
-  last.type = newType;
+  applyTypesToFilters(last, mergePropertyTypes(currentTypes, [newType], message));
   last.purpose = resolvedPurpose;
 
   // Named area while location is empty (e.g. after "somewhere else"): keep bedrooms and search
@@ -647,6 +675,20 @@ function applyPropertyTypeChange(message, profile) {
     profile: mergeProfile(profile, {
       lastSearchFilters: last,
       slotFlow: { awaiting: null },
+    }),
+  };
+}
+
+function applyShowMore(message, profile) {
+  if (!isShowMoreRequest(message)) return null;
+  const intent = profile.intent || purposeToIntent(profile.purpose || profile.lastSearchFilters?.purpose);
+  if (!isListingIntent(intent) && !profile.lastSearchFilters?.purpose && !profile.purpose) {
+    return null;
+  }
+  return {
+    type: 'continue',
+    profile: mergeProfile(profile, {
+      slotFlow: { awaiting: null, alternatives: null },
     }),
   };
 }
@@ -699,6 +741,9 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
   const sellFlow = applySellFlow(message, profile, history);
   if (sellFlow) return sellFlow;
 
+  const showMore = applyShowMore(message, profile);
+  if (showMore) return showMore;
+
   // "villa in another location" — reset location and keep type/bedrooms/purpose
   const relocation = applyRelocationIntent(message, profile);
   if (relocation) return relocation;
@@ -720,7 +765,7 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
     );
     const purpose = last.purpose || profile.purpose || intentToPurpose(profile.intent);
     if (purpose) last.purpose = purpose;
-    const hasAnchor = !!(last.location || last.type || isBedroomsResolved(last));
+    const hasAnchor = !!(last.location || typesFromFilters(last).length || isBedroomsResolved(last));
     if (!hasAnchor) {
       return {
         type: 'clarify',
@@ -740,7 +785,7 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
       lastSearchFilters: last,
       slotFlow: { awaiting: null, alternatives: null },
     });
-    if (!isBedroomsResolved(last) && (last.location || last.type)) {
+    if (!isBedroomsResolved(last) && (last.location || typesFromFilters(last).length)) {
       return bedroomClarifyPayload(nextProfile, purpose);
     }
     return { type: 'continue', profile: nextProfile };
@@ -1024,7 +1069,7 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
 function applyNewLocationSearch(message, profile) {
   if (wantsDifferentLocation(message)) return null;
   const mentionedLocation = parseLocationFromMessage(message);
-  const mentionedType = parseDesiredPropertyType(message) || normalizePropertyType(message);
+  const mentionedTypes = parsePropertyTypesFromMessage(message);
   const purposeFromMsg = parsePurposeFromMessage(message);
   const bedsFromMsg = parseBedroomChoice(message);
   const budget = parseBudgetFromMessage(message);
@@ -1047,9 +1092,11 @@ function applyNewLocationSearch(message, profile) {
   const locDiffers =
     !!(mentionedLocation && last.location) &&
     mentionedLocation.trim().toLowerCase() !== last.location.trim().toLowerCase();
+  const mentionedType = mentionedTypes[0] || null;
+  const lastTypes = typesFromFilters(last);
   const typeDiffers =
-    !!(mentionedType && last.type) &&
-    mentionedType.trim().toLowerCase() !== last.type.trim().toLowerCase();
+    mentionedTypes.length > 0 &&
+    mentionedTypes.join('|').toLowerCase() !== lastTypes.join('|').toLowerCase();
 
   // Escape empty-results with a fresh listing statement even if location is unchanged.
   const freshEscape =
@@ -1068,30 +1115,22 @@ function applyNewLocationSearch(message, profile) {
   // Resolve purpose: explicit in message > stored purpose (existing rule: persist across location change)
   const resolvedPurpose = purposeFromMsg || last.purpose || profile.purpose || null;
 
-  const newFilters = {
-    location: resolvedLocation,
-    type: mentionedType || (locDiffers ? null : last.type) || null,
-    bedrooms: null,
-    bedroomsMin: null,
-    bedroomsAny: bedsFromMsg?.any === true,
-    bedroomsResolved: !!(bedsFromMsg && !bedsFromMsg.any) || bedsFromMsg?.any === true,
-    budgetMin: null,
-    budgetMax: null,
-    purpose: resolvedPurpose,
-  };
+  const newFilters = copySearchFilters(last);
+  newFilters.location = resolvedLocation;
+  newFilters.purpose = resolvedPurpose;
+  if (mentionedTypes.length) applyTypesToFilters(newFilters, mentionedTypes);
 
-  if (bedsFromMsg && !bedsFromMsg.any) {
-    if (bedsFromMsg.exact != null) newFilters.bedrooms = bedsFromMsg.exact;
-    if (bedsFromMsg.min != null) newFilters.bedroomsMin = bedsFromMsg.min;
+  if (bedsFromMsg) {
+    applyBedroomChoice(newFilters, bedsFromMsg);
   }
   if (budget) {
-    if (budget.budgetMin != null) newFilters.budgetMin = budget.budgetMin;
-    if (budget.budgetMax != null) newFilters.budgetMax = budget.budgetMax;
+    applyBudgetChoice(newFilters, budget);
   }
 
   const patch = {
     lastSearchFilters: newFilters,
     slotFlow: { awaiting: null, alternatives: null },
+    resetShownPropertyIds: locDiffers,
   };
   if (resolvedPurpose) {
     patch.purpose = resolvedPurpose;
@@ -1129,7 +1168,7 @@ function bedroomClarifyIfNeeded(message, profile) {
     null;
   if (!purpose) return null;
   if (isBedroomsResolved(last)) return null;
-  if (!last.location && !last.type) return null;
+  if (!last.location && !typesFromFilters(last).length) return null;
   const listingLike =
     isAmbiguousListingQuery(message) ||
     !!parsePurposeFromMessage(message) ||
@@ -1225,6 +1264,7 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
       slotFlow: profile.slotFlow,
       userMessage,
       intent: profile.intent,
+      shownPropertyIds: profile.shownPropertyIds,
     }
   );
 
@@ -1297,9 +1337,11 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
   }
 
   return {
-    reply: foundListingsReply(result.effectiveFilters || nextProfile.lastSearchFilters, result.modelPayload?.total),
+    reply:
+      result.replyOverride ||
+      foundListingsReply(result.effectiveFilters || nextProfile.lastSearchFilters, result.modelPayload?.total),
     profile: mergeProfile(nextProfile, { slotFlow: { awaiting: null } }),
-    propertyCards: result.propertyCards || [],
+    propertyCards: uniqueBy(result.propertyCards || [], (c) => c.id),
     sources: result.sources || [],
     suggestedCta: null,
     viewAllMatching: result.viewAllMatching || null,
@@ -1427,6 +1469,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
           slotFlow: profile.slotFlow,
           userMessage,
           intent: profile.intent,
+          shownPropertyIds: profile.shownPropertyIds,
         });
       } catch (err) {
         result = {
@@ -1591,6 +1634,12 @@ const chat = async (req, res) => {
     const { sessionId, message, intent: bodyIntent } = req.body;
     const conversation = await loadConversation(sessionId);
     let profile = conversation.userProfile || {};
+    const requestTypes = filtersFromRequestBody(req.body);
+    if (requestTypes.length) {
+      const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+      applyTypesToFilters(last, mergePropertyTypes(typesFromFilters(last), requestTypes, message));
+      profile = mergeProfile(profile, { lastSearchFilters: last });
+    }
     const slotResult = resolvePendingSlots(
       message,
       profile,

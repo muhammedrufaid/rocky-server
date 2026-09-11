@@ -49,6 +49,19 @@ const {
   parsePmNeedChoice,
   needsListingIntake,
   applyMessageToSearchFilters,
+  parsePropertyTypesFromMessage,
+  parseOtherCustomType,
+  mergePropertyTypes,
+  typesFromFilters,
+  applyTypesToFilters,
+  isShowMoreRequest,
+  filtersFromRequestBody,
+  uniqueIdList,
+  listingQueryOpts,
+  resolveEffectiveFilters,
+  copySearchFilters,
+  emptySearchFilters,
+  applyBedroomChoice,
 } = require('./chat.tools');
 
 function runSellTurns(messages) {
@@ -92,7 +105,13 @@ test('content questions skip property search (flexi rent, summer, golden visa)',
 });
 
 test('listing follow-ups still search', () => {
-  for (const phrase of ['show me villas there', 'find another villa in Dubai South', 'Try 1 BR']) {
+  for (const phrase of [
+    'show me villas there',
+    'find another villa in Dubai South',
+    'Try 1 BR',
+    'Show me more',
+    'show me more properties',
+  ]) {
     assert.equal(isListingFollowUp(phrase), true, phrase);
     assert.equal(shouldSkipPropertySearch(phrase), false, phrase);
   }
@@ -442,3 +461,108 @@ test('Buy then 2 bedroom keeps BUY filters; Rent restart does not', () => {
   assert.equal(rent.lastSearchFilters.bedrooms, null);
   assert.equal(rent.lastSearchFilters.bedroomsResolved, false);
 });
+
+test('multiple property types are parsed together', () => {
+  assert.deepEqual(parsePropertyTypesFromMessage('Apartment and Villa'), ['Apartment', 'Villa']);
+  assert.deepEqual(parsePropertyTypesFromMessage('apartment + townhouse'), ['Apartment', 'Townhouse']);
+  assert.deepEqual(parsePropertyTypesFromMessage('Villa and Townhouse'), ['Villa', 'Townhouse']);
+  assert.deepEqual(parsePropertyTypesFromMessage('Apartment, Villa and Townhouse'), [
+    'Apartment',
+    'Villa',
+    'Townhouse',
+  ]);
+  assert.equal(parseOtherCustomType('Other: Penthouse'), 'Penthouse');
+  assert.deepEqual(parsePropertyTypesFromMessage('Other: Penthouse'), ['Penthouse']);
+});
+
+test('Other property type uses the custom value, not the word Other', () => {
+  assert.deepEqual(filtersFromRequestBody({ property_type: 'Other' }), []);
+  assert.deepEqual(
+    filtersFromRequestBody({ property_type: 'Other', custom_property_type: 'Penthouse' }),
+    ['Penthouse']
+  );
+  assert.deepEqual(filtersFromRequestBody({ property_types: ['Apartment', 'Villa'] }), [
+    'Apartment',
+    'Villa',
+  ]);
+});
+
+test('show me more is pagination; tell me more is not', () => {
+  assert.equal(isShowMoreRequest('Show me more'), true);
+  assert.equal(isShowMoreRequest('show me more properties'), true);
+  assert.equal(isShowMoreRequest('see more'), true);
+  assert.equal(isShowMoreRequest('tell me more'), false);
+  assert.equal(isShowMoreRequest('more details'), false);
+  assert.equal(isShowMoreRequest('the first one'), false);
+});
+
+test('adding a property type preserves bedrooms, budget, area, and rent purpose', () => {
+  const rent = startFreshIntent(CONVERSATION_INTENTS.RENT, 'Rent a Property', {});
+  let filters = applyMessageToSearchFilters(
+    rent.lastSearchFilters,
+    '2 bedroom apartment in Dubai Hills under AED 100000'
+  );
+  assert.equal(filters.purpose, 'Rent');
+  assert.equal(filters.location, 'Dubai Hills');
+  assert.equal(filters.bedrooms, 2);
+  assert.equal(filters.budgetMax, 100000);
+  assert.deepEqual(typesFromFilters(filters), ['Apartment']);
+
+  filters = applyMessageToSearchFilters(filters, 'Apartment and Villa');
+  assert.equal(filters.purpose, 'Rent');
+  assert.equal(filters.location, 'Dubai Hills');
+  assert.equal(filters.bedrooms, 2);
+  assert.equal(filters.budgetMax, 100000);
+  assert.deepEqual(typesFromFilters(filters), ['Apartment', 'Villa']);
+});
+
+test('search query uses propertyType IN list and excludes shown listing IDs', () => {
+  const filters = emptySearchFilters();
+  filters.purpose = 'Rent';
+  applyTypesToFilters(filters, ['Apartment', 'Villa']);
+  applyBedroomChoice(filters, { exact: 2 });
+  filters.budgetMax = 100000;
+  filters.excludeRefNos = ['RO-R-1', 'RO-R-1', 'RO-R-2'];
+  const opts = listingQueryOpts(filters, 'Dubai Hills');
+  assert.equal(opts.page, 1);
+  assert.equal(opts.limit, 6);
+  assert.equal(opts.search, 'Dubai Hills');
+  assert.deepEqual(opts.filters.propertyType, ['Apartment', 'Villa']);
+  assert.equal(opts.filters.bedrooms, 2);
+  assert.equal(opts.filters.priceMax, 100000);
+  assert.deepEqual(opts.filters.excludeRefNos, ['RO-R-1', 'RO-R-2']);
+});
+
+test('effective filters keep last types, beds, budget, and Rent purpose', () => {
+  const last = copySearchFilters({
+    purpose: 'Rent',
+    location: 'Dubai Hills',
+    types: ['Apartment', 'Villa'],
+    bedrooms: 2,
+    bedroomsResolved: true,
+    budgetMax: 100000,
+  });
+  const merged = resolveEffectiveFilters({ type: 'Apartment' }, last);
+  assert.equal(merged.purpose, 'Rent');
+  assert.equal(merged.location, 'Dubai Hills');
+  assert.equal(merged.bedrooms, 2);
+  assert.equal(merged.budgetMax, 100000);
+  assert.deepEqual(typesFromFilters(merged), ['Apartment', 'Villa']);
+});
+
+test('shown listing IDs are unique and a new intent clears them', () => {
+  assert.deepEqual(uniqueIdList(['RO-R-1', 'RO-R-1', 'RO-R-2', '']), ['RO-R-1', 'RO-R-2']);
+  const withShown = startFreshIntent(CONVERSATION_INTENTS.RENT, 'Rent a Property', {
+    shownPropertyIds: ['RO-R-1'],
+    lastSearchFilters: { purpose: 'Buy', type: 'Apartment', bedrooms: 2 },
+  });
+  assert.deepEqual(withShown.shownPropertyIds, []);
+  assert.equal(withShown.lastSearchFilters.purpose, 'Rent');
+  assert.equal(withShown.lastSearchFilters.bedrooms, null);
+});
+
+test('also villa merges onto the current type instead of replacing it', () => {
+  const merged = mergePropertyTypes(['Apartment'], ['Villa'], 'also villa');
+  assert.deepEqual(merged, ['Apartment', 'Villa']);
+});
+
