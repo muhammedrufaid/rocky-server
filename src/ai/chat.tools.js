@@ -1013,6 +1013,50 @@ function emptyResultsReply(filters = {}) {
   return `Looking for a ${bedsType} in ${loc} — let me check the closest options for you.`;
 }
 
+function exhaustedResultsReply(filters = {}, shownCount = 0) {
+  const loc = (filters.location || '').toString().trim();
+  const area = loc ? ` in ${loc}` : '';
+  const type = describeTypePhrase(filters, shownCount);
+  const purposeBit =
+    filters.purpose === 'Rent'
+      ? 'to rent'
+      : filters.purpose === 'Off-plan'
+        ? 'off-plan'
+        : 'for sale';
+  return `I've already shown the matching ${type}${area} ${purposeBit}. There aren't additional listings with these filters. Would you like to try a nearby area, a different bedroom count, another property type, or adjust the budget?`
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function replyForZeroHits(turnKind, filters = {}, shownCount = 0, extras = {}) {
+  if (turnKind === SEARCH_TURN.SIMILAR) return similarEmptyReply(filters);
+  if (turnKind === SEARCH_TURN.NEW_AREA) return newAreaEmptyReply(filters);
+  const sameSearch =
+    extras.sameSearch ??
+    (turnKind === SEARCH_TURN.CONTINUATION || turnKind === SEARCH_TURN.EXHAUSTED);
+  if (
+    !canUseInitialEmptyResults({
+      turnKind,
+      sameSearch,
+      executed: extras.executed,
+    })
+  ) {
+    return exhaustedResultsReply(filters, shownCount);
+  }
+  return emptyResultsReply(filters);
+}
+
+function canUseInitialEmptyResults({ turnKind, sameSearch = false, executed = false } = {}) {
+  if (sameSearch) return false;
+  if (turnKind === SEARCH_TURN.CONTINUATION || turnKind === SEARCH_TURN.EXHAUSTED) return false;
+  if (turnKind === SEARCH_TURN.PROPERTY_DETAILS) return false;
+  if (turnKind === SEARCH_TURN.SIMILAR || turnKind === SEARCH_TURN.NEW_AREA) return false;
+  if (executed && turnKind !== SEARCH_TURN.FILTER_UPDATE && turnKind !== SEARCH_TURN.INITIAL) {
+    return false;
+  }
+  return turnKind === SEARCH_TURN.INITIAL || turnKind === SEARCH_TURN.FILTER_UPDATE;
+}
+
 /** Soft nearby-offer copy when the requested location has zero inventory for purpose+type. */
 function locationEmptyNearbyReply(filters = {}, nearbyAreas = []) {
   const loc = (filters.location || 'that area').toString().trim() || 'that area';
@@ -1028,7 +1072,7 @@ function locationEmptyNearbyReply(filters = {}, nearbyAreas = []) {
   return `Let me check what's available near ${loc} for you. I can show nearby options in ${head}, or ${tail}. Which area would you like?`;
 }
 
-function emptyResultOptions(filters = {}) {
+function emptyResultOptions(filters = {}, exploredAreas = []) {
   const opts = [];
   const n = Number(filters.bedrooms);
   const min = Number(filters.bedroomsMin);
@@ -1036,27 +1080,71 @@ function emptyResultOptions(filters = {}) {
   else if (n === 3) opts.push('Try 2 BR');
   else if (n === 2) opts.push('Try 1 BR');
   else if (n === 1) opts.push('Try Studio');
-  opts.push('Nearby areas', 'Change budget');
+  const nearby = nearbyAreaOptions(filters.location, exploredAreas);
+  if (nearby.length) opts.push('Nearby areas');
+  opts.push('Change budget');
   return opts;
 }
 
 const NEARBY_AREA_MAP = [
+  { match: /\bjbr\b|jumeirah beach resid/i, areas: ['Dubai Marina', 'JLT', 'Palm Jumeirah', 'Bluewaters Island'] },
+  { match: /\bjlt\b|jumeirah lake/i, areas: ['Dubai Marina', 'JBR', 'Dubai Media City', 'Palm Jumeirah'] },
+  { match: /bluewaters/i, areas: ['Dubai Marina', 'JBR', 'Palm Jumeirah'] },
+  { match: /dubai marina|\bmarina\b/i, areas: ['JBR', 'JLT', 'Palm Jumeirah', 'Bluewaters Island'] },
+  { match: /palm jumeirah/i, areas: ['Dubai Marina', 'JBR', 'Bluewaters Island'] },
   { match: /dubai hills/i, areas: ['Arabian Ranches', 'Town Square', 'The Springs'] },
   { match: /dubai south|dwc/i, areas: ['Dubai Investment Park', 'Jebel Ali', 'Discovery Gardens'] },
-  { match: /marina/i, areas: ['JBR', 'Palm Jumeirah'] },
-  { match: /downtown/i, areas: ['Business Bay', 'DIFC'] },
+  { match: /downtown/i, areas: ['Business Bay', 'DIFC', 'City Walk'] },
   { match: /jvc|jumeirah village circle/i, areas: ['JVT', 'Dubai Sports City'] },
   { match: /arabian ranches/i, areas: ['Dubai Hills', 'Mudon', 'Town Square'] },
-  { match: /palm jumeirah/i, areas: ['Dubai Marina', 'JBR'] },
   { match: /business bay/i, areas: ['Downtown Dubai', 'DIFC'] },
 ];
 
-function nearbyAreaOptions(location) {
-  const loc = String(location || '');
+function uniqueAreaList(list = []) {
+  return uniqueTypeList(list);
+}
+
+function nearbyAreaOptions(location, exploredAreas = []) {
+  const loc = String(location || '').trim();
+  if (!loc) return ['Dubai Hills', 'Arabian Ranches', 'Dubai Marina'];
+  const explored = new Set(
+    uniqueAreaList([loc, ...(exploredAreas || [])]).map((a) => a.toLowerCase())
+  );
+  let areas = [];
   for (const row of NEARBY_AREA_MAP) {
-    if (row.match.test(loc)) return row.areas.slice();
+    if (row.match.test(loc)) {
+      areas = row.areas.slice();
+      break;
+    }
   }
-  return ['Dubai Hills', 'Arabian Ranches', 'Dubai Marina'];
+  const filtered = areas.filter((area) => !explored.has(String(area).trim().toLowerCase()));
+  return filtered;
+}
+
+function newAreaEmptyReply(filters = {}) {
+  const loc = (filters.location || 'that area').toString().trim() || 'that area';
+  const beds = describeBedroomPhrase(filters).trim();
+  const type = describeTypeSingular(filters);
+  const bedsType = beds ? `${beds} ${type.toLowerCase()}` : type.toLowerCase();
+  return `I couldn't find a matching ${bedsType} in ${loc}. Would you like to try a nearby area, a different bedroom count, or adjust the budget?`
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function similarEmptyReply(filters = {}) {
+  return 'I couldn\'t find more similar properties with those criteria. Would you like to try a nearby area or adjust the budget?';
+}
+
+function widenSimilarSearchFilters(filters = {}, exploredAreas = []) {
+  const next = copySearchFilters(filters);
+  next.budgetMin = null;
+  next.budgetMax = null;
+  const similarAreas = nearbyAreaOptions(next.location, [
+    ...(exploredAreas || []),
+    next.location,
+  ]);
+  if (similarAreas[0]) next.location = similarAreas[0];
+  return next;
 }
 
 function parseEmptyResultChoice(text) {
@@ -1228,23 +1316,338 @@ function mergePropertyTypes(current = [], incoming = [], message = '') {
   return uniqueTypes([...cur, ...next]);
 }
 
+function isPropertyDetailRequest(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  if (!raw) return false;
+  if (/\bthe\s+(first|second|third|fourth)\b/.test(raw)) return true;
+  if (/\bmore\s+details\b/.test(raw)) return true;
+  if (/\btell\s+me\s+more\b/.test(raw)) return true;
+  if (/\b(what are the details|show property details|property details)\b/.test(raw)) return true;
+  if (/^(details|the details)$/.test(raw)) return true;
+  return (
+    /\b(this|that|the)\s+(property|listing|one|apartment|villa|townhouse)\b/.test(raw) &&
+    /\b(tell|about|details|available|availability|price|size|bath|bed)\b/.test(raw)
+  );
+}
+
+function bedroomChoiceMatches(filters = {}, choice) {
+  if (!choice || !filters) return false;
+  if (choice.any) return !!filters.bedroomsAny;
+  if (choice.min != null) return Number(filters.bedroomsMin) === Number(choice.min);
+  if (choice.exact != null && !filters.bedroomsAny) {
+    return Number(filters.bedrooms) === Number(choice.exact);
+  }
+  return false;
+}
+
+function searchSignatureFromFilters(filters = {}) {
+  const purpose = normalizePurpose(filters.purpose) || '';
+  const types = typesFromFilters(filters)
+    .map((t) => String(t).trim().toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .join('+') || 'any';
+  const loc = String(filters.location || '')
+    .trim()
+    .toLowerCase() || 'any';
+  let beds = 'any';
+  if (filters.bedroomsAny) beds = 'any';
+  else if (isBedroomsSet(filters.bedroomsMin)) beds = `${filters.bedroomsMin}+ BR`;
+  else if (filters.bedrooms != null && filters.bedrooms !== '') {
+    const n = Number(filters.bedrooms);
+    beds = n === 0 ? 'Studio' : `${n} BR`;
+  }
+  const budget = filters.budgetMax != null && filters.budgetMax !== '' ? String(filters.budgetMax) : '';
+  const furnished = String(filters.furnished || '').trim().toLowerCase();
+  return [purpose, types, loc, beds, budget, furnished].filter((part) => part !== '').join('|');
+}
+
+function locationsMatch(a, b) {
+  const left = String(a || '').trim().toLowerCase();
+  const right = String(b || '').trim().toLowerCase();
+  if (!left || !right) return false;
+  return left === right;
+}
+
+function restatesExistingSearchCriteria(message, filters = {}) {
+  const raw = String(message || '').trim();
+  if (!raw || isPropertyDetailRequest(raw)) return false;
+  const loc = parseLocationFromMessage(raw);
+  const types = parsePropertyTypesFromMessage(raw);
+  const beds = parseBedroomChoice(raw);
+  const purpose = parsePurposeFromMessage(raw);
+  const lastTypes = typesFromFilters(filters);
+  if (purpose && filters.purpose && normalizePurpose(purpose) !== normalizePurpose(filters.purpose)) {
+    return false;
+  }
+  if (loc && filters.location && !locationsMatch(loc, filters.location)) return false;
+  if (
+    types.length &&
+    lastTypes.length &&
+    types.join('|').toLowerCase() !== lastTypes.join('|').toLowerCase()
+  ) {
+    return false;
+  }
+  if (beds && !bedroomChoiceMatches(filters, beds)) return false;
+  const mentioned =
+    !!(loc && filters.location) ||
+    !!(types.length && lastTypes.length) ||
+    !!(beds && (filters.bedrooms != null || filters.bedroomsMin != null || filters.bedroomsAny)) ||
+    !!(purpose && filters.purpose);
+  return mentioned;
+}
+
 function isShowMoreRequest(text) {
   const raw = String(text || '')
     .trim()
     .toLowerCase()
     .replace(/[.!?]/g, '');
   if (!raw) return false;
-  if (/\btell\s+me\s+more\b/.test(raw) || /\bmore\s+details\b/.test(raw) || /\bthe\s+(first|second|third)\b/.test(raw)) {
-    return false;
-  }
+  if (isPropertyDetailRequest(raw)) return false;
   if (
-    /^(show(\s+me)?\s+more(\s+(properties|listings|options|results|please))?|more(\s+(properties|listings|options|results|please))?|see\s+more|another(\s+(ones?|properties|listings|options))?|next(\s+(page|batch|set|ones?))?)$/i.test(
+    /^(show(\s+me)?\s+more(\s+(properties|listings|options|results|please))?|more(\s+(properties|listings|options|results|please))?|see\s+more|another(\s+(ones?|properties|listings|options|property))?|next(\s+(page|batch|set|ones?))?|continue|keep going)$/i.test(
       raw
     )
   ) {
     return true;
   }
+  if (/\bsame requirements\b/.test(raw)) return true;
+  if (/\bmore\s+(properties|listings|options|results)\b/.test(raw)) return true;
+  if (/\b(need|want)\s+(me\s+)?more\s+(properties|listings|options|results)\b/.test(raw)) return true;
+  if (/\b(show|see|give)\s+(me\s+)?another(\s+(property|properties|listing|listings|ones?))?\b/.test(raw)) {
+    return true;
+  }
+  if (/\banother\s+(property|properties|listing|listings)\b/.test(raw)) return true;
   return /\b(show|see|give)\s+(me\s+)?more(\s+(properties|listings|options|results))?\b/.test(raw);
+}
+
+function isSimilarPropertyRequest(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  if (!raw || isPropertyDetailRequest(raw)) return false;
+  if (/^see similar properties$/.test(raw) || /^similar properties$/.test(raw)) return true;
+  return /\b(see|show|find)\s+(me\s+)?similar(\s+(properties|listings|ones?))?\b/.test(raw);
+}
+
+function isRestatedInventoryComment(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  if (!raw) return false;
+  if (/\b(only|just)\s+\d+\s+(listing|property|result)s?\b/.test(raw)) return true;
+  return /\bno more\b|\bnothing else\b|\ball (that'?s|that is|there is)\b/.test(raw);
+}
+
+function hasExecutedListingSearch(profile = {}) {
+  if (profile.searchAlreadyExecuted) return true;
+  if (String(profile.lastSearchSignature || '').trim()) return true;
+  if (Array.isArray(profile.shownPropertyIds) && profile.shownPropertyIds.length > 0) return true;
+  if (Array.isArray(profile.lastPropertyCards) && profile.lastPropertyCards.length > 0) return true;
+  return false;
+}
+
+function isSearchContinuation(message, filters = {}, { searchAlreadyExecuted = false } = {}) {
+  if (isPropertyDetailRequest(message)) return false;
+  if (isSimilarPropertyRequest(message)) return false;
+  const cta = parseEmptyResultChoice(message);
+  if (cta?.nearby || cta?.budget) return false;
+  const raw = String(message || '').trim();
+  if (!raw) return false;
+
+  const loc = parseLocationFromMessage(raw);
+  if (loc && filters.location && !locationsMatch(loc, filters.location)) return false;
+
+  const types = parsePropertyTypesFromMessage(raw);
+  const lastTypes = typesFromFilters(filters);
+  if (
+    types.length &&
+    lastTypes.length &&
+    types.join('|').toLowerCase() !== lastTypes.join('|').toLowerCase()
+  ) {
+    return false;
+  }
+
+  const beds = parseBedroomChoice(raw);
+  if (beds && searchAlreadyExecuted && !bedroomChoiceMatches(filters, beds)) {
+    return false;
+  }
+
+  if (isShowMoreRequest(raw)) return true;
+
+  if (searchAlreadyExecuted && isVagueConfirm(raw)) return true;
+
+  if (searchAlreadyExecuted && beds && bedroomChoiceMatches(filters, beds)) {
+    return true;
+  }
+
+  if (searchAlreadyExecuted && loc && locationsMatch(loc, filters.location) && !beds && !types.length) {
+    return (
+      /\b(more|still|same|need|looking|keep)\b/i.test(raw) || isRestatedInventoryComment(raw)
+    );
+  }
+
+  if (searchAlreadyExecuted && isRestatedInventoryComment(raw)) return true;
+  if (searchAlreadyExecuted && /\bsame requirements\b/i.test(raw)) return true;
+  if (searchAlreadyExecuted && restatesExistingSearchCriteria(raw, filters)) return true;
+
+  return false;
+}
+
+const SEARCH_TURN = {
+  INITIAL: 'initial_search',
+  CONTINUATION: 'continuation',
+  FILTER_UPDATE: 'filter_update',
+  NEW_AREA: 'new_area_search',
+  SIMILAR: 'similar_search',
+  PROPERTY_DETAILS: 'property_details',
+  EXHAUSTED: 'exhausted',
+};
+
+function classifyListingSearchTurn({
+  userMessage,
+  lastSearchFilters,
+  searchAlreadyExecuted = false,
+  lastSearchSignature = null,
+  shownPropertyIds = [],
+  lastPropertyCards = [],
+} = {}) {
+  const last = lastSearchFilters || {};
+  const executed = hasExecutedListingSearch({
+    searchAlreadyExecuted,
+    lastSearchSignature,
+    shownPropertyIds,
+    lastPropertyCards,
+  });
+
+  if (isPropertyDetailRequest(userMessage)) return SEARCH_TURN.PROPERTY_DETAILS;
+  if (isSimilarPropertyRequest(userMessage)) {
+    return executed ? SEARCH_TURN.SIMILAR : SEARCH_TURN.INITIAL;
+  }
+
+  const loc = parseLocationFromMessage(userMessage);
+  const bareLocation = parseLocationReply(userMessage);
+  const types = parsePropertyTypesFromMessage(userMessage);
+  const beds = parseBedroomChoice(userMessage);
+  const purpose = parsePurposeFromMessage(userMessage);
+  const lastTypes = typesFromFilters(last);
+
+  if (
+    executed &&
+    purpose &&
+    last.purpose &&
+    normalizePurpose(purpose) !== normalizePurpose(last.purpose)
+  ) {
+    return SEARCH_TURN.FILTER_UPDATE;
+  }
+  const emptyChoice = parseEmptyResultChoice(userMessage);
+  if (executed && emptyChoice?.bedrooms && !bedroomChoiceMatches(last, emptyChoice.bedrooms)) {
+    return SEARCH_TURN.FILTER_UPDATE;
+  }
+  const budget = parseBudgetFromMessage(userMessage);
+  if (
+    executed &&
+    budget &&
+    (budget.any ||
+      (budget.budgetMax != null && Number(budget.budgetMax) !== Number(last.budgetMax)) ||
+      (budget.budgetMin != null && Number(budget.budgetMin) !== Number(last.budgetMin)))
+  ) {
+    return SEARCH_TURN.FILTER_UPDATE;
+  }
+
+  const nextLocation = loc || (!beds && !types.length ? bareLocation : null);
+  if (executed && nextLocation && last.location && !locationsMatch(nextLocation, last.location)) {
+    return SEARCH_TURN.NEW_AREA;
+  }
+  if (
+    executed &&
+    bareLocation &&
+    !beds &&
+    !types.length &&
+    String(userMessage || '').trim().split(/\s+/).length <= 4 &&
+    (!last.location || !locationsMatch(bareLocation, last.location))
+  ) {
+    return SEARCH_TURN.NEW_AREA;
+  }
+  if (
+    executed &&
+    types.length &&
+    lastTypes.length &&
+    types.join('|').toLowerCase() !== lastTypes.join('|').toLowerCase()
+  ) {
+    return SEARCH_TURN.FILTER_UPDATE;
+  }
+  if (executed && beds && !bedroomChoiceMatches(last, beds)) {
+    return SEARCH_TURN.FILTER_UPDATE;
+  }
+
+  if (isSearchContinuation(userMessage, last, { searchAlreadyExecuted: executed })) {
+    return executed ? SEARCH_TURN.CONTINUATION : SEARCH_TURN.INITIAL;
+  }
+  if (isShowMoreRequest(userMessage)) {
+    return executed ? SEARCH_TURN.CONTINUATION : SEARCH_TURN.INITIAL;
+  }
+  if (executed && isVagueConfirm(userMessage)) return SEARCH_TURN.CONTINUATION;
+  if (executed && restatesExistingSearchCriteria(userMessage, last)) return SEARCH_TURN.CONTINUATION;
+  return executed ? SEARCH_TURN.CONTINUATION : SEARCH_TURN.INITIAL;
+}
+
+function buildSearchExecutionPlan({
+  userMessage,
+  lastSearchFilters,
+  searchAlreadyExecuted = false,
+  lastSearchSignature = null,
+  shownPropertyIds = [],
+  lastPropertyCards = [],
+  effectiveFilters = null,
+} = {}) {
+  const executed = hasExecutedListingSearch({
+    searchAlreadyExecuted,
+    lastSearchSignature,
+    shownPropertyIds,
+    lastPropertyCards,
+  });
+  let turnKind = classifyListingSearchTurn({
+    userMessage,
+    lastSearchFilters,
+    searchAlreadyExecuted,
+    lastSearchSignature,
+    shownPropertyIds,
+    lastPropertyCards,
+  });
+  if (!executed && turnKind === SEARCH_TURN.CONTINUATION) {
+    turnKind = SEARCH_TURN.INITIAL;
+  }
+
+  const signature = searchSignatureFromFilters(effectiveFilters || lastSearchFilters || {});
+  const previousSignature = String(lastSearchSignature || '').trim();
+  const sameSearch =
+    turnKind === SEARCH_TURN.CONTINUATION ||
+    (executed &&
+      turnKind !== SEARCH_TURN.FILTER_UPDATE &&
+      turnKind !== SEARCH_TURN.NEW_AREA &&
+      turnKind !== SEARCH_TURN.SIMILAR &&
+      (!previousSignature || previousSignature === signature));
+  const resetShown =
+    turnKind === SEARCH_TURN.FILTER_UPDATE ||
+    turnKind === SEARCH_TURN.NEW_AREA ||
+    (turnKind === SEARCH_TURN.INITIAL && !!previousSignature && previousSignature !== signature);
+  const excludeIds = resetShown ? [] : uniqueIdList(shownPropertyIds);
+
+  return {
+    turnKind,
+    signature,
+    previousSignature: previousSignature || null,
+    sameSearch,
+    resetShown,
+    excludeIds,
+    executed,
+  };
 }
 
 function filtersFromRequestBody(body = {}) {
@@ -1379,6 +1782,12 @@ function parseLocationReply(text) {
     .trim()
     .replace(/[.!?]/g, '');
   if (!raw || isUnspecifiedLocationPhrase(raw) || isGeneralKnowledgeQuery(raw)) return null;
+  if (isShowMoreRequest(raw) || isSimilarPropertyRequest(raw) || isPropertyDetailRequest(raw)) return null;
+  const cta = parseEmptyResultChoice(raw);
+  if (cta?.nearby || cta?.budget) return null;
+  if (/^nearby areas$/i.test(raw) || /^change budget$/i.test(raw) || /^see similar properties$/i.test(raw)) {
+    return null;
+  }
   if (isVagueConfirm(raw)) return null;
   if (parsePurposeFromMessage(raw)) return null;
   if (parseBedroomChoice(raw)) return null;
@@ -1529,11 +1938,13 @@ function matchesServiceInquiryPhrase(text) {
 function isListingFollowUp(text) {
   const raw = String(text || '').trim();
   if (!raw) return false;
+  if (isPropertyDetailRequest(raw)) return false;
   if (parseSellIntent(raw) || isSellCta(raw)) return false;
   if (isContentKnowledgeTopic(raw)) return false;
   if (isMultiPropertyServiceQuery(raw) || matchesServiceInquiryPhrase(raw)) return false;
   if (parsePurposeFromMessage(raw)) return true;
   if (isShowMoreRequest(raw)) return true;
+  if (isSimilarPropertyRequest(raw)) return true;
   if (parsePropertyTypeChange(raw)) return true;
   if (parsePropertyTypesFromMessage(raw).length > 1) return true;
   if (wantsDifferentLocation(raw)) return true;
@@ -1907,6 +2318,9 @@ function startFreshIntent(intent, message, currentProfile = {}) {
     intent,
     lastPropertyCards: [],
     shownPropertyIds: [],
+    searchAlreadyExecuted: false,
+    lastSearchSignature: null,
+    exploredAreas: [],
     lastSearchFilters: emptySearchFilters(),
     slotFlow: { awaiting: null, alternatives: null },
     sellListing: emptySellListing(),
@@ -1989,6 +2403,7 @@ function listingStartOptions(intent, profile = {}, message = '') {
 /** True when this turn is not a listing follow-up and must not reuse last search filters. */
 function shouldSkipPropertySearch(text) {
   if (!String(text || '').trim()) return false;
+  if (isPropertyDetailRequest(text)) return true;
   if (parseSellIntent(text) || isSellCta(text)) return true;
   if (isListingFollowUp(text) || isVagueConfirm(text)) return false;
   return isGeneralKnowledgeQuery(text);
@@ -2531,16 +2946,7 @@ async function emptyResultsResult(effectiveFilters) {
   };
 }
 
-function exhaustedResultsResult(effectiveFilters, shownCount = 0) {
-  const loc = (effectiveFilters.location || '').toString().trim();
-  const area = loc ? ` in ${loc}` : '';
-  const type = describeTypePhrase(effectiveFilters, shownCount);
-  const purposeBit =
-    effectiveFilters.purpose === 'Rent'
-      ? 'to rent'
-      : effectiveFilters.purpose === 'Off-plan'
-        ? 'off-plan'
-        : 'for sale';
+function exhaustedResultsResult(effectiveFilters, shownCount = 0, extras = {}) {
   return {
     propertyCards: [],
     sources: [],
@@ -2549,33 +2955,76 @@ function exhaustedResultsResult(effectiveFilters, shownCount = 0) {
       ...profilePatchFromPropertyFilters(effectiveFilters),
       lastSearchFilters: effectiveFilters,
       slotFlow: { awaiting: 'emptyResults', alternatives: null },
+      exploredAreas: effectiveFilters.location ? [effectiveFilters.location] : [],
     },
     viewAllMatching: null,
     effectiveFilters,
     needsEmptyResults: true,
-    clarificationReply: `I've already shown the matching ${type}${area} ${purposeBit}. Would you like to adjust the area, bedrooms, budget, or property type?`
-      .replace(/\s+/g, ' ')
-      .trim(),
-    options: emptyResultOptions(effectiveFilters),
+    clarificationReply: extras.reply || exhaustedResultsReply(effectiveFilters, shownCount),
+    options: extras.options || emptyResultOptions(effectiveFilters, extras.exploredAreas),
     ...emptyResultsClarificationFields(),
     modelPayload: {
       count: 0,
       needsEmptyResults: true,
-      exhausted: true,
+      exhausted: extras.exhausted !== false,
       shownCount,
       instruction:
-        'All matching listings for this search were already shown. Do not repeat previous property cards. Do not invent new listings.',
+        extras.instruction ||
+        'All matching listings for this search were already shown. Do not repeat previous property cards. Do not invent new listings. Do not write "Looking for a … let me check".',
     },
   };
 }
 
 async function searchProperties(
   filters = {},
-  { lastSearchFilters, slotFlow, userMessage, intent, shownPropertyIds = [] } = {}
+  {
+    lastSearchFilters,
+    slotFlow,
+    userMessage,
+    intent,
+    shownPropertyIds = [],
+    searchAlreadyExecuted = false,
+    lastSearchSignature = null,
+    lastPropertyCards = [],
+    exploredAreas = [],
+  } = {}
 ) {
   const lockedIntent = normalizeIntentValue(intent);
+  const executedBefore = hasExecutedListingSearch({
+    searchAlreadyExecuted,
+    lastSearchSignature,
+    shownPropertyIds,
+    lastPropertyCards,
+  });
+  const turnKind = classifyListingSearchTurn({
+    userMessage,
+    lastSearchFilters,
+    searchAlreadyExecuted,
+    lastSearchSignature,
+    shownPropertyIds,
+    lastPropertyCards,
+  });
+
+  const filterCta = parseEmptyResultChoice(userMessage);
+  if (filterCta?.nearby || filterCta?.budget) {
+    return {
+      propertyCards: [],
+      sources: [],
+      leadCaptured: false,
+      profilePatch: {},
+      viewAllMatching: null,
+      modelPayload: {
+        skipped: true,
+        count: 0,
+        instruction:
+          'The visitor chose a nearby-area or budget CTA. Do not rerun the previous listing search. Wait for the selected area or budget.',
+      },
+    };
+  }
+
   if (
-    shouldSkipPropertySearch(userMessage) &&
+    (shouldSkipPropertySearch(userMessage) || turnKind === SEARCH_TURN.PROPERTY_DETAILS) &&
+    turnKind !== SEARCH_TURN.CONTINUATION &&
     !isShowMoreRequest(userMessage)
   ) {
     return {
@@ -2619,10 +3068,13 @@ async function searchProperties(
   const effectiveFilters = resolveEffectiveFilters(filters, lastSearchFilters);
   clearUntrustedBedrooms(effectiveFilters);
 
-  const showMore = isShowMoreRequest(userMessage);
+  const continuation = turnKind === SEARCH_TURN.CONTINUATION;
+  const showMore = continuation;
   if (!showMore) {
-    const mentionedLocation = parseLocationFromMessage(userMessage);
-    if (mentionedLocation && !effectiveFilters.location) {
+    const mentionedLocation =
+      parseLocationFromMessage(userMessage) ||
+      (turnKind === SEARCH_TURN.NEW_AREA ? parseLocationReply(userMessage) : null);
+    if (mentionedLocation && (turnKind === SEARCH_TURN.NEW_AREA || !effectiveFilters.location)) {
       effectiveFilters.location = mentionedLocation;
     }
 
@@ -2649,21 +3101,27 @@ async function searchProperties(
     }
   }
 
+  if (turnKind === SEARCH_TURN.SIMILAR) {
+    const widened = widenSimilarSearchFilters(effectiveFilters, exploredAreas);
+    effectiveFilters.budgetMin = widened.budgetMin;
+    effectiveFilters.budgetMax = widened.budgetMax;
+    effectiveFilters.location = widened.location;
+  }
+
   const purpose = trustedPurpose({ lastSearchFilters, userMessage, slotFlow, intent: lockedIntent });
   effectiveFilters.purpose = purpose;
 
-  const previousLocation = lastSearchFilters?.location || null;
-  const locationChanged =
-    !!previousLocation &&
-    !!effectiveFilters.location &&
-    textsDiffer(previousLocation, effectiveFilters.location);
-  const purposeChanged =
-    !!normalizePurpose(lastSearchFilters?.purpose) &&
-    !!purpose &&
-    normalizePurpose(lastSearchFilters?.purpose) !== purpose;
-  const resetShown = locationChanged || purposeChanged;
-
-  const excludeIds = resetShown ? [] : uniqueIdList(shownPropertyIds);
+  const plan = buildSearchExecutionPlan({
+    userMessage,
+    lastSearchFilters,
+    searchAlreadyExecuted,
+    lastSearchSignature,
+    shownPropertyIds,
+    lastPropertyCards,
+    effectiveFilters,
+  });
+  const { sameSearch, resetShown, excludeIds, signature, previousSignature } = plan;
+  const resolvedKind = plan.turnKind;
   effectiveFilters.excludeRefNos = excludeIds;
 
   console.log(
@@ -2675,7 +3133,15 @@ async function searchProperties(
       fromMessage: parsePurposeFromMessage(userMessage),
       types: typesFromFilters(effectiveFilters),
       showMore,
+      continuation,
+      turnKind: resolvedKind,
+      signature,
+      previousSignature: previousSignature || null,
+      sameSearch,
+      resetShown,
       excludeCount: excludeIds.length,
+      searchAlreadyExecuted: !!searchAlreadyExecuted,
+      executedBefore,
       toolBedrooms: filters.bedrooms ?? null,
       trustedBedrooms: effectiveFilters.bedrooms ?? null,
       bedroomsResolved: !!effectiveFilters.bedroomsResolved,
@@ -2706,6 +3172,9 @@ async function searchProperties(
       budgetMin: effectiveFilters.budgetMin ?? null,
       budgetMax: effectiveFilters.budgetMax ?? null,
       excludeCount: excludeIds.length,
+      signature,
+      sameSearch,
+      turnKind: resolvedKind,
     })
   );
   const { propertyCards, usedPurpose, total, remaining } = await fetchPropertyCards(
@@ -2715,11 +3184,52 @@ async function searchProperties(
   effectiveFilters.purpose = usedPurpose;
   delete effectiveFilters.excludeRefNos;
 
+  const executedPatch = {
+    lastSearchSignature: searchSignatureFromFilters(effectiveFilters),
+    searchAlreadyExecuted: true,
+    exploredAreas: uniqueAreaList([
+      lastSearchFilters?.location,
+      effectiveFilters.location,
+    ]),
+  };
+
   if (propertyCards.length === 0) {
-    if (excludeIds.length && total > 0) {
-      return exhaustedResultsResult(effectiveFilters, excludeIds.length);
+    const journeyAreas = uniqueAreaList([
+      ...(exploredAreas || []),
+      lastSearchFilters?.location,
+      effectiveFilters.location,
+    ]);
+    const zeroReply = replyForZeroHits(resolvedKind, effectiveFilters, excludeIds.length || shownPropertyIds.length, {
+      sameSearch,
+      executed: plan.executed || executedBefore,
+    });
+    const useInitialEmpty = canUseInitialEmptyResults({
+      turnKind: resolvedKind,
+      sameSearch,
+      executed: plan.executed || executedBefore,
+    });
+    if (!useInitialEmpty) {
+      const exhausted = exhaustedResultsResult(effectiveFilters, excludeIds.length || shownPropertyIds.length, {
+        reply: zeroReply,
+        exploredAreas: journeyAreas,
+        options: emptyResultOptions(effectiveFilters, journeyAreas),
+        exhausted: resolvedKind === SEARCH_TURN.CONTINUATION || resolvedKind === SEARCH_TURN.EXHAUSTED,
+        instruction:
+          resolvedKind === SEARCH_TURN.SIMILAR
+            ? 'Similar-property search returned no new listings. Do not repeat previous cards. Do not write "Looking for a … let me check" or "I\'ve already shown the matching". Offer nearby areas or budget.'
+            : resolvedKind === SEARCH_TURN.NEW_AREA
+              ? 'New area search returned no listings. Do not claim these listings were already shown. Do not write "Looking for a … let me check".'
+              : undefined,
+      });
+      exhausted.profilePatch = { ...(exhausted.profilePatch || {}), ...executedPatch };
+      return exhausted;
     }
-    return emptyResultsResult(effectiveFilters);
+    const empty = await emptyResultsResult(effectiveFilters);
+    empty.profilePatch = {
+      ...(empty.profilePatch || {}),
+      ...executedPatch,
+    };
+    return empty;
   }
 
   const extraPayload = {
@@ -2741,11 +3251,18 @@ async function searchProperties(
     shownPropertyIds: propertyCards.map((card) => card.id).filter(Boolean),
     resetShownPropertyIds: resetShown,
     slotFlow: { awaiting: null },
+    ...executedPatch,
   };
-  result.replyOverride = foundListingsReply(effectiveFilters, total, {
-    isShowMore: showMore && excludeIds.length > 0,
-    newCount: propertyCards.length,
-  });
+  if (resolvedKind === SEARCH_TURN.SIMILAR) {
+    result.replyOverride = `Here are similar ${describeBedroomPhrase(effectiveFilters)}${describeTypePhrase(effectiveFilters, propertyCards.length)}${effectiveFilters.location ? ` in ${effectiveFilters.location}` : ''} that could be a good fit.`
+      .replace(/\s+/g, ' ')
+      .trim();
+  } else {
+    result.replyOverride = foundListingsReply(effectiveFilters, total, {
+      isShowMore: sameSearch || resolvedKind === SEARCH_TURN.CONTINUATION,
+      newCount: propertyCards.length,
+    });
+  }
   return result;
 }
 
@@ -2893,7 +3410,19 @@ async function captureLead({ name, phone, email, intent, whatsapp, emailOptional
 async function executeTool(
   name,
   args,
-  { sessionId, lastSearchFilters, leadAlreadyCaptured, slotFlow, userMessage, intent, shownPropertyIds } = {}
+  {
+    sessionId,
+    lastSearchFilters,
+    leadAlreadyCaptured,
+    slotFlow,
+    userMessage,
+    intent,
+    shownPropertyIds,
+    searchAlreadyExecuted,
+    lastSearchSignature,
+    lastPropertyCards,
+    exploredAreas,
+  } = {}
 ) {
   if (name === 'search_properties') {
     return searchProperties(args || {}, {
@@ -2902,6 +3431,10 @@ async function executeTool(
       userMessage,
       intent,
       shownPropertyIds,
+      searchAlreadyExecuted,
+      lastSearchSignature,
+      lastPropertyCards,
+      exploredAreas,
     });
   }
   if (name === 'search_content') return searchContent(args || {});
@@ -2971,6 +3504,16 @@ module.exports = {
   typesFromFilters,
   applyTypesToFilters,
   isShowMoreRequest,
+  isSimilarPropertyRequest,
+  isSearchContinuation,
+  isPropertyDetailRequest,
+  searchSignatureFromFilters,
+  hasExecutedListingSearch,
+  classifyListingSearchTurn,
+  buildSearchExecutionPlan,
+  SEARCH_TURN,
+  canUseInitialEmptyResults,
+  bedroomChoiceMatches,
   filtersFromRequestBody,
   uniqueIdList,
   listingQueryOpts,
@@ -3024,8 +3567,13 @@ module.exports = {
   parseEmptyResultChoice,
   emptyResultOptions,
   emptyResultsReply,
+  exhaustedResultsReply,
+  replyForZeroHits,
   locationEmptyNearbyReply,
   nearbyAreaOptions,
+  newAreaEmptyReply,
+  similarEmptyReply,
+  widenSimilarSearchFilters,
   matchesNamedOption,
   foundListingsReply,
   purposeClarificationReply,

@@ -58,6 +58,9 @@ const conversationSchema = new mongoose.Schema(
         furnished: { type: String, default: null, trim: true },
       },
       shownPropertyIds: { type: [String], default: [] },
+      searchAlreadyExecuted: { type: Boolean, default: false },
+      lastSearchSignature: { type: String, default: null, trim: true },
+      exploredAreas: { type: [String], default: [] },
       slotFlow: {
         awaiting: { type: String, default: null, trim: true },
         alternatives: { type: String, default: null },
