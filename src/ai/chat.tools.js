@@ -224,11 +224,12 @@ function buildListingSearchUrl(filters = {}) {
 }
 
 function buildViewAllMatching(total, filters) {
-  if (!Number.isFinite(total) || total <= PROPERTY_LIMIT) return null;
+  if (!Number.isFinite(total) || total < 1) return null;
   return {
     total,
     url: buildListingSearchUrl(filters),
-    label: `View all ${total} matching properties`,
+    label:
+      total === 1 ? 'View 1 matching property' : `View all ${total} matching properties`,
   };
 }
 
@@ -893,16 +894,20 @@ function parsePurposeFromMessage(text) {
   }
 
   // Rent: same coverage including "I'm looking to rent" / "for rent" / "apartment to rent"
+  // Also mid-sentence "rent room" / "need a 2bhk rent…" — not flexi rent (content).
   if (
-    !/\bbuy\b|\bpurchase\b|\bfor\s+sale\b|off[\s-_]*plan/.test(lower) &&
+    !/\bbuy\b|\bpurchase\b|\bfor\s+sale\b|off[\s-_]*plan|\bflexi(?:ble)?\s*rent\b/.test(lower) &&
     (/^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|i'?m\s+(looking\s+to\s+|looking\s+for\s+)?|i\s+am\s+(looking\s+to\s+|looking\s+for\s+)?|looking\s+to\s+|looking\s+for\s+)?(rent|rental|lease)\b/.test(
       lower
     ) ||
       /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+to\s+rent\b/.test(lower) ||
       /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+for\b.{0,60}\b(to\s+rent|for\s+rent|rental)\b/.test(lower) ||
       /\b(?:want|would\s+like|('d\s+like))\s+to\s+rent\b/.test(lower) ||
-      /\bneed\s+a\b.{0,40}\b(for\s+rent|to\s+rent)\b/.test(lower) ||
+      /\bneed\s+a\b.{0,40}\b(for\s+rent|to\s+rent|rental|rent)\b/.test(lower) ||
       /\b(apartment|villa|townhouse|penthouse|studio|flat|property|home)\s+to\s+rent\b/.test(lower) ||
+      /\brent\s+(?:a\s+|an\s+)?(?:rooms?|flats?|apartments?|villas?|townhouses?|penthouses?|studios?|propert(?:y|ies)|homes?|houses?|units?)\b/.test(
+        lower
+      ) ||
       /\bfor\s+rent\b/.test(lower) ||
       /\bto\s+rent\b/.test(lower) ||
       /\bto\s+lease\b/.test(lower))
@@ -1268,6 +1273,12 @@ function parseBedroomChoice(text) {
   const numbered = raw.match(/\b(\d+)\s*-?\s*(bed|br|bedroom)s?\b/);
   if (numbered) {
     const n = Number(numbered[1]);
+    if (Number.isFinite(n) && n >= 0 && n <= 12) return { exact: n };
+  }
+
+  const bhk = raw.match(/\b(\d+)\s*-?\s*bhk\b/);
+  if (bhk) {
+    const n = Number(bhk[1]);
     if (Number.isFinite(n) && n >= 0 && n <= 12) return { exact: n };
   }
   return null;
@@ -3645,6 +3656,7 @@ module.exports = {
   widenSimilarSearchFilters,
   matchesNamedOption,
   foundListingsReply,
+  buildViewAllMatching,
   purposeClarificationReply,
   bedroomsClarificationReply,
   rankRelatedContentSources,

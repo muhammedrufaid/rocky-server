@@ -42,6 +42,7 @@ const {
   locationEmptyNearbyReply,
   CONVERSATION_INTENTS,
   parseConversationIntent,
+  parseBedroomChoice,
   isExplicitIntentStarter,
   startFreshIntent,
   listingStartReply,
@@ -61,6 +62,7 @@ const {
   isPropertyDetailRequest,
   searchSignatureFromFilters,
   foundListingsReply,
+  buildViewAllMatching,
   hasExecutedListingSearch,
   classifyListingSearchTurn,
   buildSearchExecutionPlan,
@@ -214,6 +216,27 @@ test('Buy purpose phrases match Rent coverage', () => {
   }
   // Content FAQ must not become Buy just because it contains "buy"
   assert.equal(parsePurposeFromMessage('Can foreigners buy property in Dubai?'), null);
+});
+
+test('mid-sentence rent room / rental / 2bhk still resolve Rent without re-asking', () => {
+  const phrase = 'i need a 2bhk rent room';
+  assert.equal(parsePurposeFromMessage(phrase), 'Rent');
+  assert.equal(parseConversationIntent(phrase), CONVERSATION_INTENTS.RENT);
+  assert.deepEqual(parseBedroomChoice(phrase), { exact: 2 });
+  for (const extra of ['need a rental', 'looking for something to rent', 'I want to rent', 'I need a 2 bed for rent']) {
+    assert.equal(parsePurposeFromMessage(extra), 'Rent', extra);
+  }
+  assert.equal(parsePurposeFromMessage('I need a 2bhk room'), null);
+  assert.equal(parsePurposeFromMessage('flexi rent'), null);
+  assert.equal(parsePurposeFromMessage("I don't want to rent, I want to buy"), null);
+
+  const profile = startFreshIntent(parseConversationIntent(phrase), phrase, {});
+  assert.equal(profile.purpose, 'Rent');
+  assert.equal(profile.intent, CONVERSATION_INTENTS.RENT);
+  assert.equal(profile.lastSearchFilters.purpose, 'Rent');
+  assert.equal(profile.lastSearchFilters.bedrooms, 2);
+  assert.equal(profile.slotFlow.awaiting, 'listingIntake');
+  assert.notEqual(profile.slotFlow.awaiting, 'purpose');
 });
 
 // --- Location ---
@@ -690,6 +713,28 @@ test('continuation replies are not the initial Looking for search-status', () =>
   const firstHit = foundListingsReply(filters, 12, { isShowMore: false, newCount: 6 });
   assert.equal(/Looking for/i.test(firstHit), false);
   assert.match(firstHit, /I found 12/i);
+});
+
+test('viewAllMatching is present for any successful search, including below the card cap', () => {
+  const filters = marinaRentFilters();
+  const one = buildViewAllMatching(1, filters);
+  assert.equal(one.total, 1);
+  assert.match(one.url, /\/properties\/rent\/in-dubai/);
+  assert.match(one.url, /[?&]q=Dubai%20Marina/);
+  assert.equal(one.label, 'View 1 matching property');
+
+  const three = buildViewAllMatching(3, filters);
+  assert.equal(three.total, 3);
+  assert.equal(three.url, one.url);
+  assert.equal(three.label, 'View all 3 matching properties');
+
+  const ten = buildViewAllMatching(10, filters);
+  assert.equal(ten.total, 10);
+  assert.equal(ten.url, one.url);
+  assert.equal(ten.label, 'View all 10 matching properties');
+
+  assert.equal(buildViewAllMatching(0, filters), null);
+  assert.equal(buildViewAllMatching(NaN, filters), null);
 });
 
 test('Buy search purpose and restart behavior is unchanged', () => {
