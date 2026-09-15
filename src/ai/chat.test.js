@@ -70,6 +70,7 @@ const {
   filtersFromRequestBody,
   uniqueIdList,
   listingQueryOpts,
+  toPropertyCard,
   resolveEffectiveFilters,
   copySearchFilters,
   emptySearchFilters,
@@ -1072,5 +1073,105 @@ test('repeated show-more clicks keep excluding shownPropertyIds', () => {
     profile.lastSearchFilters.location
   );
   assert.deepEqual(opts.filters.excludeRefNos, ['RO-R-1', 'RO-R-2']);
+});
+
+function sampleListing(overrides = {}) {
+  return {
+    propertyRefNo: 'RO-R-1001',
+    propertyTitle: '2BR Apartment in Dubai Marina',
+    price: '120000',
+    bedrooms: '2',
+    bathrooms: '2',
+    propertySize: '1050',
+    propertySizeUnit: 'sqft',
+    images: ['https://cdn.example.com/marina.jpg'],
+    propertyPurpose: 'Rent',
+    offPlan: 'No',
+    furnished: 'Furnished',
+    propertyType: 'Apartment',
+    towerName: 'Marina Gate',
+    subLocality: '',
+    locality: 'Dubai Marina',
+    city: 'Dubai',
+    ...overrides,
+  };
+}
+
+test('property cards keep existing fields and add location, purpose, furnished, propertyType from the listing', () => {
+  const card = toPropertyCard(sampleListing(), { location: 'Dubai Marina', purpose: 'Rent' });
+  assert.equal(card.id, 'RO-R-1001');
+  assert.equal(card.title, '2BR Apartment in Dubai Marina');
+  assert.equal(card.price, '120000');
+  assert.equal(card.beds, '2');
+  assert.equal(card.baths, '2');
+  assert.equal(card.area, '1050 sqft');
+  assert.equal(card.imageUrl, 'https://cdn.example.com/marina.jpg');
+  assert.match(card.listingUrl, /\/properties\/rent\/in-dubai\/RO-R-1001$/);
+  assert.equal(card.location, 'Dubai Marina');
+  assert.equal(card.purpose, 'Rent');
+  assert.equal(card.furnished, 'Furnished');
+  assert.equal(card.propertyType, 'Apartment');
+});
+
+test('property cards use Off-plan from offPlan Yes, not Buy from propertyPurpose or the listing URL', () => {
+  const card = toPropertyCard(
+    sampleListing({
+      propertyRefNo: 'RO-S-9',
+      propertyPurpose: 'Buy',
+      offPlan: 'Yes',
+      furnished: '',
+      locality: 'Arabian Ranches',
+      towerName: '',
+    }),
+    { location: 'Arabian Ranches', purpose: 'Off-plan' }
+  );
+  assert.match(card.listingUrl, /\/properties\/buy\/in-dubai\/RO-S-9$/);
+  assert.equal(card.purpose, 'Off-plan');
+  assert.equal(card.furnished, null);
+  assert.equal(card.location, 'Arabian Ranches');
+});
+
+test('property cards use null when location, furnished, or type are missing, and do not guess from the URL', () => {
+  const card = toPropertyCard(
+    sampleListing({
+      propertyTitle: '',
+      furnished: 'Unknown',
+      propertyType: '',
+      towerName: '',
+      subLocality: '',
+      locality: '',
+      city: '',
+      propertyPurpose: '',
+      offPlan: '',
+      images: [],
+    }),
+    {}
+  );
+  assert.equal(card.location, null);
+  assert.equal(card.purpose, null);
+  assert.equal(card.furnished, null);
+  assert.equal(card.propertyType, null);
+  assert.equal(card.imageUrl, '');
+  assert.equal(card.title, '');
+});
+
+test('property cards prefer the searched community when it matches a listing location field', () => {
+  const card = toPropertyCard(sampleListing(), { location: 'Dubai Marina' });
+  assert.equal(card.location, 'Dubai Marina');
+  const towerCard = toPropertyCard(sampleListing(), { location: 'Marina Gate' });
+  assert.equal(towerCard.location, 'Marina Gate');
+  const mostSpecific = toPropertyCard(sampleListing(), {});
+  assert.equal(mostSpecific.location, 'Marina Gate');
+});
+
+test('property cards keep compound document types and unknown furnishing as-is or null', () => {
+  const card = toPropertyCard(
+    sampleListing({
+      propertyType: 'Hotel Apartment',
+      furnished: 'Semi-Furnished',
+    })
+  );
+  assert.equal(card.propertyType, 'Hotel Apartment');
+  assert.equal(card.furnished, 'Semi-furnished');
 });
 

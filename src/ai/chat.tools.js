@@ -232,7 +232,59 @@ function buildViewAllMatching(total, filters) {
   };
 }
 
-function toPropertyCard(property) {
+function trimCardValue(value) {
+  const text = String(value == null ? '' : value).trim();
+  return text || null;
+}
+
+/**
+ * Most specific listing location already used by search (tower → sub-locality → locality → city).
+ * If the current search location exactly matches one of those fields, prefer that match.
+ */
+function cardLocation(property, filters = {}) {
+  const tower = trimCardValue(property.towerName);
+  const subLocality = trimCardValue(property.subLocality);
+  const locality = trimCardValue(property.locality);
+  const city = trimCardValue(property.city);
+  const ordered = [tower, subLocality, locality, city].filter(Boolean);
+  if (!ordered.length) return null;
+
+  const searched = trimCardValue(filters.location);
+  if (searched) {
+    const needle = searched.toLowerCase();
+    const exact = ordered.find((value) => value.toLowerCase() === needle);
+    if (exact) return exact;
+  }
+  return ordered[0];
+}
+
+/**
+ * Same classification as fetchByPurpose: offPlan Yes → Off-plan, else Buy/Rent from propertyPurpose.
+ * Falls back to the search filter purpose only when the document has neither signal.
+ */
+function cardPurpose(property, filters = {}) {
+  const offPlan = String(property.offPlan || '').trim().toLowerCase();
+  if (offPlan === 'yes') return 'Off-plan';
+  const fromDoc = normalizePurpose(property.propertyPurpose);
+  if (fromDoc) return fromDoc;
+  return normalizePurpose(filters.purpose) || null;
+}
+
+function cardFurnished(property) {
+  const raw = trimCardValue(property.furnished);
+  if (!raw) return null;
+  return parseFurnishedFromMessage(raw);
+}
+
+function cardPropertyType(property) {
+  const raw = trimCardValue(property.propertyType);
+  if (!raw) return null;
+  const canonical = normalizePropertyType(raw);
+  if (canonical && new RegExp(`^${canonical}s?$`, 'i').test(raw)) return canonical;
+  return raw;
+}
+
+function toPropertyCard(property, filters = {}) {
   const size = (property.propertySize || '').toString().trim();
   const unit = (property.propertySizeUnit || '').toString().trim();
   return {
@@ -244,6 +296,10 @@ function toPropertyCard(property) {
     area: [size, unit].filter(Boolean).join(' '),
     imageUrl: Array.isArray(property.images) && property.images[0] ? property.images[0] : '',
     listingUrl: buildListingUrl(property),
+    location: cardLocation(property, filters),
+    purpose: cardPurpose(property, filters),
+    furnished: cardFurnished(property),
+    propertyType: cardPropertyType(property),
   };
 }
 
@@ -2524,7 +2580,9 @@ async function fetchPropertyCards(filters, search) {
   const result = await fetchByPurpose(requested, opts);
   const total = exclude.length ? unfiltered.total || 0 : result.total || 0;
   return {
-    propertyCards: dedupePropertyCards((result.properties || []).map(toPropertyCard)),
+    propertyCards: dedupePropertyCards(
+      (result.properties || []).map((property) => toPropertyCard(property, filters))
+    ),
     usedPurpose: requested,
     total,
     remaining: result.total || 0,
@@ -3517,6 +3575,7 @@ module.exports = {
   filtersFromRequestBody,
   uniqueIdList,
   listingQueryOpts,
+  toPropertyCard,
   resolveEffectiveFilters,
   parseFurnishedFromMessage,
   parseOccupancyFromMessage,

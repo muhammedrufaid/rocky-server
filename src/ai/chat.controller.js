@@ -54,6 +54,10 @@ function toStoredPropertyCards(cards = []) {
     area: card.area || '',
     imageUrl: card.imageUrl || '',
     listingUrl: card.listingUrl || '',
+    location: card.location ?? null,
+    purpose: card.purpose ?? null,
+    furnished: card.furnished ?? null,
+    propertyType: card.propertyType ?? null,
   }));
 }
 
