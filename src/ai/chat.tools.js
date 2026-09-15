@@ -1775,6 +1775,16 @@ function isContentKnowledgeTopic(text) {
   if (isServicesCatalogQuestion(raw)) return true;
   // Property-management lead flow owns these — not blog Q&A.
   if (isMultiPropertyServiceQuery(raw) || matchesServiceInquiryPhrase(raw)) return false;
+  // Editorial community/area guides ("Best Communities for Families in Dubai") — not a listing
+  // search. Must win over parseLocationFromMessage("in Dubai"), which would otherwise mark
+  // the message as a listing follow-up.
+  if (
+    /\b(best\s+(?:communities|areas|neighbourhoods|neighborhoods)|(?:communities|areas|neighbourhoods|neighborhoods)\s+for\s+families|family[-\s]?friendly\s+(?:communities|areas|neighbourhoods|neighborhoods))\b/.test(
+      raw
+    )
+  ) {
+    return true;
+  }
   return /\b(golden\s+visa|investor\s+visa|visa\s+eligib|buying\s+costs?|cost\s+of\s+buying|cost\s+to\s+buy|costs?\s+involved|transfer\s+fee|dld|mortgage|service\s+charge|rera|freehold|leasehold|flexi\s*rent|flexible\s+rent|payment\s+plans?|financ(?:e|ing|ial)?|payable\s+options?|installments?|roi|invest(?:ing|ment|or)?|summer|winter|spring|autumn|season|prepare|tips?|advice|faq|area\s+guide|tell\s+me\s+about|what\s+is|what\s+are|what\s+should\s+i\s+know|before\s+(?:renting|buying|leasing)|what'?s\s+(?:it\s+like|the\s+latest)|how\s+(?:can|do|to|does|much)|need\s+to\s+know|can\s+i\s+sell|before\s+completion|transaction|market\s+(?:stats?|data|overview)|quarter\s*[1234]|q\s*[1234]|blog|article|posts?|living\s+in|office\s+hours|book\s+(?:a\s+)?viewing|services?\s+(?:do\s+you|you\s+offer|offered|does)|do\s+you\s+(?:offer|help|provide)|company|founded|founder|years?\s+(?:in\s+)?(?:business|operation)|who\s+(?:founded|are\s+you|is\s+rocky)|areas?\s+(?:do\s+you\s+)?cover|contact\s+(?:us|for))\b/.test(
     raw
   );

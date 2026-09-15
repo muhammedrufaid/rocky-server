@@ -1,7 +1,7 @@
 const OpenAI = require('openai');
 const { Conversation } = require('./chat.models');
 const { getSystemPrompt } = require('./chat.prompt');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, isSimilarPropertyRequest, isSearchContinuation, isPropertyDetailRequest, searchSignatureFromFilters, hasExecutedListingSearch, classifyListingSearchTurn, SEARCH_TURN, exhaustedResultsReply, bedroomChoiceMatches, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, isSimilarPropertyRequest, isSearchContinuation, isPropertyDetailRequest, searchSignatureFromFilters, hasExecutedListingSearch, classifyListingSearchTurn, SEARCH_TURN, exhaustedResultsReply, bedroomChoiceMatches, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -812,6 +812,8 @@ function applyListingFilterUpdate(message, profile) {
   if (isPropertyDetailRequest(message) || isShowMoreRequest(message) || isSimilarPropertyRequest(message)) {
     return null;
   }
+  // Content questions that happen to contain "in Dubai" must not become a new-area listing search.
+  if (shouldSkipPropertySearch(message) || isGeneralKnowledgeQuery(message)) return null;
   if (!hasExecutedListingSearch(profile)) return null;
   const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
   if (!last.purpose && !last.location && !typesFromFilters(last).length && !isListingIntent(profile.intent)) {
@@ -1343,6 +1345,7 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
 function applyNewLocationSearch(message, profile) {
   if (wantsDifferentLocation(message)) return null;
   if (isSimilarPropertyRequest(message) || isPropertyDetailRequest(message)) return null;
+  if (shouldSkipPropertySearch(message) || isGeneralKnowledgeQuery(message)) return null;
   const lastForGate = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
   if (
     hasExecutedListingSearch(profile) &&
@@ -1682,11 +1685,16 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
     // After a successful content search, force a text answer — models otherwise re-call
     // search_content until MAX_TOOL_ROUNDS and the user sees "could not finish".
     const forceContentAnswer = contentOnlyReply && searchContentHits > 0;
+    const forceContentSearch = !forceContentAnswer && round === 0 && isContentKnowledgeTopic(userMessage);
     const completion = await openai.chat.completions.create({
       model,
       messages,
       tools: TOOL_DEFINITIONS,
-      tool_choice: forceContentAnswer ? 'none' : 'auto',
+      tool_choice: forceContentAnswer
+        ? 'none'
+        : forceContentSearch
+          ? { type: 'function', function: { name: 'search_content' } }
+          : 'auto',
       max_completion_tokens: contentOnlyReply
         ? CONTENT_REPLY_MAX_TOKENS
         : hasToolResults
@@ -2007,6 +2015,7 @@ const chat = async (req, res) => {
     const canSearchNow =
       slotResult?.type === 'continue' &&
       listingReady &&
+      !shouldSkipPropertySearch(message) &&
       profile.intent !== CONVERSATION_INTENTS.SELL_PROPERTY &&
       profile.intent !== CONVERSATION_INTENTS.PROPERTY_MANAGEMENT;
 

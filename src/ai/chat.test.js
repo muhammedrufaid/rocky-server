@@ -24,6 +24,7 @@ const {
   parseSellServiceLocationChoice,
   sellServiceLocationReply,
   isGeneralKnowledgeQuery,
+  isContentKnowledgeTopic,
   isServiceInquiryMessage,
   serviceContactPromptBlock,
   serviceContactReply,
@@ -133,6 +134,56 @@ test('listing follow-ups still search', () => {
     'show me more properties',
     'i need more properties in dubai marina',
   ]) {
+    assert.equal(isListingFollowUp(phrase), true, phrase);
+    assert.equal(shouldSkipPropertySearch(phrase), false, phrase);
+  }
+});
+
+test('family-communities discovery chip is content, not a listing follow-up', () => {
+  const chip = 'Best Communities for Families in Dubai';
+  assert.equal(parseLocationFromMessage(chip), 'Dubai');
+  assert.equal(isContentKnowledgeTopic(chip), true);
+  assert.equal(isGeneralKnowledgeQuery(chip), true);
+  assert.equal(isListingFollowUp(chip), false);
+  assert.equal(shouldSkipPropertySearch(chip), true);
+  for (const phrase of [
+    'best areas for families in Dubai',
+    'family-friendly communities in Dubai',
+  ]) {
+    assert.equal(isContentKnowledgeTopic(phrase), true, phrase);
+    assert.equal(isListingFollowUp(phrase), false, phrase);
+    assert.equal(shouldSkipPropertySearch(phrase), true, phrase);
+  }
+});
+
+test('family-communities chip stays content after a prior listing search', () => {
+  const chip = 'Best Communities for Families in Dubai';
+  const profile = marinaRentProfile();
+  assert.equal(profile.lastSearchFilters.location, 'Dubai Marina');
+  assert.equal(hasExecutedListingSearch(profile), true);
+  assert.equal(isListingFollowUp(chip), false);
+  assert.equal(shouldSkipPropertySearch(chip), true);
+  assert.equal(isSearchContinuation(chip, profile.lastSearchFilters, { searchAlreadyExecuted: true }), false);
+});
+
+test('other discovery chips keep their existing routing', () => {
+  assert.equal(isListingFollowUp('Properties with a Swimming Pool'), true);
+  assert.equal(shouldSkipPropertySearch('Properties with a Swimming Pool'), false);
+  assert.equal(isListingFollowUp('Furnished Properties Ready to Move In'), true);
+  assert.equal(shouldSkipPropertySearch('Furnished Properties Ready to Move In'), false);
+  assert.equal(isGeneralKnowledgeQuery('Off-Plan Payment Plans Available'), true);
+  assert.equal(shouldSkipPropertySearch('Off-Plan Payment Plans Available'), true);
+  assert.equal(isListingFollowUp('Off-Plan Payment Plans Available'), false);
+});
+
+test('genuine listing queries with in Dubai still search properties', () => {
+  for (const phrase of [
+    '2 bedroom apartment in Dubai Marina',
+    'Show me 2 bedroom apartments in Dubai',
+    'show me villas in Dubai Hills',
+    'find another villa in Dubai South',
+  ]) {
+    assert.equal(isContentKnowledgeTopic(phrase), false, phrase);
     assert.equal(isListingFollowUp(phrase), true, phrase);
     assert.equal(shouldSkipPropertySearch(phrase), false, phrase);
   }
