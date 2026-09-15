@@ -35,7 +35,7 @@ function restrictChatOrigin(req, res, next) {
 }
 
 function validateChat(req, res, next) {
-  const { sessionId, message } = req.body || {};
+  const { sessionId, message, intent } = req.body || {};
 
   if (!sessionId || typeof sessionId !== 'string' || !sessionId.trim()) {
     return res.status(400).json({ success: false, message: 'sessionId is required' });
@@ -54,21 +54,15 @@ function validateChat(req, res, next) {
   }
 
   req.body.sessionId = sessionId.trim();
-  if (typeof message === 'string' && message.trim()) {
-    req.body.message = message.trim();
-  }
-  const intent = req.body?.intent;
+  req.body.message = message.trim();
+
   if (intent != null && intent !== '') {
     if (typeof intent !== 'string') {
       return res.status(400).json({ success: false, message: 'intent must be a string' });
     }
-    const allowed = ['BUY', 'RENT', 'OFF_PLAN', 'SELL_PROPERTY', 'PROPERTY_MANAGEMENT'];
-    const normalized = intent.trim().toUpperCase().replace(/[\s-]+/g, '_');
-    if (!allowed.includes(normalized)) {
-      return res.status(400).json({ success: false, message: 'intent is not recognised' });
-    }
-    req.body.intent = normalized;
+    req.body.intent = intent.trim();
   }
+
   return next();
 }
 

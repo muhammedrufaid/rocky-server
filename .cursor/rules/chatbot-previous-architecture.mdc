@@ -1,0 +1,75 @@
+---
+description: Documents the pre-cleanup_v1 Rocky chatbot architecture for rebuild reference
+globs: src/ai/**
+alwaysApply: false
+---
+
+# Chatbot previous architecture (pre-cleanup_v1)
+
+Use this when rebuilding chat intelligence. The current `src/ai/` shell is intentionally minimal after `cleanup_v1`.
+
+## Entry point
+
+- Mount: `POST /api/chat` via `src/index.js` → `src/ai/chat.routes.js` → controller
+- Request body (old): `{ sessionId, message, intent? }`
+- Allowed intents (old): `BUY`, `RENT`, `OFF_PLAN`, `SELL_PROPERTY`, `PROPERTY_MANAGEMENT`
+- Route stack: origin allowlist → CORS → validate → rate limit → handler
+
+## Old controller flow
+
+1. Load/create `Conversation` by `sessionId`
+2. **`resolvePendingSlots`** — deterministic server flows before the model:
+   - Intent lock/switch (buy/rent/off-plan/sell/PM)
+   - Sell listing & property-management inquiry
+   - Show-more / similar / CTA chips / filter updates / bedroom & purpose clarifications
+3. If clarify → reply + chip `options` (sometimes capture sell/PM lead)
+4. Else for listing intents → **qualify slots**, then either:
+   - **Forced property search** (server-driven when ready), or
+   - **OpenAI tool loop** (up to ~4 rounds)
+5. Persist messages + fat `userProfile`; return rich payload
+
+## Old modules (removed in cleanup_v1)
+
+| File | Role |
+|------|------|
+| `chat.qualify.js` | One-question-at-a-time slots (purpose/type/area/beds/budget); sync ↔ search filters |
+| `chat.tools.js` | Tool defs + NLU helpers; `search_properties`, `search_content`, `capture_lead` |
+| `chat.prompt.js` | System prompt from `userProfile` |
+| Fat `chat.controller.js` | Slot resolution, forced search, model loop, CTAs |
+
+## Old Conversation.userProfile (removed)
+
+Held: preferredAreas, budget, bedrooms, purpose, intent, lastPropertyCards, lastSearchFilters, shownPropertyIds, searchAlreadyExecuted, lastSearchSignature, exploredAreas, slotFlow, qualificationSlots, sellListing, serviceInquiry, leadCaptured.
+
+## Old response shape (not used after cleanup)
+
+```json
+{
+  "reply": "...",
+  "propertyCards": [],
+  "sources": [],
+  "suggestedCta": null,
+  "viewAllMatching": null,
+  "qualification": {},
+  "requiresClarification": true,
+  "options": [],
+  "select": "single"
+}
+```
+
+Post-cleanup API uses standard `{ success, message, data }` like other Rocky controllers.
+
+## Embedding / RAG (unchanged — keep this)
+
+- Model: `src/models/ChatbotKnowledge.js` → collection `chatbot_knowledge`
+- Script: `scripts/embedContent.js` embeds blogs, area guides, FAQs, services, company info
+- Atlas vector index: `chatbot_knowledge_vector_index` on `embedding`
+- Old tool `search_content` embedded the query and vector-searched this collection
+- Property listings use separate `propertyDbService` / property embeddings — not the CMS RAG store
+
+## Dependencies worth reusing on rebuild
+
+- `propertyDbService` for live listing search
+- `AreaGuide` for area blurbs with listings
+- OpenAI chat + embeddings (`OPENAI_CHAT_MODEL` / `OPENAI_EMBEDDING_MODEL`)
+- Env: `OPENAI_*`, `CHAT_*`, `CHATBOT_VECTOR_INDEX`, `FRONTEND_URL`
