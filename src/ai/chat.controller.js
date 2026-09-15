@@ -1,6 +1,17 @@
 const OpenAI = require('openai');
 const { Conversation } = require('./chat.models');
 const { getSystemPrompt } = require('./chat.prompt');
+const {
+  emptySlots,
+  copySlots,
+  hydrateSlots,
+  syncSlotsWithFilters,
+  deriveSlots,
+  nextQuestion,
+  shouldBlockQualification,
+  applySlotsToSearchFilters,
+  appendOptionalFollowUp,
+} = require('./chat.qualify');
 const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, isSimilarPropertyRequest, isSearchContinuation, isPropertyDetailRequest, searchSignatureFromFilters, hasExecutedListingSearch, classifyListingSearchTurn, SEARCH_TURN, exhaustedResultsReply, bedroomChoiceMatches, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
@@ -81,6 +92,7 @@ function mergeProfile(current, patch) {
       awaiting: current.slotFlow?.awaiting || null,
       alternatives: current.slotFlow?.alternatives || null,
     },
+    qualificationSlots: copySlots(current.qualificationSlots || emptySlots()),
     sellListing: copySellListing(current.sellListing || {}),
     serviceInquiry: copyServiceInquiry(current.serviceInquiry || {}),
     leadCaptured: current.leadCaptured || false,
@@ -140,6 +152,7 @@ function mergeProfile(current, patch) {
     });
   }
   if (patch.leadCaptured) next.leadCaptured = true;
+  if (patch.qualificationSlots) next.qualificationSlots = copySlots(patch.qualificationSlots);
 
   return next;
 }
@@ -182,6 +195,7 @@ async function loadConversation(sessionId) {
         exploredAreas: [],
         lastSearchFilters: emptySearchFilters(),
         slotFlow: { awaiting: null },
+        qualificationSlots: emptySlots(),
         sellListing: emptySellListing(),
         serviceInquiry: emptyServiceInquiry(),
         leadCaptured: false,
@@ -834,8 +848,15 @@ function applyListingFilterUpdate(message, profile) {
   const types = parsePropertyTypesFromMessage(message);
   const emptyChoice = parseEmptyResultChoice(message);
   const budget = parseBudgetFromMessage(message);
+  const furnished = parseFurnishedFromMessage(message);
   const next = copySearchFilters(last);
   let changed = false;
+
+  // A furnishing answer is a refinement of the current search, not a new topic.
+  if (furnished && String(furnished).toLowerCase() !== String(last.furnished || '').toLowerCase()) {
+    next.furnished = furnished;
+    changed = true;
+  }
 
   if (emptyChoice?.bedrooms && !bedroomChoiceMatches(last, emptyChoice.bedrooms)) {
     applyBedroomChoice(next, emptyChoice.bedrooms);
@@ -913,7 +934,8 @@ function applyConversationIntent(message, profile, explicitIntent = null) {
   const reply = listingStartReply(detected, nextProfile, message);
   const options = listingStartOptions(detected, nextProfile, message);
 
-  if (isListingIntent(detected) && !needsListingIntake(nextProfile.lastSearchFilters || {})) {
+  if (isListingIntent(detected)) {
+    nextProfile.slotFlow = { awaiting: null, alternatives: null };
     return {
       type: 'continue',
       profile: nextProfile,
@@ -1522,7 +1544,7 @@ async function maybeCaptureSellLead(sessionId, profile, message) {
   return { profile: nextProfile, leadCaptured: !!result.leadCaptured };
 }
 
-async function clarificationResponse(res, { reply, profile, conversation, message, options, leadCaptured = false }) {
+async function clarificationResponse(res, { reply, profile, conversation, message, options, leadCaptured = false, qualification = null }) {
   const safeReply = String(reply || '').trim() || FRIENDLY_CHAT_ERROR;
   conversation.messages.push({ role: 'user', content: message, createdAt: new Date() });
   conversation.messages.push({ role: 'assistant', content: safeReply, createdAt: new Date() });
@@ -1540,10 +1562,41 @@ async function clarificationResponse(res, { reply, profile, conversation, messag
     body.options = options;
     body.select = PURPOSE_SELECT;
   }
+  if (qualification) body.qualification = qualification;
   return res.status(200).json(body);
 }
 
 async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
+  // Slots were already derived and persisted for this turn by chat().
+  const slots = syncSlotsWithFilters(profile.qualificationSlots, profile.lastSearchFilters);
+  const block = shouldBlockQualification(slots, profile, userMessage);
+  if (block) {
+    slots.askedCount = (Number(slots.askedCount) || 0) + 1;
+    const question = nextQuestion(slots);
+    const nextProfile = mergeProfile(profile, {
+      qualificationSlots: slots,
+      lastSearchFilters: applySlotsToSearchFilters(profile.lastSearchFilters, slots),
+    });
+    return {
+      reply: question?.question || purposeClarificationReply(),
+      profile: nextProfile,
+      propertyCards: [],
+      sources: [],
+      suggestedCta: null,
+      viewAllMatching: null,
+      requiresClarification: true,
+      options: question?.options || [],
+      select: PURPOSE_SELECT,
+      qualification: { slots, question },
+    };
+  }
+
+  const preparedFilters = applySlotsToSearchFilters(profile.lastSearchFilters, slots, { unblocking: true });
+  profile = mergeProfile(profile, {
+    qualificationSlots: slots,
+    lastSearchFilters: preparedFilters,
+  });
+
   const result = await executeTool(
     'search_properties',
     {},
@@ -1570,6 +1623,7 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
       lastPropertyCards: result.propertyCards?.length ? result.propertyCards : nextProfile.lastPropertyCards,
     });
   }
+  nextProfile = mergeProfile(nextProfile, { qualificationSlots: slots });
 
   if (result.needsPurpose) {
     return {
@@ -1582,6 +1636,7 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
       requiresClarification: true,
       options: result.options || PURPOSE_OPTIONS,
       select: PURPOSE_SELECT,
+      qualification: { slots, question: null },
     };
   }
 
@@ -1596,6 +1651,7 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
       requiresClarification: true,
       options: BEDROOM_OPTIONS,
       select: PURPOSE_SELECT,
+      qualification: { slots, question: null },
     };
   }
 
@@ -1608,6 +1664,7 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
       skippedSearch: true,
       suggestedCta: null,
       viewAllMatching: null,
+      qualification: { slots, question: null },
     };
   }
 
@@ -1634,18 +1691,28 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
       requiresClarification: true,
       options: responseOpts,
       select: PURPOSE_SELECT,
+      qualification: { slots, question: null },
     };
   }
 
+  const listingReply =
+    result.replyOverride ||
+    foundListingsReply(result.effectiveFilters || nextProfile.lastSearchFilters, result.modelPayload?.total);
+  const follow = appendOptionalFollowUp(
+    listingReply,
+    syncSlotsWithFilters(slots, result.effectiveFilters || nextProfile.lastSearchFilters)
+  );
   return {
-    reply:
-      result.replyOverride ||
-      foundListingsReply(result.effectiveFilters || nextProfile.lastSearchFilters, result.modelPayload?.total),
-    profile: mergeProfile(nextProfile, { slotFlow: { awaiting: null } }),
+    reply: follow.reply,
+    profile: mergeProfile(nextProfile, {
+      slotFlow: { awaiting: null },
+      qualificationSlots: follow.slots,
+    }),
     propertyCards: uniqueBy(result.propertyCards || [], (c) => c.id),
     sources: result.sources || [],
     suggestedCta: null,
     viewAllMatching: result.viewAllMatching || null,
+    qualification: { slots: follow.slots, question: follow.question },
   };
 }
 
@@ -1677,6 +1744,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   let usedSearchProperties = false;
   let lastContentChunks = [];
   let searchContentHits = 0;
+  let pendingQualification = null;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     const hasToolResults = messages.some((m) => m.role === 'tool');
@@ -1728,14 +1796,31 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
       if (!reply) {
         reply = FRIENDLY_CHAT_ERROR;
       }
-      return {
+      const cards = uniqueBy(propertyCards, (c) => c.id);
+      const out = {
         reply,
-        propertyCards: uniqueBy(propertyCards, (c) => c.id),
+        propertyCards: cards,
         sources: uniqueBy(sources, (s) => s.url || s.title),
         leadCaptured,
         profile,
         viewAllMatching,
       };
+      if (pendingQualification) {
+        out.qualification = pendingQualification;
+        out.requiresClarification = true;
+        out.options = pendingQualification.question?.options || [];
+        out.select = PURPOSE_SELECT;
+      } else if (cards.length) {
+        const follow = appendOptionalFollowUp(
+          reply,
+          syncSlotsWithFilters(profile.qualificationSlots, profile.lastSearchFilters)
+        );
+        out.reply = follow.reply;
+        profile = mergeProfile(profile, { qualificationSlots: follow.slots });
+        out.profile = profile;
+        out.qualification = { slots: follow.slots, question: follow.question };
+      }
+      return out;
     }
 
     for (const call of toolCalls) {
@@ -1764,6 +1849,38 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
           }),
         });
         continue;
+      }
+
+      if (call.function?.name === 'search_properties') {
+        const slots = syncSlotsWithFilters(
+          hydrateSlots(profile.qualificationSlots, profile.lastSearchFilters),
+          profile.lastSearchFilters
+        );
+        if (shouldBlockQualification(slots, profile, userMessage)) {
+          slots.askedCount = (Number(slots.askedCount) || 0) + 1;
+          const question = nextQuestion(slots);
+          profile = mergeProfile(profile, {
+            qualificationSlots: slots,
+            lastSearchFilters: applySlotsToSearchFilters(profile.lastSearchFilters, slots),
+          });
+          pendingQualification = { slots, question };
+          messages.push({
+            role: 'tool',
+            tool_call_id: call.id,
+            content: JSON.stringify({
+              count: 0,
+              skipped: true,
+              qualificationSlots: slots,
+              question: question?.question,
+              instruction: `Rephrase ONLY this question and nothing else: "${question?.question || ''}". Never invent a different question. Never ask about a slot that already has a value (including "any").`,
+            }),
+          });
+          continue;
+        }
+        profile = mergeProfile(profile, {
+          qualificationSlots: slots,
+          lastSearchFilters: applySlotsToSearchFilters(profile.lastSearchFilters, slots, { unblocking: true }),
+        });
       }
 
       let result;
@@ -1997,30 +2114,50 @@ const chat = async (req, res) => {
       profile = slotResult.profile;
     }
 
-    const bedroomGate = bedroomClarifyIfNeeded(message, profile);
-    if (bedroomGate) {
-      return clarificationResponse(res, {
-        reply: bedroomGate.reply,
-        profile: bedroomGate.profile,
-        conversation,
-        message,
-        options: bedroomGate.options,
-      });
-    }
-
     const last = profile.lastSearchFilters || emptySearchFilters();
     const listingReady =
       isListingIntent(profile.intent) ||
       !!(parsePurposeFromMessage(message) || last.purpose || profile.purpose);
-    const canSearchNow =
-      slotResult?.type === 'continue' &&
+    const listingQualify =
       listingReady &&
       !shouldSkipPropertySearch(message) &&
       profile.intent !== CONVERSATION_INTENTS.SELL_PROPERTY &&
       profile.intent !== CONVERSATION_INTENTS.PROPERTY_MANAGEMENT;
 
+    if (!listingQualify) {
+      const bedroomGate = bedroomClarifyIfNeeded(message, profile);
+      if (bedroomGate) {
+        return clarificationResponse(res, {
+          reply: bedroomGate.reply,
+          profile: bedroomGate.profile,
+          conversation,
+          message,
+          options: bedroomGate.options,
+        });
+      }
+    }
+
+    // One derive per turn, persisted immediately, so an answer is never asked for twice
+    // even when this turn does not end in a search.
+    if (listingQualify) {
+      const derived = deriveSlots(
+        [...(conversation.messages || []), { role: 'user', content: message }],
+        hydrateSlots(profile.qualificationSlots, profile.lastSearchFilters)
+      );
+      profile = mergeProfile(profile, {
+        qualificationSlots: syncSlotsWithFilters(derived, profile.lastSearchFilters),
+      });
+    }
+
+    const canSearchNow =
+      slotResult?.type === 'continue' && listingQualify;
+
     if (canSearchNow) {
-      const forced = await runForcedPropertySearch({ sessionId, profile, userMessage: message });
+      const forced = await runForcedPropertySearch({
+        sessionId,
+        profile,
+        userMessage: message,
+      });
       const forcedReply = String(forced.reply || '').trim() || FRIENDLY_CHAT_ERROR;
       conversation.messages.push({ role: 'user', content: message, createdAt: new Date() });
       conversation.messages.push({ role: 'assistant', content: forcedReply, createdAt: new Date() });
@@ -2042,6 +2179,7 @@ const chat = async (req, res) => {
             }),
         viewAllMatching: forced.viewAllMatching || null,
       };
+      if (forced.qualification) payload.qualification = forced.qualification;
       if (forced.options) {
         payload.requiresClarification = true;
         payload.options = forced.options;
@@ -2085,6 +2223,7 @@ const chat = async (req, res) => {
       suggestedCta,
       viewAllMatching: result.viewAllMatching || null,
     };
+    if (result.qualification) payload.qualification = result.qualification;
     if (result.options) {
       payload.requiresClarification = true;
       payload.options = result.options;

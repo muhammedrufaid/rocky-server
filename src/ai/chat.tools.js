@@ -1158,7 +1158,7 @@ function describeTypeSingular(filters = {}) {
   return types.join(', ');
 }
 
-function foundListingsReply(filters = {}, total = 0, { isShowMore = false, newCount = 0 } = {}) {
+function foundListingsReply(filters = {}, total = 0, { isShowMore = false, newCount = 0, note = '' } = {}) {
   const loc = (filters.location || '').toString().trim();
   const beds = describeBedroomPhrase(filters);
   const count = Number.isFinite(Number(total)) ? Number(total) : 0;
@@ -1174,9 +1174,19 @@ function foundListingsReply(filters = {}, total = 0, { isShowMore = false, newCo
       .replace(/\s+/g, ' ')
       .trim();
   }
-  return `I found ${count} ${beds}${type}${area}${purposeSuffix}. Would you like the details?`
+  const extra = String(note || '').trim();
+  return `I found ${count} ${beds}${type}${area}${purposeSuffix}.${extra ? ` ${extra}` : ''} Would you like the details?`
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/** Explains that a furnishing preference had no exact matches, without hiding the results. */
+function furnishingRelaxedNote(preference) {
+  const pref = String(preference || '')
+    .trim()
+    .toLowerCase();
+  if (!pref) return '';
+  return `None are listed as ${pref}, so these are the closest matches.`;
 }
 
 function emptyResultsReply(filters = {}) {
@@ -1765,6 +1775,14 @@ function classifyListingSearchTurn({
   if (executed && beds && !bedroomChoiceMatches(last, beds)) {
     return SEARCH_TURN.FILTER_UPDATE;
   }
+  const furnished = parseFurnishedFromMessage(userMessage);
+  if (
+    executed &&
+    furnished &&
+    String(furnished).toLowerCase() !== String(last.furnished || '').toLowerCase()
+  ) {
+    return SEARCH_TURN.FILTER_UPDATE;
+  }
 
   if (isSearchContinuation(userMessage, last, { searchAlreadyExecuted: executed })) {
     return executed ? SEARCH_TURN.CONTINUATION : SEARCH_TURN.INITIAL;
@@ -1867,6 +1885,15 @@ function isNonPlaceLocationToken(text) {
   if (!raw) return true;
   if (
     /^(summer|winter|spring|autumn|fall|general|cash|aed|dirhams?|call|person|question|advance|full|part|total|future|past|present|dubai\s+property)$/i.test(
+      raw
+    )
+  ) {
+    return true;
+  }
+  // Answers to qualification questions (furnishing, timing, usage, must-haves) are
+  // not areas — without this, "Unfurnished" searched a community called "Unfurnished".
+  if (
+    /^(furnished|unfurnished|semi[-\s]?furnished|either|both|ready|ready\s+to\s+move|off[-\s]?plan|handover|investment|invest|personal(\s+use)?|end[-\s]?use|own\s+use|to\s+live\s+in|rental\s+yield|yield|rental\s+income|capital\s+growth|growth|appreciation|immediately|asap|right\s+away|next\s+month|flexible|parking|balcony|sea\s+view|pool|gym|maid'?s?\s+room|no\s+must[-\s]?haves|must[-\s]?haves?)$/i.test(
       raw
     )
   ) {
@@ -1982,6 +2009,7 @@ function parseLocationReply(text) {
   if (parsePurposeFromMessage(raw)) return null;
   if (parseBedroomChoice(raw)) return null;
   if (parsePropertyTypeChange(raw)) return null;
+  if (isNonPlaceLocationToken(raw)) return null;
   if (!/^[A-Za-z0-9][A-Za-z0-9 '.-]{1,80}$/.test(raw)) return null;
   if (firstPropertyTypeIn(raw) && raw.split(/\s+/).length <= 2 && !/\b(dubai|jumeirah|marina|hills|south|palm|bay|circle|village)\b/i.test(raw)) {
     return null;
@@ -2696,30 +2724,46 @@ function dedupePropertyCards(cards = []) {
 }
 
 async function fetchPropertyCards(filters, search) {
-  const opts = listingQueryOpts(filters, search);
   const requested = normalizePurpose(filters.purpose);
   if (!requested) {
-    return { propertyCards: [], usedPurpose: null, total: 0, remaining: 0 };
+    return { propertyCards: [], usedPurpose: null, total: 0, remaining: 0, relaxedFurnishing: null };
   }
-  const exclude = uniqueIdList(filters.excludeRefNos || []);
-  const unfilteredOpts = {
-    ...opts,
-    filters: { ...(opts.filters || {}), excludeRefNos: undefined },
-  };
-  delete unfilteredOpts.filters.excludeRefNos;
 
-  const unfiltered = exclude.length
-    ? await fetchByPurpose(requested, unfilteredOpts)
-    : null;
-  const result = await fetchByPurpose(requested, opts);
-  const total = exclude.length ? unfiltered.total || 0 : result.total || 0;
+  let used = filters;
+  let relaxedFurnishing = null;
+  let result = await fetchByPurpose(requested, listingQueryOpts(used, search));
+
+  // Furnishing is a stated preference, not a hard requirement: many listings
+  // leave the field blank, so it must never turn a matching area/bedroom search
+  // into a no-results dead end.
+  if (!(result.properties || []).length && filters.furnished) {
+    const softFilters = { ...filters, furnished: null };
+    const softResult = await fetchByPurpose(requested, listingQueryOpts(softFilters, search));
+    if ((softResult.properties || []).length) {
+      used = softFilters;
+      result = softResult;
+      relaxedFurnishing = filters.furnished;
+    }
+  }
+
+  const exclude = uniqueIdList(used.excludeRefNos || []);
+  let total = result.total || 0;
+  if (exclude.length) {
+    const unfiltered = await fetchByPurpose(
+      requested,
+      listingQueryOpts({ ...used, excludeRefNos: [] }, search)
+    );
+    total = unfiltered.total || 0;
+  }
+
   return {
     propertyCards: dedupePropertyCards(
-      (result.properties || []).map((property) => toPropertyCard(property, filters))
+      (result.properties || []).map((property) => toPropertyCard(property, used))
     ),
     usedPurpose: requested,
     total,
     remaining: result.total || 0,
+    relaxedFurnishing,
   };
 }
 
@@ -3271,7 +3315,12 @@ async function searchProperties(
     }
 
     const bedChoice = parseBedroomChoice(userMessage);
-    if (bedChoice) applyBedroomChoice(effectiveFilters, bedChoice);
+    // A bare "Any" answers whichever question was just asked (budget, furnishing, ...),
+    // so it must not wipe a bedroom count the visitor already gave.
+    const bareAny = !!bedChoice?.any && isBedroomSkip(userMessage);
+    if (bedChoice && !(bareAny && isBedroomsResolved(effectiveFilters))) {
+      applyBedroomChoice(effectiveFilters, bedChoice);
+    }
 
     const budgetChoice = parseBudgetFromMessage(userMessage, {
       requireBudgetContext: slotFlow?.awaiting === 'budget',
@@ -3369,12 +3418,14 @@ async function searchProperties(
       turnKind: resolvedKind,
     })
   );
-  const { propertyCards, usedPurpose, total, remaining } = await fetchPropertyCards(
+  const { propertyCards, usedPurpose, total, remaining, relaxedFurnishing } = await fetchPropertyCards(
     effectiveFilters,
     search
   );
   effectiveFilters.purpose = usedPurpose;
   delete effectiveFilters.excludeRefNos;
+  // Keep saved filters, the signature, and the View-all link aligned with what was actually searched.
+  if (relaxedFurnishing) effectiveFilters.furnished = null;
 
   const executedPatch = {
     lastSearchSignature: searchSignatureFromFilters(effectiveFilters),
@@ -3453,6 +3504,7 @@ async function searchProperties(
     result.replyOverride = foundListingsReply(effectiveFilters, total, {
       isShowMore: sameSearch || resolvedKind === SEARCH_TURN.CONTINUATION,
       newCount: propertyCards.length,
+      note: furnishingRelaxedNote(relaxedFurnishing),
     });
   }
 
@@ -3784,6 +3836,7 @@ module.exports = {
   widenSimilarSearchFilters,
   matchesNamedOption,
   foundListingsReply,
+  furnishingRelaxedNote,
   buildViewAllMatching,
   matchAreaGuidesForLocation,
   areaGuideBlurb,

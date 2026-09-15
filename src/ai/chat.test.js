@@ -63,6 +63,7 @@ const {
   searchSignatureFromFilters,
   foundListingsReply,
   buildViewAllMatching,
+  furnishingRelaxedNote,
   matchAreaGuidesForLocation,
   areaGuideBlurb,
   areaGuideSource,
@@ -83,6 +84,8 @@ const {
   emptySearchFilters,
   applyBedroomChoice,
   applyBudgetChoice,
+  isBedroomSkip,
+  isBedroomsResolved,
   nearbyAreaOptions,
   newAreaEmptyReply,
   similarEmptyReply,
@@ -90,6 +93,16 @@ const {
   parseEmptyResultChoice,
   emptyResultOptions,
 } = require('./chat.tools');
+const {
+  emptySlots,
+  deriveSlots,
+  nextQuestion,
+  questionFor,
+  shouldBlockQualification,
+  applySlotsToSearchFilters,
+  appendOptionalFollowUp,
+  syncSlotsWithFilters,
+} = require('./chat.qualify');
 
 function runSellTurns(messages) {
   let listing = emptySellListing();
@@ -1341,5 +1354,340 @@ test('property cards keep compound document types and unknown furnishing as-is o
   );
   assert.equal(card.propertyType, 'Hotel Apartment');
   assert.equal(card.furnished, 'Semi-furnished');
+});
+
+test('complete rent query skips blocking questions and appends furnished after results', () => {
+  const message =
+    'I want to rent a 2-bedroom apartment in Dubai Marina with a budget of AED 120K';
+  const slots = deriveSlots([{ role: 'user', content: message }], emptySlots());
+  assert.equal(slots.purpose, 'rent');
+  assert.equal(slots.propertyType, 'apartment');
+  assert.equal(slots.location, 'Dubai Marina');
+  assert.equal(slots.beds, 2);
+  assert.equal(slots.budget.max, 120000);
+  assert.equal(slots.budget.period, 'year');
+  assert.equal(slots.furnished, null);
+  assert.equal(shouldBlockQualification(slots, {}), false);
+  assert.equal(nextQuestion(slots).slot, 'furnished');
+
+  const listingReply = foundListingsReply(marinaRentFilters(), 5);
+  const follow = appendOptionalFollowUp(listingReply, slots);
+  assert.match(follow.reply, /I found 5 2-bedroom apartments in Dubai Marina to rent/);
+  assert.match(follow.reply, /furnished or unfurnished/i);
+  assert.equal(/Would you like the details/i.test(follow.reply), false);
+  assert.equal(follow.question.slot, 'furnished');
+  assert.deepEqual(follow.question.options, ['Furnished', 'Unfurnished', 'Either']);
+  assert.equal(follow.slots.askedOptional, 1);
+});
+
+test('partial input asks one question in rent vs buy order', () => {
+  const rent = deriveSlots([{ role: 'user', content: 'I want to rent' }], emptySlots());
+  assert.equal(rent.purpose, 'rent');
+  assert.equal(nextQuestion(rent).slot, 'propertyType');
+  assert.match(nextQuestion(rent).question, /type of property/i);
+
+  const rentTyped = deriveSlots([{ role: 'user', content: 'Apartment' }], rent);
+  assert.equal(rentTyped.purpose, 'rent');
+  assert.equal(rentTyped.propertyType, 'apartment');
+  assert.equal(nextQuestion(rentTyped).slot, 'location');
+
+  const buy = deriveSlots([{ role: 'user', content: 'I want to buy an apartment' }], emptySlots());
+  assert.equal(buy.purpose, 'buy');
+  assert.equal(buy.propertyType, 'apartment');
+  assert.equal(nextQuestion(buy).slot, 'budget');
+});
+
+test('questions are worded per purpose and carry usable chips', () => {
+  const rent = emptySlots();
+  rent.purpose = 'rent';
+  const rentType = questionFor('propertyType', 'rent');
+  assert.match(rentType.question, /What type of property are you looking for — an apartment, villa, or townhouse\?/);
+  const rentBudget = questionFor('budget', 'rent');
+  assert.match(rentBudget.question, /annual rental budget/i);
+  assert.deepEqual(rentBudget.options, ['Up to 60k', '60k - 100k', '100k - 150k', '150k+', 'Any']);
+  assert.match(questionFor('location', 'rent').question, /Which areas do you prefer\?/);
+
+  const buyType = questionFor('propertyType', 'buy');
+  assert.match(buyType.question, /What are you looking to buy — an apartment, villa, or townhouse\?/);
+  const buyBudget = questionFor('budget', 'buy');
+  assert.match(buyBudget.question, /budget range/i);
+  assert.deepEqual(buyBudget.options, ['Up to 1M', '1M - 2M', '2M - 5M', '5M+', 'Any']);
+  assert.match(questionFor('location', 'buy').question, /Which areas are you considering\?/);
+  assert.match(questionFor('usage', 'buy').question, /investment or personal use/i);
+  assert.match(questionFor('focus', 'buy').question, /rental yield or long-term capital growth/i);
+  assert.match(questionFor('readiness', 'buy').question, /ready property or off-plan/i);
+  assert.match(questionFor('moveIn', 'rent').question, /When are you looking to move in\?/);
+  assert.match(questionFor('mustHaves', 'rent').question, /must-have/i);
+
+  // No question is ever a bare label, and every chip set is answerable.
+  for (const slot of ['purpose', 'propertyType', 'location', 'beds', 'budget', 'furnished']) {
+    for (const purpose of ['rent', 'buy']) {
+      const q = questionFor(slot, purpose);
+      assert.match(q.question, /\?$/, `${slot}/${purpose}`);
+      assert.ok(q.options.length >= 2, `${slot}/${purpose}`);
+    }
+  }
+});
+
+test('budget chips and free text resolve to the right min/max', () => {
+  const rentAsk = [{ role: 'assistant', content: "What's your annual rental budget?" }];
+  const rentPrev = deriveSlots([{ role: 'user', content: 'I want to rent an apartment in JVC' }], emptySlots());
+  rentPrev.beds = 2;
+
+  const upTo = deriveSlots([...rentAsk, { role: 'user', content: 'Up to 60k' }], rentPrev);
+  assert.deepEqual(upTo.budget, { min: null, max: 60000, period: 'year' });
+
+  const band = deriveSlots([...rentAsk, { role: 'user', content: '60k - 100k' }], rentPrev);
+  assert.deepEqual(band.budget, { min: 60000, max: 100000, period: 'year' });
+
+  const openEnded = deriveSlots([...rentAsk, { role: 'user', content: '150k+' }], rentPrev);
+  assert.deepEqual(openEnded.budget, { min: 150000, max: null, period: 'year' });
+
+  const buyPrev = deriveSlots([{ role: 'user', content: 'I want to buy a villa in Dubai Hills' }], emptySlots());
+  buyPrev.beds = 3;
+  const buyAsk = [{ role: 'assistant', content: "What's your budget range?" }];
+  const buyBand = deriveSlots([...buyAsk, { role: 'user', content: '2M - 5M' }], buyPrev);
+  assert.deepEqual(buyBand.budget, { min: 2000000, max: 5000000, period: 'total' });
+  const buyOpen = deriveSlots([...buyAsk, { role: 'user', content: '5M+' }], buyPrev);
+  assert.deepEqual(buyOpen.budget, { min: 5000000, max: null, period: 'total' });
+  const between = deriveSlots(
+    [{ role: 'user', content: 'between 1 and 2 million' }],
+    buyPrev
+  );
+  assert.deepEqual(between.budget, { min: 1000000, max: 2000000, period: 'total' });
+
+  // A bedroom range is never a budget.
+  const beds = deriveSlots([{ role: 'user', content: '2 - 3 bedrooms' }], rentPrev);
+  assert.equal(beds.budget, null);
+});
+
+test('a furnishing answer refines the search and never becomes a dead end', () => {
+  // The answer is a refinement of the live search, not a new topic.
+  const searched = {
+    intent: CONVERSATION_INTENTS.RENT,
+    searchAlreadyExecuted: true,
+    lastSearchSignature: searchSignatureFromFilters(marinaRentFilters()),
+    shownPropertyIds: ['r1', 'r2', 'r3', 'r4'],
+    lastPropertyCards: [{ id: 'r1' }],
+    lastSearchFilters: marinaRentFilters(),
+  };
+  const turnKind = classifyListingSearchTurn({
+    userMessage: 'Unfurnished',
+    lastSearchFilters: searched.lastSearchFilters,
+    searchAlreadyExecuted: searched.searchAlreadyExecuted,
+    lastSearchSignature: searched.lastSearchSignature,
+    shownPropertyIds: searched.shownPropertyIds,
+    lastPropertyCards: searched.lastPropertyCards,
+  });
+  assert.equal(turnKind, SEARCH_TURN.FILTER_UPDATE);
+
+  // Zero exact furnishing matches must still return the listings, with a note.
+  const relaxed = marinaRentFilters();
+  const note = furnishingRelaxedNote('Unfurnished');
+  const reply = foundListingsReply(relaxed, 4, { note });
+  assert.match(reply, /I found 4 2-bedroom apartments in Dubai Marina to rent\./);
+  assert.match(reply, /None are listed as unfurnished, so these are the closest matches\./);
+  assert.match(reply, /Would you like the details\?$/);
+  assert.equal(/let me check|nearby|different area/i.test(reply), false);
+  // The View-all link matches the relaxed result set.
+  assert.equal(buildViewAllMatching(4, relaxed).total, 4);
+
+  // Existing replies are byte-identical when nothing was relaxed.
+  assert.equal(furnishingRelaxedNote(null), '');
+  assert.equal(foundListingsReply(relaxed, 4, { note: '' }), foundListingsReply(relaxed, 4));
+});
+
+test('optional follow-ups stop after the cap so it never becomes a form', () => {
+  const slots = deriveSlots(
+    [{ role: 'user', content: 'I want to rent a 2-bedroom apartment in Dubai Marina under 120k' }],
+    emptySlots()
+  );
+  const listingReply = foundListingsReply(marinaRentFilters(), 4);
+
+  const first = appendOptionalFollowUp(listingReply, slots);
+  assert.equal(first.question.slot, 'furnished');
+  assert.equal(first.slots.askedOptional, 1);
+
+  const answered = { ...first.slots, furnished: 'unfurnished' };
+  const second = appendOptionalFollowUp(listingReply, answered);
+  assert.equal(second.question.slot, 'moveIn');
+  assert.equal(second.slots.askedOptional, 2);
+
+  const answeredAgain = { ...second.slots, moveIn: 'immediately' };
+  const third = appendOptionalFollowUp(listingReply, answeredAgain);
+  assert.equal(third.question, null);
+  assert.equal(third.reply, listingReply);
+  assert.equal(third.slots.askedOptional, 2);
+
+  // Never bundle a second question onto a reply that already asks one.
+  const exhausted = exhaustedResultsReply(marinaRentFilters(), 4);
+  assert.match(exhausted, /\?$/);
+  const notBundled = appendOptionalFollowUp(exhausted, slots);
+  assert.equal(notBundled.question, null);
+  assert.equal(notBundled.reply, exhausted);
+  assert.equal(notBundled.slots.askedOptional, 0);
+
+  const nearby = "Let me check what's available near Arabian Ranches for you. Would you like to try a different area or adjust the search?";
+  const alsoNotBundled = appendOptionalFollowUp(nearby, slots);
+  assert.equal(alsoNotBundled.question, null);
+  assert.equal((alsoNotBundled.reply.match(/\?/g) || []).length, 1);
+});
+
+test('a bare Any answer does not wipe a bedroom count the visitor already gave', () => {
+  // "Any" answering the budget question must leave 2 bedrooms intact.
+  const known = marinaRentFilters();
+  assert.equal(known.bedrooms, 2);
+  const afterAny = resolveEffectiveFilters({}, known);
+  const bare = parseBedroomChoice('Any');
+  assert.deepEqual(bare, { any: true });
+  assert.equal(isBedroomSkip('Any'), true);
+  assert.equal(isBedroomsResolved(afterAny), true);
+
+  const slots = deriveSlots(
+    [
+      { role: 'assistant', content: "What's your annual rental budget?" },
+      { role: 'user', content: 'Any' },
+    ],
+    deriveSlots([{ role: 'user', content: 'I want to rent a 2-bedroom apartment in Dubai Marina' }], emptySlots())
+  );
+  assert.equal(slots.budget, 'any');
+  assert.equal(slots.beds, 2, 'bare Any answered budget, not bedrooms');
+  const filters = applySlotsToSearchFilters(known, slots, { unblocking: true });
+  assert.equal(filters.bedrooms, 2);
+  assert.equal(filters.bedroomsAny, false);
+  assert.equal(filters.budgetMax, null);
+  assert.match(foundListingsReply(filters, 4), /I found 4 2-bedroom apartments in Dubai Marina to rent/);
+
+  // An explicit "Any BR" still means any bedroom count.
+  assert.equal(isBedroomSkip('Any BR'), false);
+  assert.deepEqual(parseBedroomChoice('Any BR'), { any: true });
+});
+
+test('filters resolved this turn win over stale slots', () => {
+  const slots = deriveSlots(
+    [{ role: 'user', content: 'I want to rent a 2-bedroom apartment in Dubai Marina' }],
+    emptySlots()
+  );
+  assert.equal(slots.location, 'Dubai Marina');
+
+  // A bare area reply is resolved by the existing filter pipeline; slots must follow it.
+  const moved = copySearchFilters(marinaRentFilters());
+  moved.location = 'JBR';
+  const synced = syncSlotsWithFilters(slots, moved);
+  assert.equal(synced.location, 'JBR');
+  assert.equal(synced.purpose, 'rent');
+  assert.equal(synced.beds, 2);
+
+  // "Any" answers are not filters, so they survive a sync.
+  const anyLocation = { ...slots, location: 'any', budget: 'any' };
+  const cityWide = copySearchFilters(marinaRentFilters());
+  cityWide.location = null;
+  const syncedAny = syncSlotsWithFilters(anyLocation, cityWide);
+  assert.equal(syncedAny.location, 'any');
+  assert.equal(syncedAny.budget, 'any');
+  assert.equal(nextQuestion(syncedAny).slot, 'furnished');
+});
+
+test('any / does not matter fills the pending slot and is never re-asked', () => {
+  const prev = deriveSlots([{ role: 'user', content: 'I want to rent an apartment in JVC' }], emptySlots());
+  assert.equal(prev.beds, null);
+  const anyBeds = deriveSlots(
+    [
+      { role: 'assistant', content: 'How many bedrooms?' },
+      { role: 'user', content: "doesn't matter" },
+    ],
+    prev
+  );
+  assert.equal(anyBeds.purpose, 'rent');
+  assert.equal(anyBeds.propertyType, 'apartment');
+  assert.equal(anyBeds.location, 'JVC');
+  assert.equal(anyBeds.beds, 'any');
+  assert.equal(nextQuestion(anyBeds).slot, 'budget');
+
+  const flexible = deriveSlots([{ role: 'user', content: 'flexible' }], anyBeds);
+  assert.equal(flexible.beds, 'any');
+  assert.equal(flexible.budget, 'any');
+  assert.equal(nextQuestion(flexible).slot, 'furnished');
+});
+
+test('askedCount cap of 3 searches with remaining nulls', () => {
+  const slots = emptySlots();
+  slots.purpose = 'rent';
+  slots.askedCount = 3;
+  assert.equal(shouldBlockQualification(slots, {}), false);
+  const filters = applySlotsToSearchFilters(emptySearchFilters(), slots, { unblocking: true });
+  assert.equal(filters.purpose, 'Rent');
+  assert.equal(filters.location, null);
+  assert.equal(filters.bedroomsAny, true);
+  assert.equal(filters.bedroomsResolved, true);
+});
+
+test('qualification slots persist and later messages do not clear earlier values', () => {
+  let slots = deriveSlots([{ role: 'user', content: 'I want to rent a villa' }], emptySlots());
+  assert.equal(slots.purpose, 'rent');
+  assert.equal(slots.propertyType, 'villa');
+  slots = deriveSlots([{ role: 'user', content: 'Dubai Hills' }], slots);
+  assert.equal(slots.purpose, 'rent');
+  assert.equal(slots.propertyType, 'villa');
+  assert.equal(slots.location, 'Dubai Hills');
+  slots = deriveSlots([{ role: 'user', content: '2 bedroom' }], slots);
+  assert.equal(slots.purpose, 'rent');
+  assert.equal(slots.propertyType, 'villa');
+  assert.equal(slots.location, 'Dubai Hills');
+  assert.equal(slots.beds, 2);
+});
+
+test('qualification does not change viewAllMatching, propertyCards, or area-guide blending', () => {
+  const filters = marinaRentFilters();
+  const viewAll = buildViewAllMatching(5, filters);
+  assert.equal(viewAll.total, 5);
+  assert.match(viewAll.label, /View all 5 matching properties/);
+
+  const listing = sampleListing();
+  const card = toPropertyCard(listing, { location: 'Dubai Marina' });
+  assert.equal(card.location, 'Dubai Marina');
+  assert.ok(card.listingUrl);
+
+  const jvcGuide = {
+    title: 'Jumeirah Village Circle',
+    slug: 'jumeirah-village-circle',
+    path: '/area-guides/jumeirah-village-circle',
+    about: 'Jumeirah Village Circle (JVC) is a large masterplan. It has parks and retail.',
+  };
+  const blended = blendListingReplyWithAreaGuide(foundListingsReply(filters, 5), jvcGuide);
+  assert.match(blended, /Jumeirah Village Circle/);
+  assert.match(blended, /I found 5/);
+  const follow = appendOptionalFollowUp(blended, deriveSlots(
+    [{ role: 'user', content: 'I want to rent a 2-bedroom apartment in Dubai Marina with a budget of AED 120K' }],
+    emptySlots()
+  ));
+  assert.match(follow.reply, /Jumeirah Village Circle/);
+  assert.match(follow.reply, /I found 5/);
+});
+
+test('two-turn qualification reaches search after budget', () => {
+  const turn1 = 'I want to rent a 2-bedroom apartment in Dubai Marina';
+  const slots1 = deriveSlots([{ role: 'user', content: turn1 }], emptySlots());
+  assert.equal(shouldBlockQualification(slots1, {}), true);
+  assert.equal(nextQuestion(slots1).slot, 'budget');
+  slots1.askedCount = 1;
+
+  const slots2 = deriveSlots(
+    [
+      { role: 'assistant', content: "What's your budget for this?" },
+      { role: 'user', content: 'AED 120K' },
+    ],
+    slots1
+  );
+  assert.equal(slots2.purpose, 'rent');
+  assert.equal(slots2.location, 'Dubai Marina');
+  assert.equal(slots2.beds, 2);
+  assert.equal(slots2.budget.max, 120000);
+  assert.equal(shouldBlockQualification(slots2, {}), false);
+  const filters = applySlotsToSearchFilters(emptySearchFilters(), slots2, { unblocking: true });
+  assert.equal(filters.purpose, 'Rent');
+  assert.equal(filters.location, 'Dubai Marina');
+  assert.equal(filters.bedrooms, 2);
+  assert.equal(filters.budgetMax, 120000);
 });
 
