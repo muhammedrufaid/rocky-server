@@ -2,6 +2,7 @@ const OpenAI = require('openai');
 const propertyDbService = require('../services/propertyDbService');
 const { Lead } = require('./chat.models');
 const ChatbotKnowledge = require('../models/ChatbotKnowledge');
+const AreaGuide = require('../models/AreaGuide');
 
 const VECTOR_INDEX_NAME = process.env.CHATBOT_VECTOR_INDEX || 'chatbot_knowledge_vector_index';
 const VECTOR_MIN_SCORE = Number(process.env.CHAT_VECTOR_MIN_SCORE) || 0.75;
@@ -690,6 +691,118 @@ const SELL_AREA_ALIASES = [
   { match: /\bdowntown(\s+dubai)?\b/i, canonical: 'Downtown Dubai' },
   { match: /\bjbr\b|\bjumeirah\s+beach\s+residence\b/i, canonical: 'JBR' },
 ];
+
+function normalizePlaceKey(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/['’]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function slugifyPlace(value) {
+  return normalizePlaceKey(value).replace(/\s+/g, '-');
+}
+
+/** Reuse SELL_AREA_ALIASES so "JVC" and "Jumeirah Village Circle" are the same place. */
+function locationAliasRow(location) {
+  const raw = String(location || '').trim();
+  if (!raw) return null;
+  const hits = SELL_AREA_ALIASES.filter((row) => row.match.test(raw));
+  return hits.length === 1 ? hits[0] : null;
+}
+
+function guideMatchesLocation(guide, location) {
+  const locKey = normalizePlaceKey(location);
+  if (!locKey || !guide) return false;
+  const titleKey = normalizePlaceKey(guide.title);
+  if (titleKey && titleKey === locKey) return true;
+  const slug = String(guide.slug || '')
+    .trim()
+    .toLowerCase();
+  if (slug && slug === slugifyPlace(location)) return true;
+  const listingTerms = (guide.listingsSearch || []).map(normalizePlaceKey).filter(Boolean);
+  if (listingTerms.includes(locKey)) return true;
+  const alias = locationAliasRow(location);
+  if (alias && alias.match.test(String(guide.title || ''))) return true;
+  return false;
+}
+
+function matchAreaGuidesForLocation(guides, location) {
+  const loc = String(location || '').trim();
+  if (!loc) return [];
+  return (guides || []).filter((guide) => guideMatchesLocation(guide, loc));
+}
+
+function areaGuidePageUrl(guide) {
+  const path = String(guide?.path || '').trim();
+  if (path) {
+    const p = path.startsWith('/') ? path : `/${path}`;
+    return `${frontendBase()}${p}`;
+  }
+  const slug = String(guide?.slug || '').trim();
+  if (!slug) return '';
+  return `${frontendBase()}/area-guides/${slug}`;
+}
+
+function areaGuideBlurb(guide) {
+  const about = String(guide?.about || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const sentences = about
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const out = sentences.slice(0, 2);
+  if (out.length < 2) {
+    const highlights = (guide?.keyHighlights || [])
+      .map((h) => String(h?.title || '').trim())
+      .filter(Boolean)
+      .slice(0, 2);
+    const title = String(guide?.title || '').trim();
+    if (highlights.length && title) {
+      out.push(`${title} is known for ${highlights.join(', ').replace(/\.+$/, '')}.`);
+    }
+  }
+  return out.join(' ').trim();
+}
+
+function areaGuideSource(guide) {
+  const title = String(guide?.title || '').trim();
+  const url = areaGuidePageUrl(guide);
+  if (!title || !url || isHomepageUrl(url)) return null;
+  return { title, url };
+}
+
+function blendListingReplyWithAreaGuide(listingReply, guide) {
+  const blurb = areaGuideBlurb(guide);
+  const listing = String(listingReply || '').trim();
+  if (!blurb) return listing;
+  if (!listing) return blurb;
+  return `${blurb} ${listing}`.replace(/\s+/g, ' ').trim();
+}
+
+async function findAreaGuideForLocation(location) {
+  const loc = String(location || '').trim();
+  if (!loc) return null;
+  try {
+    const guides = await AreaGuide.find({ isActive: true }).lean();
+    const matches = matchAreaGuidesForLocation(guides, loc);
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) {
+      console.warn(
+        '[chat] skipping area-guide blurb: ambiguous location match',
+        loc,
+        matches.map((g) => g.title || g.slug)
+      );
+      return null;
+    }
+  } catch (err) {
+    console.warn('[chat] area guide lookup failed', err.message || err);
+  }
+  return null;
+}
 
 function parseSellLocation(text) {
   const raw = String(text || '').trim();
@@ -3342,6 +3455,21 @@ async function searchProperties(
       newCount: propertyCards.length,
     });
   }
+
+  const areaGuide = await findAreaGuideForLocation(effectiveFilters.location);
+  const guideSource = areaGuide ? areaGuideSource(areaGuide) : null;
+  const guideBlurb = areaGuide && guideSource ? areaGuideBlurb(areaGuide) : '';
+  if (guideBlurb && guideSource) {
+    result.replyOverride = blendListingReplyWithAreaGuide(result.replyOverride, areaGuide);
+    result.sources = [guideSource];
+    result.modelPayload = {
+      ...(result.modelPayload || {}),
+      areaGuideBlurb: guideBlurb,
+      areaGuideSource: guideSource,
+      instruction:
+        'Start the reply with areaGuideBlurb (keep those facts; do not invent community details). Then state the matching total from this payload. Do not paste URLs — related pages are buttons.',
+    };
+  }
   return result;
 }
 
@@ -3657,6 +3785,10 @@ module.exports = {
   matchesNamedOption,
   foundListingsReply,
   buildViewAllMatching,
+  matchAreaGuidesForLocation,
+  areaGuideBlurb,
+  areaGuideSource,
+  blendListingReplyWithAreaGuide,
   purposeClarificationReply,
   bedroomsClarificationReply,
   rankRelatedContentSources,

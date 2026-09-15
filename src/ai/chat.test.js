@@ -63,6 +63,10 @@ const {
   searchSignatureFromFilters,
   foundListingsReply,
   buildViewAllMatching,
+  matchAreaGuidesForLocation,
+  areaGuideBlurb,
+  areaGuideSource,
+  blendListingReplyWithAreaGuide,
   hasExecutedListingSearch,
   classifyListingSearchTurn,
   buildSearchExecutionPlan,
@@ -735,6 +739,74 @@ test('viewAllMatching is present for any successful search, including below the 
 
   assert.equal(buildViewAllMatching(0, filters), null);
   assert.equal(buildViewAllMatching(NaN, filters), null);
+});
+
+test('property search blends a matching area guide and skips when none or ambiguous', () => {
+  const jvcGuide = {
+    title: 'Jumeirah Village Circle',
+    slug: 'jumeirah-village-circle',
+    path: '/area-guides/jumeirah-village-circle',
+    about:
+      'Jumeirah Village Circle (JVC) is a large multi-developer masterplan, built in a circular layout, offering apartments to townhouses at accessible price points. This community features 15 districts with access to JVC’s Circle Mall area, schools, community parks, and neighborhood retail.',
+    keyHighlights: [{ title: 'Mix of townhouses, apartments, and villas' }],
+  };
+  const marinaGuide = {
+    title: 'Dubai Marina',
+    slug: 'dubai-marina',
+    path: '/area-guides/dubai-marina',
+    about:
+      'Dubai Marina is Emaar’s flagship waterfront masterplan, built around a 3km man-made canal lined with high-rise towers and promenades. Residents also have direct pedestrian access to JBR Beach, Marina Walk, and Marina Mall.',
+  };
+  const jebelGuide = {
+    title: 'Jebel Ali Village',
+    slug: 'jebel-ali-village',
+    path: '/area-guides/jebel-ali-village',
+    about: 'Jebel Ali Village is a gated community near Jebel Ali.',
+    listingsSearch: ['Jebel Ali', 'Wasl Gate'],
+  };
+  const guides = [jvcGuide, marinaGuide, jebelGuide];
+
+  assert.equal(matchAreaGuidesForLocation(guides, 'JVC').map((g) => g.slug).join(), 'jumeirah-village-circle');
+  assert.equal(
+    matchAreaGuidesForLocation(guides, 'Jumeirah Village Circle').map((g) => g.slug).join(),
+    'jumeirah-village-circle'
+  );
+  assert.equal(matchAreaGuidesForLocation(guides, 'Dubai Marina').map((g) => g.slug).join(), 'dubai-marina');
+  assert.equal(matchAreaGuidesForLocation(guides, 'Jebel Ali').map((g) => g.slug).join(), 'jebel-ali-village');
+  assert.deepEqual(matchAreaGuidesForLocation(guides, 'Dubai'), []);
+  assert.deepEqual(matchAreaGuidesForLocation(guides, 'Mudon'), []);
+  assert.deepEqual(matchAreaGuidesForLocation(guides, ''), []);
+
+  const duplicateJvc = { ...jvcGuide, slug: 'jvc-duplicate', title: 'JVC' };
+  assert.equal(matchAreaGuidesForLocation([jvcGuide, duplicateJvc], 'JVC').length, 2);
+
+  const rentFilters = marinaRentFilters();
+  rentFilters.location = 'JVC';
+  const listingReply = foundListingsReply(rentFilters, 5);
+  const blended = blendListingReplyWithAreaGuide(listingReply, jvcGuide);
+  assert.match(blended, /Jumeirah Village Circle \(JVC\)/);
+  assert.match(blended, /I found 5/);
+  assert.match(blended, /in JVC to rent/);
+  assert.ok(blended.indexOf('Jumeirah Village Circle') < blended.indexOf('I found 5'));
+  const source = areaGuideSource(jvcGuide);
+  assert.equal(source.title, 'Jumeirah Village Circle');
+  assert.match(source.url, /\/area-guides\/jumeirah-village-circle$/);
+
+  for (const purpose of ['Buy', 'Rent', 'Off-plan']) {
+    const filters = emptySearchFilters();
+    filters.purpose = purpose;
+    filters.location = 'JVC';
+    applyTypesToFilters(filters, ['Apartment']);
+    applyBedroomChoice(filters, { exact: 2 });
+    const countReply = foundListingsReply(filters, 3);
+    const withGuide = blendListingReplyWithAreaGuide(countReply, jvcGuide);
+    assert.match(withGuide, /I found 3/, purpose);
+    assert.match(withGuide, /Jumeirah Village Circle/, purpose);
+  }
+
+  const unchanged = foundListingsReply(marinaRentFilters(), 2);
+  assert.equal(blendListingReplyWithAreaGuide(unchanged, null), unchanged);
+  assert.match(areaGuideBlurb(jvcGuide), /circular layout/);
 });
 
 test('Buy search purpose and restart behavior is unchanged', () => {
