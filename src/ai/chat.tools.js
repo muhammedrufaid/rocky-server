@@ -905,44 +905,44 @@ function sellClarificationReply(details = {}, message = '') {
 
   if (hasProperty && contactMissing.length === 0) {
     if (cta && !/valuation/i.test(message)) {
-      return `Thanks — I have your details for the ${loc} ${typeLabel}. I'll connect you with a listing agent.`;
+      return `Thank you. I have your details for the ${loc} ${typeLabel}. I will introduce you to a listing agent.`;
     }
     if (cta || already) {
-      return `Thanks — I have your details for the ${loc} ${typeLabel}. I can connect you with a listing agent for a valuation.`;
+      return `Thank you. I have your details for the ${loc} ${typeLabel}. I can introduce you to a listing agent for a valuation.`;
     }
     // Bare "yes" / "ok" — acknowledge and clarify which CTA, don't silently re-ask the same line
     if (isVagueConfirm(message)) {
-      return 'Just to confirm — would you like the valuation, or to speak with an agent?';
+      return 'Just to confirm — would you prefer a valuation, or to speak with an agent?';
     }
-    return `Thanks — I have your details for the ${loc} ${typeLabel}. Would you like a quick valuation or to speak with a listing agent?`;
+    return `Thank you. I have your details for the ${loc} ${typeLabel}. Would you like a valuation, or to speak with a listing agent?`;
   }
 
   if (hasProperty && (cta || already)) {
     if (contactMissing.length === 1) {
       if (contactMissing[0] === 'phone') {
-        return 'What phone number should the agent use to contact you?';
+        return 'What phone number should the agent use?';
       }
-      return `I still need your ${contactMissing[0]} to connect you with a listing agent.`;
+      return `I still need your ${contactMissing[0]} to introduce you to a listing agent.`;
     }
     if (contactMissing.length > 1 && already) {
-      return `Please share your ${contactMissing.join(', ').replace(/, ([^,]*)$/, ' and $1')} so I can connect you with a listing agent.`;
+      return `Please share your ${contactMissing.join(', ').replace(/, ([^,]*)$/, ' and $1')} so I can introduce you to a listing agent.`;
     }
     if (cta && /valuation/i.test(message)) {
-      return `I can help with a valuation for your ${typeLabel} in ${loc}. Please share your name, phone, and email.`;
+      return `I can arrange a valuation for your ${typeLabel} in ${loc}. Please share your name, phone number, and email.`;
     }
     if (cta) {
-      return `I can connect you with a listing agent for your ${typeLabel} in ${loc}. Please share your name, phone, and email.`;
+      return `I can introduce you to a listing agent for your ${typeLabel} in ${loc}. Please share your name, phone number, and email.`;
     }
   }
 
   if (!details.type && !details.location) {
-    return 'I can help you sell your property. What type of property are you looking to sell — apartment, villa, townhouse, penthouse, or another type?';
+    return 'I can assist with the sale. What type of property are you looking to sell — apartment, villa, townhouse, penthouse, or another type?';
   }
   if (details.type && !details.location) {
-    return `Understood — a ${typeLabel}. Which area or community is it in?`;
+    return `A ${typeLabel}. Which area or community is it in?`;
   }
   if (!details.type && details.location) {
-    return `Understood — a property in ${details.location}. What type of property are you looking to sell — apartment, villa, townhouse, penthouse, or another type?`;
+    return `A property in ${details.location}. What type of property are you looking to sell — apartment, villa, townhouse, penthouse, or another type?`;
   }
   if (hasProperty && !hasSellBedrooms(details) && !cta && !already) {
     return `A ${typeLabel} in ${loc} — how many bedrooms does it have?`;
@@ -963,9 +963,9 @@ function sellClarificationReply(details = {}, message = '') {
     return 'Is the property currently vacant, owner-occupied, or tenanted?';
   }
   if (isVagueConfirm(message)) {
-    return 'Just to confirm — would you like the valuation, or to speak with an agent?';
+    return 'Just to confirm — would you prefer a valuation, or to speak with an agent?';
   }
-  return `I can help you sell your ${typeLabel} in ${loc}. Would you like a quick valuation or to speak with a listing agent?`;
+  return `I can assist with the sale of your ${typeLabel} in ${loc}. Would you like a valuation, or to speak with a listing agent?`;
 }
 
 function isOffPlanInformationalQuery(lower) {
@@ -1175,7 +1175,7 @@ function foundListingsReply(filters = {}, total = 0, { isShowMore = false, newCo
       .trim();
   }
   const extra = String(note || '').trim();
-  return `I found ${count} ${beds}${type}${area}${purposeSuffix}.${extra ? ` ${extra}` : ''} Would you like the details?`
+  return `There are ${count} ${beds}${type}${area}${purposeSuffix}.${extra ? ` ${extra}` : ''} Shall I take you through them?`
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -1186,7 +1186,7 @@ function furnishingRelaxedNote(preference) {
     .trim()
     .toLowerCase();
   if (!pref) return '';
-  return `None are listed as ${pref}, so these are the closest matches.`;
+  return `None of these are listed as ${pref}. These are the closest available matches.`;
 }
 
 function emptyResultsReply(filters = {}) {
@@ -1194,7 +1194,7 @@ function emptyResultsReply(filters = {}) {
   const beds = describeBedroomPhrase(filters).trim(); // e.g. "1-bedroom" or ""
   const type = describeTypeSingular(filters);         // e.g. "Villa" or "property"
   const bedsType = beds ? `${beds} ${type.toLowerCase()}` : type.toLowerCase();
-  return `Looking for a ${bedsType} in ${loc} — let me check the closest options for you.`;
+  return `A ${bedsType} in ${loc} is not on our current list.`;
 }
 
 function exhaustedResultsReply(filters = {}, shownCount = 0) {
@@ -1207,7 +1207,7 @@ function exhaustedResultsReply(filters = {}, shownCount = 0) {
       : filters.purpose === 'Off-plan'
         ? 'off-plan'
         : 'for sale';
-  return `I've already shown the matching ${type}${area} ${purposeBit}. There aren't additional listings with these filters. Would you like to try a nearby area, a different bedroom count, another property type, or adjust the budget?`
+  return `I have already shown the matching ${type}${area} ${purposeBit}. There are no further listings with these filters. Would you like a nearby area, a different bedroom count, another property type, or a revised budget?`
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -1246,14 +1246,14 @@ function locationEmptyNearbyReply(filters = {}, nearbyAreas = []) {
   const loc = (filters.location || 'that area').toString().trim() || 'that area';
   const areas = (nearbyAreas || []).map((a) => String(a).trim()).filter(Boolean);
   if (!areas.length) {
-    return `Let me check what's available near ${loc} for you. Would you like to try a different area or adjust the search?`;
+    return `There is no matching listing in ${loc} at present. Would you like another area, or shall we adjust the search?`;
   }
   if (areas.length === 1) {
-    return `We don't currently have matching listings in ${loc}, but there are options nearby in ${areas[0]}. Would you like me to show those?`;
+    return `There is no matching listing in ${loc} at present. I can show nearby options in ${areas[0]}. Would you like to see those?`;
   }
   const head = areas.slice(0, -1).join(', ');
   const tail = areas[areas.length - 1];
-  return `Let me check what's available near ${loc} for you. I can show nearby options in ${head}, or ${tail}. Which area would you like?`;
+  return `There is no matching listing in ${loc} at present. Nearby options include ${head} or ${tail}. Which area would you like to see?`;
 }
 
 function emptyResultOptions(filters = {}, exploredAreas = []) {
@@ -1310,13 +1310,13 @@ function newAreaEmptyReply(filters = {}) {
   const beds = describeBedroomPhrase(filters).trim();
   const type = describeTypeSingular(filters);
   const bedsType = beds ? `${beds} ${type.toLowerCase()}` : type.toLowerCase();
-  return `I couldn't find a matching ${bedsType} in ${loc}. Would you like to try a nearby area, a different bedroom count, or adjust the budget?`
+  return `There is no matching ${bedsType} in ${loc} on our current list. Would you like a nearby area, a different bedroom count, or a revised budget?`
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 function similarEmptyReply(filters = {}) {
-  return 'I couldn\'t find more similar properties with those criteria. Would you like to try a nearby area or adjust the budget?';
+  return 'There are no further similar listings with this brief. Would you like a nearby area, or a revised budget?';
 }
 
 function widenSimilarSearchFilters(filters = {}, exploredAreas = []) {
@@ -2018,7 +2018,7 @@ function parseLocationReply(text) {
 }
 
 function locationClarificationReply() {
-  return 'Which area would you like me to search?';
+  return 'Which area would you like to consider?';
 }
 
 /**
@@ -2057,11 +2057,11 @@ function isBedroomSkip(text) {
 }
 
 function purposeClarificationReply() {
-  return 'What are you looking for?';
+  return 'Are you looking to buy, rent, or view off-plan?';
 }
 
 function bedroomsClarificationReply() {
-  return 'How many bedrooms?';
+  return 'How many bedrooms do you need?';
 }
 
 function bedroomClarificationFields() {
@@ -2212,9 +2212,9 @@ function sellServiceLocationReply(listing = {}, inquiry = {}) {
   const typeLabel = listing.type ? String(listing.type).toLowerCase() : 'property';
   const loc = listing.location || inquiry.referenceLocation || 'that area';
   if (inquiry.propertyNote) {
-    return `You mentioned ${inquiry.propertyNote}. Should we focus on ${loc}, or do you need management across different areas?`;
+    return `You mentioned ${inquiry.propertyNote}. Shall we focus on ${loc}, or do you need management across different areas?`;
   }
-  return `Are you asking about this for your ${loc} ${typeLabel}, or for properties in a different area?`;
+  return `Is this for your ${loc} ${typeLabel}, or for properties in a different area?`;
 }
 
 function emptyServiceInquiry() {
@@ -2324,7 +2324,7 @@ function hasServiceContact(inquiry = {}) {
 }
 
 function serviceContactPromptBlock() {
-  return `Please share your details in one message:
+  return `Please share your contact details so our team can reach you:
 
 name: Your name
 email: (optional)
@@ -2334,11 +2334,11 @@ phone: Your phone number`;
 
 function propertyManagementIntroReply(inquiry = {}) {
   let intro =
-    'Rocky Real Estate offers full property management — rent collection, maintenance coordination, tenant screening, inspections, and financial reporting.';
+    'We provide full property management, including rent collection, maintenance, tenant screening, inspections, and financial reporting.';
   if (inquiry.propertyNote) {
-    intro += ` We can help with ${inquiry.propertyNote}.`;
+    intro += ` We can assist with ${inquiry.propertyNote}.`;
   } else if (inquiry.locationScope === 'same' && inquiry.referenceLocation) {
-    intro += ` We can help manage your property in ${inquiry.referenceLocation}.`;
+    intro += ` We can manage your property in ${inquiry.referenceLocation}.`;
   } else if (inquiry.locationScope === 'different') {
     intro += ' We manage properties across Dubai and can tailor a package to your portfolio.';
   }
@@ -2349,26 +2349,26 @@ function serviceContactReply(inquiry = {}) {
   const missing = missingServiceContactFields(inquiry);
   if (missing.length === 0) {
     const loc = inquiry.referenceLocation ? ` in ${inquiry.referenceLocation}` : '';
-    return `Thanks — I have your details${loc}. Our property management team will reach out shortly.`;
+    return `Thank you. I have your details${loc}. Our property management team will be in touch shortly.`;
   }
   const intro = propertyManagementIntroReply(inquiry);
   if (missing.includes('name') && missing.includes('phone and whatsapp')) {
     return `${intro}\n\n${serviceContactPromptBlock()}`;
   }
   if (missing.includes('name')) {
-    return `${intro}\n\nWhat name should our team use when they contact you?`;
+    return `${intro}\n\nWhat name should our team use?`;
   }
   if (missing.includes('phone and whatsapp')) {
-    return `${intro}\n\nCan you provide your WhatsApp number and phone number?`;
+    return `${intro}\n\nWhat WhatsApp number and phone number should we use?`;
   }
   if (missing.length === 1 && missing[0] === 'whatsapp') {
-    return 'Can you provide your WhatsApp number?';
+    return 'What WhatsApp number should we use?';
   }
   if (missing.includes('whatsapp')) {
-    return `${intro}\n\nCan you provide your WhatsApp number?`;
+    return `${intro}\n\nWhat WhatsApp number should we use?`;
   }
   if (missing.includes('phone')) {
-    return `${intro}\n\nCan you provide your phone number?`;
+    return `${intro}\n\nWhat phone number should we use?`;
   }
   return `${intro}\n\n${serviceContactPromptBlock()}`;
 }
@@ -2422,18 +2422,18 @@ function pmNeedLabel(need) {
 }
 
 function pmNeedReply() {
-  return 'Are you looking for full property management for a property you own, or do you need help with a specific service such as tenant management, rent collection, maintenance, or inspections?';
+  return 'Are you looking for full property management, or help with a specific service such as tenant management, rent collection, maintenance, or inspections?';
 }
 
 function pmPropertyReply(inquiry = {}) {
   const need = pmNeedLabel(inquiry.need);
   if (inquiry.propertyType && !inquiry.referenceLocation) {
-    return `Understood — ${need} for a ${String(inquiry.propertyType).toLowerCase()}. Which area or community is the property in?`;
+    return `For ${need} of a ${String(inquiry.propertyType).toLowerCase()}, which area or community is the property in?`;
   }
   if (!inquiry.propertyType && inquiry.referenceLocation) {
-    return `Understood — ${need} in ${inquiry.referenceLocation}. What type of property is it — apartment, villa, townhouse, or another type?`;
+    return `For ${need} in ${inquiry.referenceLocation}, what type of property is it — apartment, villa, townhouse, or another type?`;
   }
-  return `Understood — ${need}. What type of property should we manage, and which area or community is it in?`;
+  return `For ${need}, what type of property should we manage, and which area or community is it in?`;
 }
 
 function hasPmPropertyContext(inquiry = {}) {
@@ -2484,12 +2484,12 @@ function applyMessageToSearchFilters(filters, message) {
 
 function listingIntakeReply(intent) {
   if (intent === CONVERSATION_INTENTS.RENT) {
-    return 'What type of property would you like to rent — apartment, villa, townhouse, or another type — and which area are you interested in? If you have a bedroom count or furnishing preference, you can include those too.';
+    return 'What type of property would you like to rent, and in which area? You may also mention bedrooms or furnishing if you already have a preference.';
   }
   if (intent === CONVERSATION_INTENTS.OFF_PLAN) {
-    return 'Which area are you considering for an off-plan property? If you have a preferred property type, bedroom count, budget, or developer, you can include those too.';
+    return 'Which area are you considering for an off-plan purchase? You may also mention property type, bedrooms, or budget if you have them in mind.';
   }
-  return 'What type of property are you looking to buy — apartment, villa, townhouse, penthouse, or another type — and which area are you interested in?';
+  return 'What type of property would you like to buy, and in which area?';
 }
 
 function needsListingIntake(filters = {}) {
@@ -3142,14 +3142,14 @@ async function emptyResultsResult(effectiveFilters) {
       const altLabel = alternatives[0].label;
       const labelHasLoc = location && altLabel.toLowerCase().includes(location.toLowerCase());
       const locSuffix = labelHasLoc ? '' : locPart || '';
-      reply = `${emptyResultsReply(effectiveFilters)} I found ${altLabel}${locSuffix} instead.`;
+      reply = `${emptyResultsReply(effectiveFilters)} The closest option is ${altLabel}${locSuffix}.`;
     } else {
-      reply = `${emptyResultsReply(effectiveFilters)} Here are some options I found${locPart}:`;
+      reply = `${emptyResultsReply(effectiveFilters)} The closest options${locPart} are below.`;
     }
     options = alternatives.map((a) => a.label);
     slotAwaiting = 'alternatives';
   } else {
-    reply = `${emptyResultsReply(effectiveFilters)} Would you like to adjust the area, bedrooms, or budget?`;
+    reply = `${emptyResultsReply(effectiveFilters)} Would you like to adjust the area, bedroom count, or budget?`;
     options = [];
     slotAwaiting = 'emptyResults';
   }
@@ -3206,7 +3206,7 @@ function exhaustedResultsResult(effectiveFilters, shownCount = 0, extras = {}) {
       shownCount,
       instruction:
         extras.instruction ||
-        'All matching listings for this search were already shown. Do not repeat previous property cards. Do not invent new listings. Do not write "Looking for a … let me check".',
+        'All matching listings for this search were already shown. Do not repeat previous property cards. Do not invent new listings. Do not write "Looking for a … let me check" or "A … is not on our current list".',
     },
   };
 }
@@ -3459,9 +3459,9 @@ async function searchProperties(
         exhausted: resolvedKind === SEARCH_TURN.CONTINUATION || resolvedKind === SEARCH_TURN.EXHAUSTED,
         instruction:
           resolvedKind === SEARCH_TURN.SIMILAR
-            ? 'Similar-property search returned no new listings. Do not repeat previous cards. Do not write "Looking for a … let me check" or "I\'ve already shown the matching". Offer nearby areas or budget.'
+            ? 'Similar-property search returned no new listings. Do not repeat previous cards. Do not write "Looking for a … let me check", "A … is not on our current list", or "I have already shown the matching". Offer nearby areas or budget.'
             : resolvedKind === SEARCH_TURN.NEW_AREA
-              ? 'New area search returned no listings. Do not claim these listings were already shown. Do not write "Looking for a … let me check".'
+              ? 'New area search returned no listings. Do not claim these listings were already shown. Do not write "Looking for a … let me check" or "A … is not on our current list".'
               : undefined,
       });
       exhausted.profilePatch = { ...(exhausted.profilePatch || {}), ...executedPatch };
@@ -3603,7 +3603,7 @@ async function searchContent({ query }) {
       count: rows.length,
       chunks: shortChunks,
       instruction:
-        "CRITICAL: Reply in AT MOST 2 short sentences (about 40 words total). Use only the key fact from the chunks that answers the visitor's LATEST question — do not drift into a previous topic from earlier in the chat. Do NOT write \"General guidance\". Do NOT expand, lecture, or list every detail. No bullet lists. Do not include URLs — related pages are buttons. End with one short question such as \"Would you like more details?\"",
+        "CRITICAL: Reply in AT MOST 2 short sentences (about 40 words total), as a senior Dubai property consultant: calm, confident, formal, and simple. Use only the key fact from the chunks that answers the visitor's LATEST question — do not drift into a previous topic from earlier in the chat. Do NOT write \"General guidance\". Do NOT expand, lecture, or list every detail. No bullet lists. Do not include URLs — related pages are buttons. End with one short question such as \"Would you like a little more detail?\"",
     },
   };
 }

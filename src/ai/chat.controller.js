@@ -21,7 +21,7 @@ const TOOL_MAX_TOKENS = 1024;
 const REPLY_MAX_TOKENS = 600;
 /** Content replies need enough tokens after reasoning models — 110 was truncating to empty content. */
 const CONTENT_REPLY_MAX_TOKENS = 600;
-const FRIENDLY_CHAT_ERROR = "Sorry, I couldn't pull that up — try again in a moment";
+const FRIENDLY_CHAT_ERROR = 'I was unable to retrieve that just now. Please try again in a moment.';
 
 const PROPERTY_CTAS = ['View listing', 'Book a viewing', 'See similar properties'];
 const CONTENT_CTAS = ['Talk to an agent', 'Explore related properties'];
@@ -37,12 +37,12 @@ function synthesizeContentReply(chunks = [], sources = []) {
     const title = String(first.title || '').trim();
     if (excerpt) {
       return title
-        ? `${excerpt}. Would you like more details from “${title}”?`
-        : `${excerpt}. Would you like more details?`;
+        ? `${excerpt}. Would you like a little more on “${title}”?`
+        : `${excerpt}. Would you like a little more detail?`;
     }
   }
   if ((sources || []).length) {
-    return 'I found related information for you — see the links below. Would you like more details?';
+    return 'The related pages are below. Would you like me to expand on any of them?';
   }
   return '';
 }
@@ -422,7 +422,7 @@ function applyServiceInquiryFlow(message, profile, history = []) {
     const inquiry = parseServiceContactDetails(message, nextPrior);
     let reply = serviceContactReply(inquiry);
     if (correctionBits.length) {
-      reply = `Got it — I've updated that to ${correctionBits.join(' in ')}.\n\n${reply}`;
+      reply = `I have updated that to ${correctionBits.join(' in ')}.\n\n${reply}`;
     }
     const complete = hasServiceContact(inquiry);
     return {
@@ -790,8 +790,8 @@ function applyCtaFilterChoice(message, profile) {
         slotFlow: { awaiting: 'nearbyArea', alternatives: null },
       }),
       reply: options.length
-        ? 'Which nearby area should I try?'
-        : 'I have already tried the nearby areas. Would you like to try a different bedroom count or adjust the budget?',
+        ? 'Which nearby area would you like to see?'
+        : 'We have already looked at the nearby areas. Would you like a different bedroom count, or a revised budget?',
       options: options.length ? options : emptyResultOptions(last, [...(profile.exploredAreas || []), last.location]),
     };
   }
@@ -1097,8 +1097,8 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
           slotFlow: { awaiting: 'nearbyArea' },
         }),
         reply: options.length
-          ? 'Which nearby area should I try?'
-          : 'I have already tried the nearby areas. Would you like to try a different bedroom count or adjust the budget?',
+          ? 'Which nearby area would you like to see?'
+          : 'We have already looked at the nearby areas. Would you like a different bedroom count, or a revised budget?',
         options: options.length ? options : emptyResultOptions(last, [...(profile.exploredAreas || []), last.location]),
       };
     }
@@ -1193,7 +1193,7 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
         type: 'clarify',
         profile,
         reply: storedAlts.length > 0
-          ? 'Here are the closest alternatives I found — please pick one:'
+          ? 'These are the closest alternatives. Which would you prefer?'
           : hasExecutedListingSearch(profile)
             ? exhaustedResultsReply(
                 copySearchFilters(profile.lastSearchFilters || emptySearchFilters()),
@@ -1297,8 +1297,8 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
         type: 'clarify',
         profile,
         reply: options.length
-          ? 'Which nearby area should I try?'
-          : 'I have already tried the nearby areas. Would you like to try a different bedroom count or adjust the budget?',
+          ? 'Which nearby area would you like to see?'
+          : 'We have already looked at the nearby areas. Would you like a different bedroom count, or a revised budget?',
         options: options.length ? options : emptyResultOptions(last, [...(profile.exploredAreas || []), previousLocation]),
       };
     }
@@ -2058,7 +2058,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
     synthesizeContentReply(lastContentChunks, sources) ||
     (usedSearchContent
       ? FRIENDLY_CHAT_ERROR
-      : 'Sorry, I could not finish that just now. Please try again.');
+      : 'I was unable to finish that just now. Please try again.');
 
   return {
     reply: fallbackReply,

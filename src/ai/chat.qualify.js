@@ -46,7 +46,7 @@ const TYPE_OPTIONS = ['Apartment', 'Villa', 'Townhouse', 'Any'];
 /** Asked like an agent would, and worded per purpose (rent vs buy). */
 const QUESTIONS = {
   purpose: {
-    question: 'Are you looking to rent or buy?',
+    question: 'Are you looking to rent or to buy?',
     options: ['Rent', 'Buy'],
   },
   propertyType: {
@@ -64,10 +64,10 @@ const QUESTIONS = {
     options: BEDROOM_OPTIONS,
   },
   budget: {
-    question: "What's your annual rental budget?",
+    question: "What is your annual rental budget?",
     options: ['Up to 60k', '60k - 100k', '100k - 150k', '150k+', 'Any'],
     buy: {
-      question: "What's your budget range?",
+      question: "What budget range are you working with?",
       options: ['Up to 1M', '1M - 2M', '2M - 5M', '5M+', 'Any'],
     },
   },
@@ -80,7 +80,7 @@ const QUESTIONS = {
     options: ['Immediately', 'Next month', 'Flexible'],
   },
   mustHaves: {
-    question: 'Any must-have requirements I should keep in mind?',
+    question: 'Are there any must-have requirements I should keep in mind?',
     options: ['Parking', 'Balcony', 'Sea view', 'No must-haves'],
   },
   usage: {
@@ -490,7 +490,7 @@ function appendOptionalFollowUp(reply, slots = {}) {
     return { reply, question: null, slots: current };
   }
   const base = String(reply || '')
-    .replace(/\s*Would you like the details\??\s*$/i, '')
+    .replace(/\s*(?:Would you like the details|Shall I take you through them)\??\s*$/i, '')
     .trim();
   // One question per turn: never append to a reply that already asks something
   // (e.g. the no-results copy offering a different area).
