@@ -413,21 +413,79 @@ function nextQuestionForProfile(profile = {}) {
   return nextQuestion(rememberedSlots(profile));
 }
 
+function listingPurposeKey(slots = {}) {
+  if (slots.purpose === 'rent') return 'rent';
+  if (slots.purpose === 'buy' && slots.readiness === 'offplan') return 'offplan';
+  if (slots.purpose === 'buy') return 'buy';
+  return null;
+}
+
+function sameBudgetValue(left, right) {
+  if (left === 'any' && right === 'any') return true;
+  if (!isFilled(left) && !isFilled(right)) return true;
+  if (!isFilled(left) || !isFilled(right)) return false;
+  if (left === 'any' || right === 'any') return false;
+  if (typeof left !== 'object' || typeof right !== 'object') return false;
+  return left.min == right.min && left.max == right.max;
+}
+
+/**
+ * Rent / buy / off-plan budgets are not interchangeable. Keep type, beds, and
+ * location, but drop a budget that was only known for the previous purpose.
+ */
+function dropCarriedBudgetOnPurposeSwitch(slots, previousSlots = {}) {
+  const next = copySlots(slots);
+  const from = listingPurposeKey(previousSlots);
+  const to = listingPurposeKey(next);
+  if (from && to && from !== to && sameBudgetValue(previousSlots.budget, next.budget)) {
+    next.budget = null;
+  }
+  return next;
+}
+
+function retainSlotsForListingIntent(slots, intent = '') {
+  const previous = copySlots(slots);
+  const next = copySlots(slots);
+  const detected = String(intent || '').toUpperCase();
+  if (detected === 'RENT') {
+    next.purpose = 'rent';
+    next.readiness = null;
+  } else if (detected === 'OFF_PLAN') {
+    next.purpose = 'buy';
+    next.readiness = 'offplan';
+  } else if (detected === 'BUY') {
+    next.purpose = 'buy';
+    if (next.readiness === 'offplan') next.readiness = null;
+  }
+  return dropCarriedBudgetOnPurposeSwitch(next, previous);
+}
+
 /**
  * Overlay this turn's message on everything already stored, then write the
  * result back onto search filters. Current-turn answers replace a slot;
  * missing answers keep the previous value.
  */
 function applyRememberedTurn(profile = {}, message = '', history = []) {
-  const slots = deriveSlots(
-    [...(history || []), { role: 'user', content: message }],
-    rememberedSlots(profile)
+  const previous = rememberedSlots(profile);
+  const slots = dropCarriedBudgetOnPurposeSwitch(
+    deriveSlots([...(history || []), { role: 'user', content: message }], previous),
+    previous
   );
   const filters = applySlotsToSearchFilters(
     profile.lastSearchFilters || emptySearchFilters(),
     slots,
     { unblocking: false }
   );
+  if (!isFilled(slots.budget)) {
+    const purposeChanged =
+      listingPurposeKey(previous) &&
+      listingPurposeKey(slots) &&
+      listingPurposeKey(previous) !== listingPurposeKey(slots);
+    if (purposeChanged) {
+      filters.budgetMin = null;
+      filters.budgetMax = null;
+    }
+  }
   return { slots, filters };
 }
 
@@ -576,6 +634,9 @@ module.exports = {
   slotsFromProfileHints,
   syncSlotsWithFilters,
   deriveSlots,
+  listingPurposeKey,
+  dropCarriedBudgetOnPurposeSwitch,
+  retainSlotsForListingIntent,
   applyRememberedTurn,
   nextQuestion,
   nextQuestionForProfile,

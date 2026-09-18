@@ -2043,14 +2043,16 @@ function parseLocationFromMessage(text) {
   const raw = String(text || '').trim();
   if (!raw) return null;
   if (isUnspecifiedLocationPhrase(raw)) return null;
+  // "ready to move in … in Dubai South" must not treat the first "in" as the area prefix.
+  const withoutMoveIn = raw.replace(/\b(?:ready[-\s]+to[-\s]+)?move[-\s]+in\b/gi, ' ');
   // Match " in <location>" — location is everything after "in" until end or a filter word
-  const m = raw.match(/\bin\s+([A-Za-z0-9][A-Za-z0-9 '-]+?)(?:\s+(?:for|with|under|below|up\s+to|at|max)|$)/i);
+  const m = withoutMoveIn.match(/\bin\s+([A-Za-z0-9][A-Za-z0-9 '-]+?)(?:\s+(?:for|with|under|below|up\s+to|at|max)|$)/i);
   if (!m) return null;
   const loc = m[1].trim();
   if (!loc || isUnspecifiedLocationPhrase(loc) || isNonPlaceLocationToken(loc)) return null;
   // "in summer" / "in cash" etc. are not areas
   if (isNonPlaceLocationToken(loc.split(/\s+/)[0])) return null;
-  return loc;
+  return locationAliasRow(loc)?.canonical || loc;
 }
 
 /**
@@ -2591,20 +2593,61 @@ function currentConversationIntent(profile = {}) {
   );
 }
 
+const PAGE_CONTEXT_INTENTS = {
+  PROPERTY_MANAGEMENT: CONVERSATION_INTENTS.PROPERTY_MANAGEMENT,
+};
+
+function normalizePageContext(value) {
+  if (value == null || value === '') return null;
+  const normalized = String(value)
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, '_');
+  if (!normalized) return null;
+  if (normalized === 'PROPERTY_MANAGEMENT' || normalized === 'PROPERTYMANAGEMENT') {
+    return 'PROPERTY_MANAGEMENT';
+  }
+  return null;
+}
+
+function intentFromPageContext(pageContext) {
+  const normalized = normalizePageContext(pageContext);
+  return normalized ? PAGE_CONTEXT_INTENTS[normalized] || null : null;
+}
+
+/**
+ * Page context is a hint for the first turn only. A clear user intent always wins,
+ * and a conversation that already has an intent is never forced back by the page.
+ */
+function resolveConversationIntent({
+  message,
+  profile = {},
+  explicitIntent = null,
+  pageContext = null,
+} = {}) {
+  const requested = normalizeIntentValue(explicitIntent);
+  if (requested) return requested;
+  const fromMessage = parseConversationIntent(message);
+  if (fromMessage) return fromMessage;
+  if (currentConversationIntent(profile)) return null;
+  return intentFromPageContext(pageContext);
+}
+
 function startFreshIntent(intent, message, currentProfile = {}) {
-  const keepListingMemory =
-    isListingIntent(intent) &&
-    isListingIntent(currentConversationIntent(currentProfile)) &&
-    !isExplicitIntentStarter(message);
+  const previousIntent = currentConversationIntent(currentProfile);
+  const keepListingMemory = isListingIntent(intent) && isListingIntent(previousIntent);
+  const purposeChanged =
+    keepListingMemory && (intentToPurpose(intent) || '') !== (intentToPurpose(previousIntent) || '');
 
   const profile = {
     preferredAreas: keepListingMemory ? [...(currentProfile.preferredAreas || [])].slice(-10) : [],
-    budget: keepListingMemory
-      ? {
-          min: currentProfile.budget?.min ?? null,
-          max: currentProfile.budget?.max ?? null,
-        }
-      : { min: null, max: null },
+    budget:
+      keepListingMemory && !purposeChanged
+        ? {
+            min: currentProfile.budget?.min ?? null,
+            max: currentProfile.budget?.max ?? null,
+          }
+        : { min: null, max: null },
     bedrooms: keepListingMemory ? currentProfile.bedrooms ?? null : null,
     purpose: intentToPurpose(intent),
     intent,
@@ -2623,6 +2666,11 @@ function startFreshIntent(intent, message, currentProfile = {}) {
   };
 
   if (isListingIntent(intent)) {
+    if (purposeChanged) {
+      profile.lastSearchFilters.budgetMin = null;
+      profile.lastSearchFilters.budgetMax = null;
+      profile.budget = { min: null, max: null };
+    }
     profile.lastSearchFilters.purpose = profile.purpose;
     profile.lastSearchFilters = applyMessageToSearchFilters(profile.lastSearchFilters, message);
     profile.lastSearchFilters.purpose = profile.purpose;
@@ -2643,13 +2691,11 @@ function startFreshIntent(intent, message, currentProfile = {}) {
         profile.bedrooms === 0 ? { exact: 0 } : { exact: Number(profile.bedrooms) }
       );
     }
-    if (keepListingMemory) {
-      if (profile.budget?.min != null && profile.lastSearchFilters.budgetMin == null) {
-        profile.lastSearchFilters.budgetMin = profile.budget.min;
-      }
-      if (profile.budget?.max != null && profile.lastSearchFilters.budgetMax == null) {
-        profile.lastSearchFilters.budgetMax = profile.budget.max;
-      }
+    if (profile.lastSearchFilters.budgetMin != null || profile.lastSearchFilters.budgetMax != null) {
+      profile.budget = {
+        min: profile.lastSearchFilters.budgetMin ?? null,
+        max: profile.lastSearchFilters.budgetMax ?? null,
+      };
     }
     if (needsListingIntake(profile.lastSearchFilters)) {
       profile.slotFlow = { awaiting: 'listingIntake', alternatives: null };
@@ -2788,10 +2834,19 @@ function listingQueryOpts(filters, search) {
   const types = typesFromFilters(filters);
   if (types.length) queryFilters.propertyType = types;
   if (filters.furnished) queryFilters.furnished = filters.furnished;
+  const location = String(search || filters.location || '').trim();
+  if (location) queryFilters.locationQuery = location;
   if (Array.isArray(filters.excludeRefNos) && filters.excludeRefNos.length) {
     queryFilters.excludeRefNos = uniqueIdList(filters.excludeRefNos);
   }
-  return { page: 1, limit: PROPERTY_LIMIT, search, filters: queryFilters };
+  return { page: 1, limit: PROPERTY_LIMIT, search: location, filters: queryFilters };
+}
+
+function listingDbOpts(filters, search) {
+  const opts = listingQueryOpts(filters, search);
+  // Location is applied on locality/subLocality/city/towerName only (frontend area-search fields).
+  // Do not reuse generic `search`, which also matches propertyTitle/propertyType/propertyRefNo.
+  return { ...opts, search: '' };
 }
 
 async function fetchByPurpose(purpose, opts) {
@@ -2824,14 +2879,14 @@ async function fetchPropertyCards(filters, search) {
 
   let used = filters;
   let relaxedFurnishing = null;
-  let result = await fetchByPurpose(requested, listingQueryOpts(used, search));
+  let result = await fetchByPurpose(requested, listingDbOpts(used, search));
 
   // Furnishing is a stated preference, not a hard requirement: many listings
   // leave the field blank, so it must never turn a matching area/bedroom search
   // into a no-results dead end.
   if (!(result.properties || []).length && filters.furnished) {
     const softFilters = { ...filters, furnished: null };
-    const softResult = await fetchByPurpose(requested, listingQueryOpts(softFilters, search));
+    const softResult = await fetchByPurpose(requested, listingDbOpts(softFilters, search));
     if ((softResult.properties || []).length) {
       used = softFilters;
       result = softResult;
@@ -2844,7 +2899,7 @@ async function fetchPropertyCards(filters, search) {
   if (exclude.length) {
     const unfiltered = await fetchByPurpose(
       requested,
-      listingQueryOpts({ ...used, excludeRefNos: [] }, search)
+      listingDbOpts({ ...used, excludeRefNos: [] }, search)
     );
     total = unfiltered.total || 0;
   }
@@ -2941,7 +2996,7 @@ function emptyResultsClarificationFields() {
 
 /** Quick count-only query — returns 0 or positive integer. */
 async function countByFilters(filters, search) {
-  const opts = listingQueryOpts(filters, search);
+  const opts = listingDbOpts(filters, search);
   const purpose = normalizePurpose(filters.purpose);
   if (!purpose) return 0;
   try {
@@ -3839,6 +3894,9 @@ module.exports = {
   applyPmPropertyDetails,
   parseConversationIntent,
   currentConversationIntent,
+  normalizePageContext,
+  intentFromPageContext,
+  resolveConversationIntent,
   isExplicitIntentStarter,
   isPurposeChipReply,
   isListingIntent,

@@ -69,6 +69,13 @@ function validateChat(req, res, next) {
     }
     req.body.intent = normalized;
   }
+  const pageContext = req.body?.pageContext ?? req.body?.page_context;
+  if (pageContext != null && pageContext !== '') {
+    if (typeof pageContext !== 'string') {
+      return res.status(400).json({ success: false, message: 'pageContext must be a string' });
+    }
+    req.body.pageContext = pageContext.trim();
+  }
   return next();
 }
 

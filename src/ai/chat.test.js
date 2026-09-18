@@ -42,10 +42,14 @@ const {
   locationEmptyNearbyReply,
   CONVERSATION_INTENTS,
   parseConversationIntent,
+  resolveConversationIntent,
+  normalizePageContext,
+  intentFromPageContext,
   parseBedroomChoice,
   isExplicitIntentStarter,
   startFreshIntent,
   listingStartReply,
+  listingStartOptions,
   pmNeedReply,
   PM_NEED_OPTIONS,
   parsePmNeedChoice,
@@ -79,6 +83,7 @@ const {
   uniqueIdList,
   listingQueryOpts,
   toPropertyCard,
+  executeTool,
   resolveEffectiveFilters,
   copySearchFilters,
   emptySearchFilters,
@@ -105,7 +110,10 @@ const {
   syncSlotsWithFilters,
   rememberedSlots,
   applyRememberedTurn,
+  retainSlotsForListingIntent,
 } = require('./chat.qualify');
+const propertyDbService = require('../services/propertyDbService');
+const AreaGuide = require('../models/AreaGuide');
 
 function runSellTurns(messages) {
   let listing = emptySellListing();
@@ -268,6 +276,18 @@ test('summer is not a location; real areas still parse', () => {
   assert.equal(parseLocationFromMessage('show me villas in another area'), null);
   assert.equal(parseLocationReply('Dubai South'), 'Dubai South');
   assert.equal(parseLocationReply('Buy'), null);
+  assert.equal(
+    parseLocationFromMessage('I want a ready-to-move-in 2-bedroom apartment in Dubai South'),
+    'Dubai South'
+  );
+  assert.equal(
+    parseLocationFromMessage('ready to move in 2 bedroom apartments in Dubai South'),
+    'Dubai South'
+  );
+  assert.equal(
+    parseLocationFromMessage('ready-for-sale 2-bedroom apartments in Dubai South'),
+    'Dubai South'
+  );
 });
 
 test('property type change prefers the intended type', () => {
@@ -498,7 +518,7 @@ test('natural language maps to the five conversation intents', () => {
   assert.equal(parsePurposeFromMessage('I want something off plan.'), 'Off-plan');
 });
 
-test('menu starters reset previous listing state', () => {
+test('menu starters keep type bedrooms and location when purpose changes', () => {
   const buyProfile = startFreshIntent(
     CONVERSATION_INTENTS.BUY,
     '2 bedroom apartment in Dubai Marina',
@@ -513,11 +533,13 @@ test('menu starters reset previous listing state', () => {
   const afterReset = startFreshIntent(CONVERSATION_INTENTS.RENT, 'Rent a Property', buyProfile);
   assert.equal(afterReset.intent, CONVERSATION_INTENTS.RENT);
   assert.equal(afterReset.lastSearchFilters.purpose, 'Rent');
-  assert.equal(afterReset.lastSearchFilters.bedrooms, null);
-  assert.equal(afterReset.lastSearchFilters.type, null);
-  assert.equal(afterReset.lastSearchFilters.location, null);
+  assert.equal(afterReset.lastSearchFilters.bedrooms, 2);
+  assert.equal(afterReset.lastSearchFilters.type, 'Apartment');
+  assert.equal(afterReset.lastSearchFilters.location, 'Dubai Marina');
+  assert.equal(afterReset.lastSearchFilters.budgetMin, null);
+  assert.equal(afterReset.lastSearchFilters.budgetMax, null);
   assert.equal(afterReset.sellListing.intent, null);
-  assert.match(listingStartReply(CONVERSATION_INTENTS.RENT, afterReset, 'Rent a Property'), /rent/i);
+  assert.equal(needsListingIntake(afterReset.lastSearchFilters), false);
   assert.equal(isExplicitIntentStarter('Rent a Property'), true);
   assert.equal(isExplicitIntentStarter('Buy a Property'), true);
   assert.equal(isExplicitIntentStarter('Off-Plan'), true);
@@ -567,6 +589,87 @@ test('property management starts with a service question, not a contact form', (
   assert.equal(parsePmNeedChoice('Rent collection'), 'rent_collection');
 });
 
+test('property management page context starts PM when no intent is given', () => {
+  assert.equal(normalizePageContext('property-management'), 'PROPERTY_MANAGEMENT');
+  assert.equal(normalizePageContext('Property Management'), 'PROPERTY_MANAGEMENT');
+  assert.equal(intentFromPageContext('PROPERTY_MANAGEMENT'), CONVERSATION_INTENTS.PROPERTY_MANAGEMENT);
+
+  assert.equal(
+    resolveConversationIntent({ message: 'Hi', pageContext: 'property-management' }),
+    CONVERSATION_INTENTS.PROPERTY_MANAGEMENT
+  );
+  assert.equal(
+    resolveConversationIntent({
+      message: '2 bedroom apartment in Dubai Marina',
+      pageContext: 'PROPERTY_MANAGEMENT',
+    }),
+    CONVERSATION_INTENTS.PROPERTY_MANAGEMENT
+  );
+
+  const profile = startFreshIntent(CONVERSATION_INTENTS.PROPERTY_MANAGEMENT, 'Hi', {});
+  assert.equal(profile.intent, CONVERSATION_INTENTS.PROPERTY_MANAGEMENT);
+  assert.equal(profile.slotFlow.awaiting, 'pmNeed');
+  assert.match(listingStartReply(CONVERSATION_INTENTS.PROPERTY_MANAGEMENT, profile, 'Hi'), /full property management/i);
+  assert.deepEqual(listingStartOptions(CONVERSATION_INTENTS.PROPERTY_MANAGEMENT, profile, 'Hi'), PM_NEED_OPTIONS);
+});
+
+test('user buy rent sell or off-plan intent overrides page context', () => {
+  const pageContext = 'PROPERTY_MANAGEMENT';
+  assert.equal(
+    resolveConversationIntent({
+      message: 'I want to buy a 2 bedroom apartment in Dubai Marina',
+      pageContext,
+    }),
+    CONVERSATION_INTENTS.BUY
+  );
+  assert.equal(
+    resolveConversationIntent({ message: 'I want to rent a villa in JVC', pageContext }),
+    CONVERSATION_INTENTS.RENT
+  );
+  assert.equal(
+    resolveConversationIntent({ message: 'I want to sell my apartment', pageContext }),
+    CONVERSATION_INTENTS.SELL_PROPERTY
+  );
+  assert.equal(
+    resolveConversationIntent({ message: 'I want something off plan', pageContext }),
+    CONVERSATION_INTENTS.OFF_PLAN
+  );
+
+  const buy = startFreshIntent(
+    CONVERSATION_INTENTS.BUY,
+    'I want to buy a 2 bedroom apartment in Dubai Marina',
+    {}
+  );
+  assert.equal(buy.intent, CONVERSATION_INTENTS.BUY);
+  assert.equal(buy.lastSearchFilters.purpose, 'Buy');
+  assert.equal(
+    resolveConversationIntent({
+      message: 'show me more',
+      pageContext,
+      profile: buy,
+    }),
+    null
+  );
+});
+
+test('missing or unknown page context does not change normal chat behaviour', () => {
+  assert.equal(resolveConversationIntent({ message: 'Hi' }), null);
+  assert.equal(resolveConversationIntent({ message: 'Hi', pageContext: '' }), null);
+  assert.equal(resolveConversationIntent({ message: 'Hi', pageContext: 'ABOUT_US' }), null);
+  assert.equal(
+    resolveConversationIntent({ message: 'I want to rent a 2 bedroom apartment in Dubai Marina' }),
+    CONVERSATION_INTENTS.RENT
+  );
+  const rent = startFreshIntent(
+    CONVERSATION_INTENTS.RENT,
+    'I want to rent a 2 bedroom apartment in Dubai Marina',
+    {}
+  );
+  assert.equal(rent.intent, CONVERSATION_INTENTS.RENT);
+  assert.equal(rent.lastSearchFilters.location, 'Dubai Marina');
+  assert.equal(rent.lastSearchFilters.bedrooms, 2);
+});
+
 test('listing intake is required until type or area is known', () => {
   const profile = startFreshIntent(CONVERSATION_INTENTS.BUY, 'Buy a Property', {});
   assert.equal(needsListingIntake(profile.lastSearchFilters), true);
@@ -577,7 +680,7 @@ test('listing intake is required until type or area is known', () => {
   assert.equal(withType.lastSearchFilters.location, 'Arabian Ranches');
 });
 
-test('Buy then 2 bedroom keeps BUY filters; Rent restart does not', () => {
+test('Buy then 2 bedroom keeps BUY filters; Rent restart keeps type beds and location', () => {
   const buy = startFreshIntent(CONVERSATION_INTENTS.BUY, 'Buy a Property', {});
   const afterBeds = applyMessageToSearchFilters(buy.lastSearchFilters, '2 bedroom');
   afterBeds.purpose = buy.lastSearchFilters.purpose;
@@ -591,8 +694,8 @@ test('Buy then 2 bedroom keeps BUY filters; Rent restart does not', () => {
   });
   assert.equal(rent.intent, CONVERSATION_INTENTS.RENT);
   assert.equal(rent.lastSearchFilters.purpose, 'Rent');
-  assert.equal(rent.lastSearchFilters.bedrooms, null);
-  assert.equal(rent.lastSearchFilters.bedroomsResolved, false);
+  assert.equal(rent.lastSearchFilters.bedrooms, 2);
+  assert.equal(rent.lastSearchFilters.bedroomsResolved, true);
 });
 
 test('multiple property types are parsed together', () => {
@@ -661,6 +764,7 @@ test('search query uses propertyType IN list and excludes shown listing IDs', ()
   assert.equal(opts.page, 1);
   assert.equal(opts.limit, 6);
   assert.equal(opts.search, 'Dubai Hills');
+  assert.equal(opts.filters.locationQuery, 'Dubai Hills');
   assert.deepEqual(opts.filters.propertyType, ['Apartment', 'Villa']);
   assert.equal(opts.filters.bedrooms, 2);
   assert.equal(opts.filters.priceMax, 100000);
@@ -692,7 +796,8 @@ test('shown listing IDs are unique and a new intent clears them', () => {
   });
   assert.deepEqual(withShown.shownPropertyIds, []);
   assert.equal(withShown.lastSearchFilters.purpose, 'Rent');
-  assert.equal(withShown.lastSearchFilters.bedrooms, null);
+  assert.equal(withShown.lastSearchFilters.bedrooms, 2);
+  assert.equal(withShown.lastSearchFilters.type, 'Apartment');
 });
 
 test('also villa merges onto the current type instead of replacing it', () => {
@@ -1044,11 +1149,15 @@ test('RENT screenshot flow: Rent to Buy resets search state and does not reuse R
   const buy = startFreshIntent(CONVERSATION_INTENTS.BUY, 'Buy a Property', rent);
   assert.equal(buy.intent, CONVERSATION_INTENTS.BUY);
   assert.equal(buy.lastSearchFilters.purpose, 'Buy');
+  assert.equal(buy.lastSearchFilters.location, rent.lastSearchFilters.location);
+  assert.equal(buy.lastSearchFilters.type, 'Apartment');
+  assert.equal(buy.lastSearchFilters.bedrooms, 2);
+  assert.equal(buy.lastSearchFilters.budgetMin, null);
+  assert.equal(buy.lastSearchFilters.budgetMax, null);
   assert.equal(buy.searchAlreadyExecuted, false);
   assert.equal(buy.lastSearchSignature, null);
   assert.deepEqual(buy.shownPropertyIds, []);
   assert.deepEqual(buy.lastPropertyCards, []);
-  assert.notEqual(buy.lastSearchFilters.location, rent.lastSearchFilters.location);
 });
 
 test('RENT screenshot flow: missing signature after a listing still cannot use Looking for', () => {
@@ -1374,6 +1483,136 @@ test('property cards keep compound document types and unknown furnishing as-is o
   );
   assert.equal(card.propertyType, 'Hotel Apartment');
   assert.equal(card.furnished, 'Semi-furnished');
+});
+
+test('ready 2 bedroom apartment for sale in Dubai South is returned when a matching property exists', async () => {
+  const readyListing = sampleListing({
+    propertyRefNo: 'RO-S-03548',
+    propertyTitle: 'Contemporary  | Prime Community | Tenanted',
+    price: '1249000',
+    bedrooms: '2',
+    bathrooms: '2',
+    propertyPurpose: 'Buy',
+    offPlan: 'No',
+    furnished: 'No',
+    propertyType: 'Apartment',
+    locality: 'Dubai South',
+    subLocality: 'Residential District',
+    city: 'Dubai',
+    towerName: 'Anchorage Residences',
+    propertySize: '1135',
+    propertySizeUnit: 'SQFT',
+  });
+  const offPlanListing = sampleListing({
+    ...readyListing,
+    propertyRefNo: 'RO-S-03413',
+    propertyTitle: 'Prime Investment | Elegant | High ROI',
+    offPlan: 'Yes',
+    towerName: 'South Living',
+    price: '1735600',
+  });
+  const missingOffPlanListing = sampleListing({
+    ...readyListing,
+    propertyRefNo: 'RO-S-NULL-OFFPLAN',
+    propertyTitle: 'Untitled Dubai South apartment',
+    offPlan: null,
+  });
+  const titleOnlyListing = sampleListing({
+    ...readyListing,
+    propertyRefNo: 'RO-S-TITLE-ONLY',
+    propertyTitle: '2BR Apartment in Dubai South',
+    locality: 'JVC',
+    subLocality: '',
+    city: 'Dubai',
+    towerName: 'Imperial Tower',
+  });
+  const corpus = [readyListing, offPlanListing, missingOffPlanListing, titleOnlyListing];
+
+  const matchesFrontendArea = (doc, query) => {
+    const q = String(query || '').trim().toLowerCase();
+    if (!q) return true;
+    return ['locality', 'subLocality', 'city', 'towerName'].some((field) =>
+      String(doc[field] || '')
+        .trim()
+        .toLowerCase()
+        .includes(q)
+    );
+  };
+  const applyReadyBuyQuery = (docs, opts) =>
+    docs.filter((doc) => {
+      if (doc.propertyPurpose !== 'Buy') return false;
+      if (opts.filters?.offPlan === 'No' && doc.offPlan !== 'No') return false;
+      if (Array.isArray(opts.filters?.propertyType) && opts.filters.propertyType.length) {
+        if (!opts.filters.propertyType.includes(doc.propertyType)) return false;
+      }
+      if (opts.filters?.bedrooms != null && Number(doc.bedrooms) !== Number(opts.filters.bedrooms)) {
+        return false;
+      }
+      if (!matchesFrontendArea(doc, opts.filters?.locationQuery)) return false;
+      return true;
+    });
+
+  const userMessage = 'I want to buy a ready-to-move-in 2-bedroom apartment in Dubai South';
+  const slots = deriveSlots([{ role: 'user', content: userMessage }], emptySlots());
+  assert.equal(slots.location, 'Dubai South');
+  assert.equal(slots.readiness, 'ready');
+  assert.equal(slots.beds, 2);
+  assert.equal(slots.propertyType, 'apartment');
+
+  const buyFilters = emptySearchFilters();
+  buyFilters.purpose = 'Buy';
+  buyFilters.location = 'Dubai South';
+  applyTypesToFilters(buyFilters, ['Apartment']);
+  applyBedroomChoice(buyFilters, { exact: 2 });
+  const opts = listingQueryOpts(buyFilters, 'Dubai South');
+  assert.equal(opts.search, 'Dubai South');
+  assert.equal(opts.filters.locationQuery, 'Dubai South');
+  assert.deepEqual(opts.filters.propertyType, ['Apartment']);
+  assert.equal(opts.filters.bedrooms, 2);
+  assert.equal(opts.filters.offPlan, undefined);
+
+  const originalFetchBuy = propertyDbService.fetchBuyProperties;
+  const originalAreaGuideFind = AreaGuide.find;
+  let capturedOpts = null;
+  propertyDbService.fetchBuyProperties = async (queryOpts) => {
+    capturedOpts = queryOpts;
+    const properties = applyReadyBuyQuery(corpus, queryOpts);
+    return { properties, total: properties.length };
+  };
+  AreaGuide.find = () => ({ lean: async () => [] });
+  try {
+    const result = await executeTool(
+      'search_properties',
+      {
+        bedrooms: 2,
+        type: 'Apartment',
+        purpose: 'Buy',
+      },
+      {
+        userMessage,
+        intent: CONVERSATION_INTENTS.BUY,
+      }
+    );
+    assert.ok(capturedOpts);
+    assert.equal(capturedOpts.search, '');
+    assert.equal(capturedOpts.filters.locationQuery, 'Dubai South');
+    assert.deepEqual(capturedOpts.filters.propertyType, ['Apartment']);
+    assert.equal(capturedOpts.filters.bedrooms, 2);
+    assert.equal(capturedOpts.filters.offPlan, 'No');
+    assert.equal(capturedOpts.filters.excludeOffPlanYes, undefined);
+    assert.equal(result.propertyCards.length, 1);
+    assert.equal(result.propertyCards[0].id, 'RO-S-03548');
+    assert.equal(result.propertyCards[0].propertyType, 'Apartment');
+    assert.equal(result.propertyCards[0].purpose, 'Buy');
+    assert.equal(result.propertyCards[0].location, 'Dubai South');
+    assert.equal(
+      applyReadyBuyQuery(corpus, capturedOpts).map((doc) => doc.propertyRefNo).join(','),
+      'RO-S-03548'
+    );
+  } finally {
+    propertyDbService.fetchBuyProperties = originalFetchBuy;
+    AreaGuide.find = originalAreaGuideFind;
+  }
 });
 
 test('complete rent query skips blocking questions and appends furnished after results', () => {
@@ -1876,7 +2115,139 @@ test('natural listing intent switch keeps previous property details', () => {
   assert.equal(remembered.location, 'Dubai Marina');
 });
 
-test('explicit menu starters still clear previous listing details', () => {
+test('switching buy rent or off-plan keeps type bedrooms and location but resets budget', () => {
+  const first = applyRememberedTurn(
+    {},
+    'I want to rent a 2-bedroom apartment in Dubai Marina with a budget of AED 120K'
+  );
+  const rentProfile = {
+    intent: CONVERSATION_INTENTS.RENT,
+    purpose: 'Rent',
+    qualificationSlots: first.slots,
+    lastSearchFilters: first.filters,
+    bedrooms: 2,
+    preferredAreas: ['Dubai Marina'],
+    budget: { min: null, max: 120000 },
+  };
+
+  const buySlots = retainSlotsForListingIntent(rememberedSlots(rentProfile), CONVERSATION_INTENTS.BUY);
+  assert.equal(buySlots.purpose, 'buy');
+  assert.equal(buySlots.propertyType, 'apartment');
+  assert.equal(buySlots.beds, 2);
+  assert.equal(buySlots.location, 'Dubai Marina');
+  assert.equal(buySlots.budget, null);
+  assert.equal(nextQuestion(buySlots).slot, 'budget');
+  assert.equal(shouldBlockQualification(buySlots, {}), true);
+
+  const buyIntent = startFreshIntent(CONVERSATION_INTENTS.BUY, 'I want to buy instead', rentProfile);
+  assert.equal(buyIntent.lastSearchFilters.type, 'Apartment');
+  assert.equal(buyIntent.lastSearchFilters.bedrooms, 2);
+  assert.equal(buyIntent.lastSearchFilters.location, 'Dubai Marina');
+  assert.equal(buyIntent.lastSearchFilters.budgetMin, null);
+  assert.equal(buyIntent.lastSearchFilters.budgetMax, null);
+  assert.equal(buyIntent.budget.min, null);
+  assert.equal(buyIntent.budget.max, null);
+
+  const buyTurn = applyRememberedTurn(rentProfile, 'I want to buy instead');
+  assert.equal(buyTurn.slots.purpose, 'buy');
+  assert.equal(buyTurn.slots.propertyType, 'apartment');
+  assert.equal(buyTurn.slots.beds, 2);
+  assert.equal(buyTurn.slots.location, 'Dubai Marina');
+  assert.equal(buyTurn.slots.budget, null);
+  assert.equal(buyTurn.filters.budgetMax, null);
+  assert.equal(nextQuestion(buyTurn.slots).slot, 'budget');
+
+  const buyProfile = {
+    intent: CONVERSATION_INTENTS.BUY,
+    purpose: 'Buy',
+    qualificationSlots: buySlots,
+    lastSearchFilters: buyTurn.filters,
+    bedrooms: 2,
+    preferredAreas: ['Dubai Marina'],
+    budget: { min: null, max: null },
+  };
+  buyProfile.lastSearchFilters.budgetMax = 2000000;
+  buyProfile.budget.max = 2000000;
+  buyProfile.qualificationSlots = {
+    ...buySlots,
+    budget: { min: null, max: 2000000, period: 'total' },
+  };
+
+  const rentAgain = retainSlotsForListingIntent(rememberedSlots(buyProfile), CONVERSATION_INTENTS.RENT);
+  assert.equal(rentAgain.purpose, 'rent');
+  assert.equal(rentAgain.propertyType, 'apartment');
+  assert.equal(rentAgain.beds, 2);
+  assert.equal(rentAgain.location, 'Dubai Marina');
+  assert.equal(rentAgain.budget, null);
+  assert.equal(nextQuestion(rentAgain).slot, 'budget');
+
+  const offPlan = retainSlotsForListingIntent(rememberedSlots(buyProfile), CONVERSATION_INTENTS.OFF_PLAN);
+  assert.equal(offPlan.purpose, 'buy');
+  assert.equal(offPlan.readiness, 'offplan');
+  assert.equal(offPlan.propertyType, 'apartment');
+  assert.equal(offPlan.beds, 2);
+  assert.equal(offPlan.location, 'Dubai Marina');
+  assert.equal(offPlan.budget, null);
+
+  const offPlanIntent = startFreshIntent(
+    CONVERSATION_INTENTS.OFF_PLAN,
+    'I want something off plan',
+    buyProfile
+  );
+  assert.equal(offPlanIntent.lastSearchFilters.purpose, 'Off-plan');
+  assert.equal(offPlanIntent.lastSearchFilters.type, 'Apartment');
+  assert.equal(offPlanIntent.lastSearchFilters.bedrooms, 2);
+  assert.equal(offPlanIntent.lastSearchFilters.location, 'Dubai Marina');
+  assert.equal(offPlanIntent.lastSearchFilters.budgetMax, null);
+});
+
+test('a purpose switch can keep a budget stated in the same message', () => {
+  const first = applyRememberedTurn(
+    {},
+    'I want to rent a 2-bedroom apartment in Dubai Marina with a budget of AED 120K'
+  );
+  const rentProfile = {
+    intent: CONVERSATION_INTENTS.RENT,
+    purpose: 'Rent',
+    qualificationSlots: first.slots,
+    lastSearchFilters: first.filters,
+    bedrooms: 2,
+    preferredAreas: ['Dubai Marina'],
+    budget: { min: null, max: 120000 },
+  };
+  const switched = applyRememberedTurn(rentProfile, 'I want to buy under 2 million');
+  assert.equal(switched.slots.purpose, 'buy');
+  assert.equal(switched.slots.location, 'Dubai Marina');
+  assert.equal(switched.slots.beds, 2);
+  assert.equal(switched.slots.propertyType, 'apartment');
+  assert.equal(switched.slots.budget.max, 2000000);
+  assert.equal(switched.filters.budgetMax, 2000000);
+  assert.notEqual(nextQuestion(switched.slots)?.slot, 'budget');
+});
+
+test('same-purpose follow-ups still keep the remembered budget', () => {
+  const first = applyRememberedTurn(
+    {},
+    'I want to rent a 2-bedroom apartment in Dubai Marina with a budget of AED 120K'
+  );
+  const rentProfile = {
+    intent: CONVERSATION_INTENTS.RENT,
+    purpose: 'Rent',
+    qualificationSlots: first.slots,
+    lastSearchFilters: first.filters,
+    bedrooms: 2,
+    preferredAreas: ['Dubai Marina'],
+    budget: { min: null, max: 120000 },
+  };
+  const later = applyRememberedTurn(rentProfile, 'show me more apartments in Dubai Marina');
+  assert.equal(later.slots.purpose, 'rent');
+  assert.equal(later.slots.budget.max, 120000);
+  assert.equal(later.filters.budgetMax, 120000);
+  assert.equal(later.slots.beds, 2);
+  assert.equal(later.slots.location, 'Dubai Marina');
+});
+
+test('explicit menu starters keep type bedrooms and location and clear only budget', () => {
   const rent = startFreshIntent(
     CONVERSATION_INTENTS.RENT,
     'I want to rent a 2 bedroom apartment in Dubai Marina',
@@ -1884,10 +2255,14 @@ test('explicit menu starters still clear previous listing details', () => {
   );
   const reset = startFreshIntent(CONVERSATION_INTENTS.BUY, 'Buy a Property', rent);
   assert.equal(reset.lastSearchFilters.purpose, 'Buy');
-  assert.equal(reset.lastSearchFilters.bedrooms, null);
-  assert.equal(reset.lastSearchFilters.type, null);
-  assert.equal(reset.lastSearchFilters.location, null);
-  assert.equal(nextQuestionForProfile(reset).slot, 'propertyType');
+  assert.equal(reset.lastSearchFilters.bedrooms, 2);
+  assert.equal(reset.lastSearchFilters.type, 'Apartment');
+  assert.equal(reset.lastSearchFilters.location, 'Dubai Marina');
+  assert.equal(reset.lastSearchFilters.budgetMin, null);
+  assert.equal(reset.lastSearchFilters.budgetMax, null);
+  assert.equal(reset.budget.min, null);
+  assert.equal(reset.budget.max, null);
+  assert.equal(nextQuestionForProfile(reset).slot, 'budget');
 });
 
 

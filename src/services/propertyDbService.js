@@ -115,6 +115,14 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
   ].filter(Boolean);
   if (listMatches.length) match.push(...listMatches);
 
+  const locationQuery = String(filters.locationQuery || '').trim();
+  if (locationQuery) {
+    const re = new RegExp(escapeRegex(locationQuery), 'i');
+    match.push({
+      $or: ['locality', 'subLocality', 'city', 'towerName'].map((field) => ({ [field]: re })),
+    });
+  }
+
   Object.entries(forced).forEach(([key, value]) => {
     match.push({ [key]: value });
   });

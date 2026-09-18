@@ -6,13 +6,14 @@ const {
   copySlots,
   rememberedSlots,
   applyRememberedTurn,
+  retainSlotsForListingIntent,
   syncSlotsWithFilters,
   nextQuestion,
   shouldBlockQualification,
   applySlotsToSearchFilters,
   appendOptionalFollowUp,
 } = require('./chat.qualify');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, isSimilarPropertyRequest, isSearchContinuation, isPropertyDetailRequest, searchSignatureFromFilters, hasExecutedListingSearch, classifyListingSearchTurn, SEARCH_TURN, exhaustedResultsReply, bedroomChoiceMatches, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, resolveConversationIntent, isExplicitIntentStarter, isPurposeChipReply, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, isSimilarPropertyRequest, isSearchContinuation, isPropertyDetailRequest, searchSignatureFromFilters, hasExecutedListingSearch, classifyListingSearchTurn, SEARCH_TURN, exhaustedResultsReply, bedroomChoiceMatches, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -98,6 +99,7 @@ function mergeProfile(current, patch) {
     leadCaptured: current.leadCaptured || false,
   };
 
+  if (patch.resetBudget) next.budget = { min: null, max: null };
   if (patch.budget) {
     if (patch.budget.min !== undefined && patch.budget.min !== null) next.budget.min = patch.budget.min;
     if (patch.budget.max !== undefined && patch.budget.max !== null) next.budget.max = patch.budget.max;
@@ -193,26 +195,21 @@ function rememberAndApplySlots(profile, message, history = []) {
   if (slots.beds === 'studio') patch.bedrooms = 0;
   else if (typeof slots.beds === 'number') patch.bedrooms = slots.beds;
   if (slots.budget && typeof slots.budget === 'object') {
+    patch.resetBudget = true;
     patch.budget = {
       min: slots.budget.min ?? null,
       max: slots.budget.max ?? null,
     };
+  } else {
+    patch.resetBudget = true;
   }
   return mergeProfile(profile, patch);
 }
 
-function listingSlotsForIntent(detected, profile, starter) {
-  if (starter) return emptySlots();
-  const kept = copySlots(rememberedSlots(profile));
-  if (detected === CONVERSATION_INTENTS.RENT) kept.purpose = 'rent';
-  else if (detected === CONVERSATION_INTENTS.OFF_PLAN) {
-    kept.purpose = 'buy';
-    kept.readiness = 'offplan';
-  } else if (detected === CONVERSATION_INTENTS.BUY) {
-    kept.purpose = 'buy';
-    if (kept.readiness === 'offplan') kept.readiness = null;
-  }
-  return kept;
+function listingSlotsForIntent(detected, profile) {
+  const current = currentConversationIntent(profile);
+  if (!isListingIntent(current)) return emptySlots();
+  return retainSlotsForListingIntent(rememberedSlots(profile), detected);
 }
 
 function pickSuggestedCta({ propertyCards, sources, leadCaptured, turnIndex }) {
@@ -959,9 +956,13 @@ function applyListingFilterUpdate(message, profile) {
   };
 }
 
-function applyConversationIntent(message, profile, explicitIntent = null) {
-  const requestedIntent = normalizeIntentValue(explicitIntent);
-  const detected = requestedIntent || parseConversationIntent(message);
+function applyConversationIntent(message, profile, explicitIntent = null, pageContext = null) {
+  const detected = resolveConversationIntent({
+    message,
+    profile,
+    explicitIntent,
+    pageContext,
+  });
   if (!detected) return null;
 
   const current = currentConversationIntent(profile);
@@ -978,7 +979,7 @@ function applyConversationIntent(message, profile, explicitIntent = null) {
 
   const nextProfile = startFreshIntent(detected, message, profile);
   if (isListingIntent(detected)) {
-    nextProfile.qualificationSlots = listingSlotsForIntent(detected, profile, starter);
+    nextProfile.qualificationSlots = listingSlotsForIntent(detected, profile);
     nextProfile.slotFlow = { awaiting: null, alternatives: null };
     return {
       type: 'continue',
@@ -997,8 +998,8 @@ function applyConversationIntent(message, profile, explicitIntent = null) {
   };
 }
 
-function resolvePendingSlots(message, profile, history = [], explicitIntent = null) {
-  const intentGate = applyConversationIntent(message, profile, explicitIntent);
+function resolvePendingSlots(message, profile, history = [], explicitIntent = null, pageContext = null) {
+  const intentGate = applyConversationIntent(message, profile, explicitIntent, pageContext);
   if (intentGate) return intentGate;
 
   const awaiting = profile.slotFlow?.awaiting;
@@ -2126,7 +2127,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
 
 const chat = async (req, res) => {
   try {
-    const { sessionId, message, intent: bodyIntent } = req.body;
+    const { sessionId, message, intent: bodyIntent, pageContext } = req.body;
     const conversation = await loadConversation(sessionId);
     let profile = conversation.userProfile || {};
     const requestTypes = filtersFromRequestBody(req.body);
@@ -2139,7 +2140,8 @@ const chat = async (req, res) => {
       message,
       profile,
       conversation.messages || [],
-      bodyIntent
+      bodyIntent,
+      pageContext
     );
 
     if (slotResult?.type === 'clarify') {

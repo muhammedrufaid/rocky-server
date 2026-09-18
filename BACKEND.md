@@ -110,6 +110,7 @@ Extra middleware: origin allowlist (`CHAT_ALLOWED_ORIGINS`), chat CORS (POST/OPT
   "sessionId": "string, required, trimmed, max 128 chars",
   "message": "string, required, trimmed, max CHAT_MESSAGE_MAX_LENGTH (default 2000)",
   "intent": "optional: BUY | RENT | OFF_PLAN | SELL_PROPERTY | PROPERTY_MANAGEMENT",
+  "pageContext": "optional page hint; currently PROPERTY_MANAGEMENT (also property-management / Property Management). Ignored if unrecognised.",
   "property_type": "optional, also propertyType / type",
   "property_types": "optional array or comma list",
   "custom_property_type": "optional, used when property_type is Other"
@@ -117,6 +118,8 @@ Extra middleware: origin allowlist (`CHAT_ALLOWED_ORIGINS`), chat CORS (POST/OPT
 ```
 
 `intent` is normalized to uppercase with spaces/hyphens → `_`. Unrecognised intent → `400`.
+
+`pageContext` is an optional **hint**, not a lock. Only `PROPERTY_MANAGEMENT` is used today (`property-management`, `property_management`, and `Property Management` all normalize to it). Unknown values are ignored. It applies only when the conversation has **no intent yet** and the message does not already parse as buy / rent / sell / off-plan / property management. A clear user intent always wins. After the visitor changes direction, later turns ignore `pageContext` even if the frontend keeps sending it. `intent` is still the explicit client override and is unchanged.
 
 **Success `200` JSON** (fields present depend on the turn)
 
@@ -305,7 +308,7 @@ Typical CMS success: `{ success, message?, count?, data }`.
 
 Loop: up to **4** tool rounds (`MAX_TOOL_ROUNDS`). Empty model content after `search_content` is replaced by `synthesizeContentReply` (excerpt from first chunk) or `"Sorry, I couldn't pull that up — try again in a moment"`.
 
-**Deterministic path (often skips the LLM):** if slot resolution returns `type: 'continue'` and the turn is a listing search, `runForcedPropertySearch` calls `search_properties` directly and returns canned copy (`foundListingsReply`, empty-result copy, bedroom/purpose chips). Sell, property-management, and many clarifications never call OpenAI.
+**Deterministic path (often skips the LLM):** if slot resolution returns `type: 'continue'` and the turn is a listing search, `runForcedPropertySearch` calls `search_properties` directly and returns canned copy (`foundListingsReply`, empty-result copy, bedroom/purpose chips). Sell, property-management, and many clarifications never call OpenAI. Optional `pageContext: PROPERTY_MANAGEMENT` can start the property-management flow on the first turn when the message has no listing intent; it is not stored on the session and does not override a later buy / rent / sell / off-plan message.
 
 **Content index job:** `node scripts/embedContent.js` (optional `--dry-run`). Embeds active blogs, area guides, FAQs, services, company info. Skips factsheets. Chunk size ~1600–2000 chars. Upserts by `(sourceType, sourceId, embeddingHash)`; deletes stale chunks.
 
@@ -339,7 +342,7 @@ Slot awaiting values used in code include: `purpose`, `bedrooms`, `listingIntake
 | User JWT | `src/middleware/authMiddleware.js` | `Authorization: Bearer <jwt>`. Verifies `JWT_SECRET`, loads `User` by `decoded.id`. Used on enquiry admin routes and `GET /api/auth/users`. No role checks. |
 | Chat origin | `restrictChatOrigin` + extra `cors` in `chat.routes.js` | Default allowlist: `https://www.rockyrealestate.com`, `https://rockyrealestate.com`, `http://localhost:3000`. Override `CHAT_ALLOWED_ORIGINS` (comma-separated). Missing origin is allowed. Else `403`. |
 | Chat rate limit | `express-rate-limit` | Window `CHAT_RATE_LIMIT_WINDOW_MS` (default 60s), max `CHAT_RATE_LIMIT_MAX` (default 20). Key: `chat-session:<sessionId>` or IP. |
-| Chat body limits | `validateChat` | `sessionId` required ≤128 chars; `message` required ≤ `CHAT_MESSAGE_MAX_LENGTH`. |
+| Chat body limits | `validateChat` | `sessionId` required ≤128 chars; `message` required ≤ `CHAT_MESSAGE_MAX_LENGTH`. Optional `intent` (known values or `400`). Optional `pageContext` (string; unrecognised values ignored). |
 | Google OAuth | `/auth/google` | State cookie vs `state` query; tokens encrypted with AES-256-GCM keyed from SHA-256 of `GOOGLE_CLIENT_SECRET` (`src/utils/tokenCrypto.js`). Tokens `select: false` on the connection model. |
 | Property internals | `propertyDbService.js` | `embedding` / `embeddingHash` projected out of frontend APIs. |
 
