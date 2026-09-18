@@ -276,7 +276,7 @@ test('property type change prefers the intended type', () => {
 
 test('empty-result copy avoids flat negatives', () => {
   const reply = emptyResultsReply({ location: 'Dubai Marina', type: 'Apartment', bedrooms: 2 });
-  assert.match(reply, /not on our current list/i);
+  assert.match(reply, /no exact match/i);
   assert.equal(/i don't have|i couldn't find|no matches/i.test(reply), false);
   const nearby = locationEmptyNearbyReply({ location: 'Arabian Ranches' }, [
     'Dubai Hills',
@@ -285,6 +285,24 @@ test('empty-result copy avoids flat negatives', () => {
   assert.match(nearby, /Arabian Ranches/i);
   assert.match(nearby, /Dubai Hills/);
   assert.equal(/i don't have|i couldn't find/i.test(nearby), false);
+});
+
+test('listing replies explain the match using only search facts', () => {
+  const filters = marinaRentFilters();
+  const hit = foundListingsReply(filters, 4);
+  assert.match(hit, /These 4 listings match your request for 2-bedroom apartments in Dubai Marina to rent/i);
+  assert.equal(/amenit|developer|available now|pool|gym|burj/i.test(hit), false);
+  assert.equal(/AED/i.test(hit), false);
+
+  const withBudget = copySearchFilters(filters);
+  withBudget.budgetMax = 120000;
+  const budgetHit = foundListingsReply(withBudget, 4);
+  assert.match(budgetHit, /up to AED 120,000/);
+  assert.match(budgetHit, /Dubai Marina to rent/);
+
+  const empty = emptyResultsReply(withBudget);
+  assert.match(empty, /no exact match for a 2-bedroom apartment in Dubai Marina to rent, up to AED 120,000/i);
+  assert.equal(/amenit|developer|available now/i.test(empty), false);
 });
 
 test('sell FAQ is content, not sell-listing intent', () => {
@@ -721,15 +739,15 @@ test('continuation replies are not the initial empty-result search-status', () =
     bedrooms: 2,
   };
   const initialEmpty = emptyResultsReply(filters);
-  assert.match(initialEmpty, /A 2-bedroom apartment in Dubai Marina is not on our current list/i);
+  assert.match(initialEmpty, /no exact match for a 2-bedroom apartment in Dubai Marina to rent/i);
 
   const continuation = foundListingsReply(filters, 12, { isShowMore: true, newCount: 3 });
-  assert.equal(/not on our current list/i.test(continuation), false);
+  assert.equal(/no exact match/i.test(continuation), false);
   assert.match(continuation, /more matching/i);
 
   const firstHit = foundListingsReply(filters, 12, { isShowMore: false, newCount: 6 });
-  assert.equal(/not on our current list/i.test(firstHit), false);
-  assert.match(firstHit, /There are 12/i);
+  assert.equal(/no exact match/i.test(firstHit), false);
+  assert.match(firstHit, /These 12 listings match/i);
 });
 
 test('viewAllMatching is present for any successful search, including below the card cap', () => {
@@ -798,9 +816,9 @@ test('property search blends a matching area guide and skips when none or ambigu
   const listingReply = foundListingsReply(rentFilters, 5);
   const blended = blendListingReplyWithAreaGuide(listingReply, jvcGuide);
   assert.match(blended, /Jumeirah Village Circle \(JVC\)/);
-  assert.match(blended, /There are 5/);
+  assert.match(blended, /These 5 listings match/);
   assert.match(blended, /in JVC to rent/);
-  assert.ok(blended.indexOf('Jumeirah Village Circle') < blended.indexOf('There are 5'));
+  assert.ok(blended.indexOf('Jumeirah Village Circle') < blended.indexOf('These 5 listings match'));
   const source = areaGuideSource(jvcGuide);
   assert.equal(source.title, 'Jumeirah Village Circle');
   assert.match(source.url, /\/area-guides\/jumeirah-village-circle$/);
@@ -813,7 +831,7 @@ test('property search blends a matching area guide and skips when none or ambigu
     applyBedroomChoice(filters, { exact: 2 });
     const countReply = foundListingsReply(filters, 3);
     const withGuide = blendListingReplyWithAreaGuide(countReply, jvcGuide);
-    assert.match(withGuide, /There are 3/, purpose);
+    assert.match(withGuide, /These 3 listings match/, purpose);
     assert.match(withGuide, /Jumeirah Village Circle/, purpose);
   }
 
@@ -899,7 +917,7 @@ test('RENT screenshot flow: initial search status only on first search', () => {
   const kind = classifyFromProfile('2 BR', beforeSearch);
   assert.equal(kind, SEARCH_TURN.INITIAL);
   const initialStatus = replyForZeroHits(kind, filters, 0);
-  assert.match(initialStatus, /A 2-bedroom apartment in Dubai Marina is not on our current list/i);
+  assert.match(initialStatus, /no exact match for a 2-bedroom apartment in Dubai Marina to rent/i);
   assert.equal(hasExecutedListingSearch(beforeSearch), false);
 
   const afterFirstHit = marinaRentProfile();
@@ -913,7 +931,7 @@ test('RENT screenshot flow: more properties in Dubai Marina is continuation, not
   const kind = classifyFromProfile(message, profile);
   assert.equal(kind, SEARCH_TURN.CONTINUATION);
   const reply = replyForZeroHits(kind, profile.lastSearchFilters, profile.shownPropertyIds.length);
-  assert.equal(/not on our current list/i.test(reply), false);
+  assert.equal(/no exact match/i.test(reply), false);
   assert.match(reply, /already shown/i);
   assert.equal(reply, exhaustedResultsReply(profile.lastSearchFilters, 1));
 });
@@ -925,7 +943,7 @@ test('RENT screenshot flow: restated 2 bedroom is continuation, not Looking for'
   assert.equal(kind, SEARCH_TURN.CONTINUATION);
   assert.equal(isSearchContinuation(message, profile.lastSearchFilters, { searchAlreadyExecuted: true }), true);
   const reply = replyForZeroHits(kind, profile.lastSearchFilters, 1);
-  assert.equal(/not on our current list/i.test(reply), false);
+  assert.equal(/no exact match/i.test(reply), false);
   assert.equal(reply, exhaustedResultsReply(profile.lastSearchFilters, 1));
 });
 
@@ -950,9 +968,9 @@ test('RENT screenshot flow: exhausted inventory is not emptyResultsReply', () =>
   const kind = classifyFromProfile('show me more', profile);
   const exhausted = replyForZeroHits(kind, profile.lastSearchFilters, 1);
   const initialEmpty = emptyResultsReply(profile.lastSearchFilters);
-  assert.match(initialEmpty, /A 2-bedroom apartment in Dubai Marina is not on our current list/i);
+  assert.match(initialEmpty, /no exact match for a 2-bedroom apartment in Dubai Marina to rent/i);
   assert.notEqual(exhausted, initialEmpty);
-  assert.equal(/not on our current list/i.test(exhausted), false);
+  assert.equal(/no exact match/i.test(exhausted), false);
   assert.match(exhausted, /already shown/i);
 });
 
@@ -973,7 +991,7 @@ test('RENT screenshot flow: repeating the same filters never repeats Looking for
     const kind = classifyFromProfile(message, profile);
     assert.equal(kind, SEARCH_TURN.CONTINUATION, message);
     const reply = replyForZeroHits(kind, profile.lastSearchFilters, 1);
-    assert.equal(/not on our current list/i.test(reply), false, message);
+    assert.equal(/no exact match/i.test(reply), false, message);
   }
 });
 
@@ -990,7 +1008,7 @@ test('RENT screenshot flow: 2 BR to 3 BR is a new search', () => {
   assert.equal(plan.sameSearch, false);
   assert.notEqual(plan.signature, profile.lastSearchSignature);
   const newSearchReply = replyForZeroHits(kind, nextFilters, 0);
-  assert.match(newSearchReply, /not on our current list/i);
+  assert.match(newSearchReply, /no exact match/i);
 });
 
 test('RENT screenshot flow: Dubai Marina to Downtown Dubai is a new area search', () => {
@@ -1056,7 +1074,7 @@ test('RENT screenshot flow: missing signature after a listing still cannot use L
     sameSearch: plan.sameSearch,
     executed: plan.executed,
   });
-  assert.equal(/not on our current list/i.test(reply), false);
+  assert.equal(/no exact match/i.test(reply), false);
   assert.equal(reply, exhaustedResultsReply(profile.lastSearchFilters, 1));
 });
 
@@ -1086,8 +1104,8 @@ test('emptyResultsReply is only allowed for an initial or filter-update search',
     canUseInitialEmptyResults({ turnKind: SEARCH_TURN.NEW_AREA, sameSearch: false, executed: true }),
     false
   );
-  assert.match(replyForZeroHits(SEARCH_TURN.INITIAL, filters, 0), /not on our current list/i);
-  assert.equal(/not on our current list/i.test(replyForZeroHits(SEARCH_TURN.CONTINUATION, filters, 1)), false);
+  assert.match(replyForZeroHits(SEARCH_TURN.INITIAL, filters, 0), /no exact match/i);
+  assert.equal(/no exact match/i.test(replyForZeroHits(SEARCH_TURN.CONTINUATION, filters, 1)), false);
   assert.equal(/already shown/i.test(replyForZeroHits(SEARCH_TURN.NEW_AREA, { ...filters, location: 'JBR' }, 0)), false);
   assert.equal(/already shown/i.test(replyForZeroHits(SEARCH_TURN.SIMILAR, filters, 1)), false);
 });
@@ -1132,7 +1150,7 @@ test('See similar properties is not an exact-search replay', () => {
   const similarEmpty = replyForZeroHits(SEARCH_TURN.SIMILAR, similarFilters, 1);
   assert.equal(similarEmpty, similarEmptyReply(similarFilters));
   assert.equal(/already shown/i.test(similarEmpty), false);
-  assert.equal(/not on our current list/i.test(similarEmpty), false);
+  assert.equal(/no exact match/i.test(similarEmpty), false);
   assert.match(similarEmpty, /similar listings/i);
 });
 
@@ -1167,9 +1185,8 @@ test('JBR zero results uses new-area copy, not exact-search exhausted copy', () 
   jbrFilters.location = 'JBR';
   const reply = replyForZeroHits(SEARCH_TURN.NEW_AREA, jbrFilters, 0);
   assert.equal(reply, newAreaEmptyReply(jbrFilters));
-  assert.match(reply, /no matching 2-bedroom apartment in JBR/i);
+  assert.match(reply, /no exact match for a 2-bedroom apartment in JBR to rent/i);
   assert.equal(/already shown/i.test(reply), false);
-  assert.equal(/not on our current list/i.test(reply), false);
   assert.notEqual(reply, exhaustedResultsReply(jbrFilters, 1));
   assert.notEqual(reply, emptyResultsReply(jbrFilters));
 });
@@ -1372,7 +1389,7 @@ test('complete rent query skips blocking questions and appends furnished after r
 
   const listingReply = foundListingsReply(marinaRentFilters(), 5);
   const follow = appendOptionalFollowUp(listingReply, slots);
-  assert.match(follow.reply, /There are 5 2-bedroom apartments in Dubai Marina to rent/);
+  assert.match(follow.reply, /These 5 listings match your request for 2-bedroom apartments in Dubai Marina to rent/);
   assert.match(follow.reply, /furnished or unfurnished/i);
   assert.equal(/Shall I take you through them/i.test(follow.reply), false);
   assert.equal(follow.question.slot, 'furnished');
@@ -1485,8 +1502,8 @@ test('a furnishing answer refines the search and never becomes a dead end', () =
   const relaxed = marinaRentFilters();
   const note = furnishingRelaxedNote('Unfurnished');
   const reply = foundListingsReply(relaxed, 4, { note });
-  assert.match(reply, /There are 4 2-bedroom apartments in Dubai Marina to rent\./);
-  assert.match(reply, /None of these are listed as unfurnished/);
+  assert.match(reply, /These 4 listings match your request for 2-bedroom apartments in Dubai Marina to rent\./);
+  assert.match(reply, /none are listed as unfurnished/i);
   assert.match(reply, /Shall I take you through them\?$/);
   assert.equal(/let me check|nearby|different area/i.test(reply), false);
   // The View-all link matches the relaxed result set.
@@ -1556,7 +1573,7 @@ test('a bare Any answer does not wipe a bedroom count the visitor already gave',
   assert.equal(filters.bedrooms, 2);
   assert.equal(filters.bedroomsAny, false);
   assert.equal(filters.budgetMax, null);
-  assert.match(foundListingsReply(filters, 4), /There are 4 2-bedroom apartments in Dubai Marina to rent/);
+  assert.match(foundListingsReply(filters, 4), /These 4 listings match your request for 2-bedroom apartments in Dubai Marina to rent/);
 
   // An explicit "Any BR" still means any bedroom count.
   assert.equal(isBedroomSkip('Any BR'), false);
@@ -1656,13 +1673,13 @@ test('qualification does not change viewAllMatching, propertyCards, or area-guid
   };
   const blended = blendListingReplyWithAreaGuide(foundListingsReply(filters, 5), jvcGuide);
   assert.match(blended, /Jumeirah Village Circle/);
-  assert.match(blended, /There are 5/);
+  assert.match(blended, /These 5 listings match/);
   const follow = appendOptionalFollowUp(blended, deriveSlots(
     [{ role: 'user', content: 'I want to rent a 2-bedroom apartment in Dubai Marina with a budget of AED 120K' }],
     emptySlots()
   ));
   assert.match(follow.reply, /Jumeirah Village Circle/);
-  assert.match(follow.reply, /There are 5/);
+  assert.match(follow.reply, /These 5 listings match/);
 });
 
 test('two-turn qualification reaches search after budget', () => {

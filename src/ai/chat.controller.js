@@ -1193,7 +1193,7 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
         type: 'clarify',
         profile,
         reply: storedAlts.length > 0
-          ? 'These are the closest alternatives. Which would you prefer?'
+          ? 'These are the closest alternatives to that request. Which would you prefer?'
           : hasExecutedListingSearch(profile)
             ? exhaustedResultsReply(
                 copySearchFilters(profile.lastSearchFilters || emptySearchFilters()),

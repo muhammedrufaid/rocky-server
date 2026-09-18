@@ -1158,24 +1158,99 @@ function describeTypeSingular(filters = {}) {
   return types.join(', ');
 }
 
-function foundListingsReply(filters = {}, total = 0, { isShowMore = false, newCount = 0, note = '' } = {}) {
+function formatAedAmount(n) {
+  const num = Number(n);
+  if (!Number.isFinite(num) || num <= 0) return '';
+  if (num >= 1_000_000) {
+    const mil = num / 1_000_000;
+    const label = Number.isInteger(mil) ? String(mil) : String(mil.toFixed(1)).replace(/\.0$/, '');
+    return `AED ${label} million`;
+  }
+  return `AED ${Math.round(num).toLocaleString('en-US')}`;
+}
+
+function describeBudgetPhrase(filters = {}) {
+  const min = Number(filters.budgetMin);
+  const max = Number(filters.budgetMax);
+  const hasMin = Number.isFinite(min) && min > 0;
+  const hasMax = Number.isFinite(max) && max > 0;
+  if (hasMin && hasMax) {
+    if (min === max) return `at ${formatAedAmount(max)}`;
+    return `between ${formatAedAmount(min)} and ${formatAedAmount(max)}`;
+  }
+  if (hasMax) return `up to ${formatAedAmount(max)}`;
+  if (hasMin) return `from ${formatAedAmount(min)}`;
+  return '';
+}
+
+function describePurposeBit(filters = {}) {
+  if (filters.purpose === 'Rent') return 'to rent';
+  if (filters.purpose === 'Off-plan') return 'off-plan';
+  if (filters.purpose === 'Buy') return 'for sale';
+  return '';
+}
+
+function withArticle(phrase) {
+  const p = String(phrase || '').trim();
+  if (!p) return '';
+  if (/^(a|an)\s/i.test(p)) return p;
+  return /^[aeiou]/i.test(p) ? `an ${p}` : `a ${p}`;
+}
+
+/** Facts already in the search filters only — area, type, bedrooms, purpose, budget. */
+function describeRequestFor(filters = {}, { pluralCount = 2 } = {}) {
   const loc = (filters.location || '').toString().trim();
   const beds = describeBedroomPhrase(filters);
+  const type = describeTypePhrase(filters, pluralCount);
+  const budget = describeBudgetPhrase(filters);
+  const core = `${beds}${type}`.replace(/\s+/g, ' ').trim();
+  const parts = [];
+  if (filters.purpose === 'Off-plan') {
+    parts.push(core ? `off-plan ${core}` : 'off-plan properties');
+  } else if (core) {
+    parts.push(core);
+  }
+  if (loc) parts.push(`in ${loc}`);
+  const purposeBit = describePurposeBit(filters);
+  if (purposeBit && filters.purpose !== 'Off-plan') parts.push(purposeBit);
+  let phrase = parts.join(' ');
+  if (budget) phrase = phrase ? `${phrase}, ${budget}` : budget;
+  return phrase.replace(/\s+/g, ' ').trim();
+}
+
+function describeExactRequest(filters = {}) {
+  const loc = (filters.location || '').toString().trim();
+  const beds = describeBedroomPhrase(filters).trim();
+  const type = describeTypeSingular(filters).toLowerCase();
+  const bedsType = beds ? `${beds} ${type}` : type;
+  const budget = describeBudgetPhrase(filters);
+  const area = loc ? ` in ${loc}` : '';
+  let phrase;
+  if (filters.purpose === 'Off-plan') {
+    phrase = withArticle(`off-plan ${bedsType}${area}`.replace(/\s+/g, ' ').trim());
+  } else {
+    const purposeBit = describePurposeBit(filters);
+    const purposeSuffix = purposeBit ? ` ${purposeBit}` : '';
+    phrase = `${withArticle(bedsType)}${area}${purposeSuffix}`;
+  }
+  if (budget) phrase = `${phrase}, ${budget}`;
+  return phrase.replace(/\s+/g, ' ').trim() || 'that request';
+}
+
+function foundListingsReply(filters = {}, total = 0, { isShowMore = false, newCount = 0, note = '' } = {}) {
   const count = Number.isFinite(Number(total)) ? Number(total) : 0;
   const shownNow = Number.isFinite(Number(newCount)) && newCount > 0 ? newCount : count;
-  const type = describeTypePhrase(filters, isShowMore ? shownNow : count);
-  let purposeBit = 'for sale';
-  if (filters.purpose === 'Rent') purposeBit = 'to rent';
-  if (filters.purpose === 'Off-plan') purposeBit = 'off-plan';
-  const area = loc ? ` in ${loc}` : '';
-  const purposeSuffix = filters.purpose === 'Off-plan' ? '' : ` ${purposeBit}`;
+  const brief = describeRequestFor(filters, { pluralCount: isShowMore ? shownNow : count });
+  const forBrief = brief ? ` for ${brief}` : '';
   if (isShowMore) {
-    return `Here are ${shownNow} more matching ${beds}${type}${area}${purposeSuffix}.`
+    return `Here are ${shownNow} more matching listings${forBrief}.`
       .replace(/\s+/g, ' ')
       .trim();
   }
   const extra = String(note || '').trim();
-  return `There are ${count} ${beds}${type}${area}${purposeSuffix}.${extra ? ` ${extra}` : ''} Shall I take you through them?`
+  const noun = count === 1 ? 'listing matches' : 'listings match';
+  const lead = count === 1 ? `This ${noun}` : `These ${count} ${noun}`;
+  return `${lead} your request${forBrief}.${extra ? ` ${extra}` : ''} Shall I take you through them?`
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -1186,28 +1261,17 @@ function furnishingRelaxedNote(preference) {
     .trim()
     .toLowerCase();
   if (!pref) return '';
-  return `None of these are listed as ${pref}. These are the closest available matches.`;
+  return `They match the rest of your request; none are listed as ${pref}.`;
 }
 
 function emptyResultsReply(filters = {}) {
-  const loc = (filters.location || 'that area').toString().trim() || 'that area';
-  const beds = describeBedroomPhrase(filters).trim(); // e.g. "1-bedroom" or ""
-  const type = describeTypeSingular(filters);         // e.g. "Villa" or "property"
-  const bedsType = beds ? `${beds} ${type.toLowerCase()}` : type.toLowerCase();
-  return `A ${bedsType} in ${loc} is not on our current list.`;
+  return `There is no exact match for ${describeExactRequest(filters)}.`;
 }
 
 function exhaustedResultsReply(filters = {}, shownCount = 0) {
-  const loc = (filters.location || '').toString().trim();
-  const area = loc ? ` in ${loc}` : '';
-  const type = describeTypePhrase(filters, shownCount);
-  const purposeBit =
-    filters.purpose === 'Rent'
-      ? 'to rent'
-      : filters.purpose === 'Off-plan'
-        ? 'off-plan'
-        : 'for sale';
-  return `I have already shown the matching ${type}${area} ${purposeBit}. There are no further listings with these filters. Would you like a nearby area, a different bedroom count, another property type, or a revised budget?`
+  const brief = describeRequestFor(filters, { pluralCount: shownCount || 2 });
+  const forBrief = brief ? ` that match your request for ${brief}` : ' that match this request';
+  return `I have already shown the listings${forBrief}. Would you like a nearby area, a different bedroom count, another property type, or a revised budget?`
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -1243,17 +1307,17 @@ function canUseInitialEmptyResults({ turnKind, sameSearch = false, executed = fa
 
 /** Soft nearby-offer copy when the requested location has zero inventory for purpose+type. */
 function locationEmptyNearbyReply(filters = {}, nearbyAreas = []) {
-  const loc = (filters.location || 'that area').toString().trim() || 'that area';
+  const intro = emptyResultsReply(filters);
   const areas = (nearbyAreas || []).map((a) => String(a).trim()).filter(Boolean);
   if (!areas.length) {
-    return `There is no matching listing in ${loc} at present. Would you like another area, or shall we adjust the search?`;
+    return `${intro} Would you like another area, or shall we adjust the search?`;
   }
   if (areas.length === 1) {
-    return `There is no matching listing in ${loc} at present. I can show nearby options in ${areas[0]}. Would you like to see those?`;
+    return `${intro} I can show nearby options in ${areas[0]}. Would you like to see those?`;
   }
   const head = areas.slice(0, -1).join(', ');
   const tail = areas[areas.length - 1];
-  return `There is no matching listing in ${loc} at present. Nearby options include ${head} or ${tail}. Which area would you like to see?`;
+  return `${intro} Nearby options include ${head} or ${tail}. Which area would you like to see?`;
 }
 
 function emptyResultOptions(filters = {}, exploredAreas = []) {
@@ -1306,17 +1370,17 @@ function nearbyAreaOptions(location, exploredAreas = []) {
 }
 
 function newAreaEmptyReply(filters = {}) {
-  const loc = (filters.location || 'that area').toString().trim() || 'that area';
-  const beds = describeBedroomPhrase(filters).trim();
-  const type = describeTypeSingular(filters);
-  const bedsType = beds ? `${beds} ${type.toLowerCase()}` : type.toLowerCase();
-  return `There is no matching ${bedsType} in ${loc} on our current list. Would you like a nearby area, a different bedroom count, or a revised budget?`
+  return `${emptyResultsReply(filters)} Would you like a nearby area, a different bedroom count, or a revised budget?`
     .replace(/\s+/g, ' ')
     .trim();
 }
 
 function similarEmptyReply(filters = {}) {
-  return 'There are no further similar listings with this brief. Would you like a nearby area, or a revised budget?';
+  const brief = describeRequestFor(filters, { pluralCount: 2 });
+  const forBrief = brief ? ` for ${brief}` : '';
+  return `There are no further similar listings that match this request${forBrief}. Would you like a nearby area, or a revised budget?`
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function widenSimilarSearchFilters(filters = {}, exploredAreas = []) {
@@ -3497,7 +3561,8 @@ async function searchProperties(
     ...executedPatch,
   };
   if (resolvedKind === SEARCH_TURN.SIMILAR) {
-    result.replyOverride = `Here are similar ${describeBedroomPhrase(effectiveFilters)}${describeTypePhrase(effectiveFilters, propertyCards.length)}${effectiveFilters.location ? ` in ${effectiveFilters.location}` : ''} that could be a good fit.`
+    const similarBrief = describeRequestFor(effectiveFilters, { pluralCount: propertyCards.length });
+    result.replyOverride = `These similar listings match the same request${similarBrief ? ` for ${similarBrief}` : ''}.`
       .replace(/\s+/g, ' ')
       .trim();
   } else {
