@@ -4,9 +4,9 @@ const { getSystemPrompt } = require('./chat.prompt');
 const {
   emptySlots,
   copySlots,
-  hydrateSlots,
+  rememberedSlots,
+  applyRememberedTurn,
   syncSlotsWithFilters,
-  deriveSlots,
   nextQuestion,
   shouldBlockQualification,
   applySlotsToSearchFilters,
@@ -98,15 +98,6 @@ function mergeProfile(current, patch) {
     leadCaptured: current.leadCaptured || false,
   };
 
-  if (Array.isArray(patch.preferredAreas)) {
-    for (const area of patch.preferredAreas) {
-      const value = String(area || '').trim();
-      if (!value) continue;
-      const exists = next.preferredAreas.some((a) => a.toLowerCase() === value.toLowerCase());
-      if (!exists) next.preferredAreas.push(value);
-    }
-    next.preferredAreas = next.preferredAreas.slice(-10);
-  }
   if (patch.budget) {
     if (patch.budget.min !== undefined && patch.budget.min !== null) next.budget.min = patch.budget.min;
     if (patch.budget.max !== undefined && patch.budget.max !== null) next.budget.max = patch.budget.max;
@@ -152,6 +143,16 @@ function mergeProfile(current, patch) {
     });
   }
   if (patch.leadCaptured) next.leadCaptured = true;
+  if (patch.resetPreferredAreas) next.preferredAreas = [];
+  if (Array.isArray(patch.preferredAreas)) {
+    for (const area of patch.preferredAreas) {
+      const value = String(area || '').trim();
+      if (!value) continue;
+      const exists = next.preferredAreas.some((a) => a.toLowerCase() === value.toLowerCase());
+      if (!exists) next.preferredAreas.push(value);
+    }
+    next.preferredAreas = next.preferredAreas.slice(-10);
+  }
   if (patch.qualificationSlots) next.qualificationSlots = copySlots(patch.qualificationSlots);
 
   return next;
@@ -167,6 +168,51 @@ function uniqueBy(items, keyFn) {
     out.push(item);
   }
   return out;
+}
+
+function rememberAndApplySlots(profile, message, history = []) {
+  if (
+    profile.intent === CONVERSATION_INTENTS.SELL_PROPERTY ||
+    profile.intent === CONVERSATION_INTENTS.PROPERTY_MANAGEMENT
+  ) {
+    return profile;
+  }
+  const { slots, filters } = applyRememberedTurn(profile, message, history);
+  const patch = {
+    qualificationSlots: slots,
+    lastSearchFilters: filters,
+  };
+  if (slots.purpose === 'rent') patch.purpose = 'Rent';
+  else if (slots.purpose === 'buy') {
+    patch.purpose = slots.readiness === 'offplan' || filters.purpose === 'Off-plan' ? 'Off-plan' : 'Buy';
+  }
+  if (typeof slots.location === 'string' && slots.location.trim() && slots.location !== 'any') {
+    patch.resetPreferredAreas = true;
+    patch.preferredAreas = [slots.location.trim()];
+  }
+  if (slots.beds === 'studio') patch.bedrooms = 0;
+  else if (typeof slots.beds === 'number') patch.bedrooms = slots.beds;
+  if (slots.budget && typeof slots.budget === 'object') {
+    patch.budget = {
+      min: slots.budget.min ?? null,
+      max: slots.budget.max ?? null,
+    };
+  }
+  return mergeProfile(profile, patch);
+}
+
+function listingSlotsForIntent(detected, profile, starter) {
+  if (starter) return emptySlots();
+  const kept = copySlots(rememberedSlots(profile));
+  if (detected === CONVERSATION_INTENTS.RENT) kept.purpose = 'rent';
+  else if (detected === CONVERSATION_INTENTS.OFF_PLAN) {
+    kept.purpose = 'buy';
+    kept.readiness = 'offplan';
+  } else if (detected === CONVERSATION_INTENTS.BUY) {
+    kept.purpose = 'buy';
+    if (kept.readiness === 'offplan') kept.readiness = null;
+  }
+  return kept;
 }
 
 function pickSuggestedCta({ propertyCards, sources, leadCaptured, turnIndex }) {
@@ -931,16 +977,17 @@ function applyConversationIntent(message, profile, explicitIntent = null) {
   if (!switching && !restart && current === detected) return null;
 
   const nextProfile = startFreshIntent(detected, message, profile);
-  const reply = listingStartReply(detected, nextProfile, message);
-  const options = listingStartOptions(detected, nextProfile, message);
-
   if (isListingIntent(detected)) {
+    nextProfile.qualificationSlots = listingSlotsForIntent(detected, profile, starter);
     nextProfile.slotFlow = { awaiting: null, alternatives: null };
     return {
       type: 'continue',
       profile: nextProfile,
     };
   }
+
+  const reply = listingStartReply(detected, nextProfile, message);
+  const options = listingStartOptions(detected, nextProfile, message);
 
   return {
     type: 'clarify',
@@ -1480,6 +1527,17 @@ function bedroomClarifyIfNeeded(message, profile) {
     null;
   if (!purpose) return null;
   if (isBedroomsResolved(last)) return null;
+  const rememberedBeds = rememberedSlots(profile).beds;
+  if (rememberedBeds === 'any') {
+    applyBedroomChoice(last, { any: true });
+    profile.lastSearchFilters = last;
+    return null;
+  }
+  if (rememberedBeds === 'studio' || typeof rememberedBeds === 'number') {
+    applyBedroomChoice(last, rememberedBeds === 'studio' ? { exact: 0 } : { exact: rememberedBeds });
+    profile.lastSearchFilters = last;
+    return null;
+  }
   if (!last.location && !typesFromFilters(last).length) return null;
   const listingLike =
     isAmbiguousListingQuery(message) ||
@@ -1568,24 +1626,23 @@ async function clarificationResponse(res, { reply, profile, conversation, messag
 
 async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
   // Slots were already derived and persisted for this turn by chat().
-  const slots = syncSlotsWithFilters(profile.qualificationSlots, profile.lastSearchFilters);
-  const block = shouldBlockQualification(slots, profile, userMessage);
-  if (block) {
+  const slots = rememberedSlots(profile);
+  const question = nextQuestion(slots);
+  if (question && shouldBlockQualification(slots, profile, userMessage)) {
     slots.askedCount = (Number(slots.askedCount) || 0) + 1;
-    const question = nextQuestion(slots);
     const nextProfile = mergeProfile(profile, {
       qualificationSlots: slots,
       lastSearchFilters: applySlotsToSearchFilters(profile.lastSearchFilters, slots),
     });
     return {
-      reply: question?.question || purposeClarificationReply(),
+      reply: question.question,
       profile: nextProfile,
       propertyCards: [],
       sources: [],
       suggestedCta: null,
       viewAllMatching: null,
       requiresClarification: true,
-      options: question?.options || [],
+      options: question.options || [],
       select: PURPOSE_SELECT,
       qualification: { slots, question },
     };
@@ -1852,13 +1909,10 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
       }
 
       if (call.function?.name === 'search_properties') {
-        const slots = syncSlotsWithFilters(
-          hydrateSlots(profile.qualificationSlots, profile.lastSearchFilters),
-          profile.lastSearchFilters
-        );
-        if (shouldBlockQualification(slots, profile, userMessage)) {
+        const slots = rememberedSlots(profile);
+        const question = nextQuestion(slots);
+        if (question && shouldBlockQualification(slots, profile, userMessage)) {
           slots.askedCount = (Number(slots.askedCount) || 0) + 1;
-          const question = nextQuestion(slots);
           profile = mergeProfile(profile, {
             qualificationSlots: slots,
             lastSearchFilters: applySlotsToSearchFilters(profile.lastSearchFilters, slots),
@@ -1871,8 +1925,8 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
               count: 0,
               skipped: true,
               qualificationSlots: slots,
-              question: question?.question,
-              instruction: `Rephrase ONLY this question and nothing else: "${question?.question || ''}". Never invent a different question. Never ask about a slot that already has a value (including "any").`,
+              question: question.question,
+              instruction: `Rephrase ONLY this question and nothing else: "${question.question}". Never invent a different question. Never ask about a slot that already has a value (including "any").`,
             }),
           });
           continue;
@@ -2090,6 +2144,16 @@ const chat = async (req, res) => {
 
     if (slotResult?.type === 'clarify') {
       let profileForResponse = slotResult.profile;
+      if (
+        profileForResponse.intent !== CONVERSATION_INTENTS.SELL_PROPERTY &&
+        profileForResponse.intent !== CONVERSATION_INTENTS.PROPERTY_MANAGEMENT
+      ) {
+        profileForResponse = rememberAndApplySlots(
+          profileForResponse,
+          message,
+          conversation.messages || []
+        );
+      }
       let leadCaptured = false;
       if (shouldCaptureServiceLead(profileForResponse.serviceInquiry || {})) {
         const captured = await maybeCaptureServiceLead(sessionId, profileForResponse);
@@ -2114,6 +2178,8 @@ const chat = async (req, res) => {
       profile = slotResult.profile;
     }
 
+    profile = rememberAndApplySlots(profile, message, conversation.messages || []);
+
     const last = profile.lastSearchFilters || emptySearchFilters();
     const listingReady =
       isListingIntent(profile.intent) ||
@@ -2135,18 +2201,6 @@ const chat = async (req, res) => {
           options: bedroomGate.options,
         });
       }
-    }
-
-    // One derive per turn, persisted immediately, so an answer is never asked for twice
-    // even when this turn does not end in a search.
-    if (listingQualify) {
-      const derived = deriveSlots(
-        [...(conversation.messages || []), { role: 'user', content: message }],
-        hydrateSlots(profile.qualificationSlots, profile.lastSearchFilters)
-      );
-      profile = mergeProfile(profile, {
-        qualificationSlots: syncSlotsWithFilters(derived, profile.lastSearchFilters),
-      });
     }
 
     const canSearchNow =

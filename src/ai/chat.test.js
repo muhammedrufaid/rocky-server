@@ -97,11 +97,14 @@ const {
   emptySlots,
   deriveSlots,
   nextQuestion,
+  nextQuestionForProfile,
   questionFor,
   shouldBlockQualification,
   applySlotsToSearchFilters,
   appendOptionalFollowUp,
   syncSlotsWithFilters,
+  rememberedSlots,
+  applyRememberedTurn,
 } = require('./chat.qualify');
 
 function runSellTurns(messages) {
@@ -1707,4 +1710,184 @@ test('two-turn qualification reaches search after budget', () => {
   assert.equal(filters.bedrooms, 2);
   assert.equal(filters.budgetMax, 120000);
 });
+
+test('remembered profile details are reused and not asked again', () => {
+  const first = applyRememberedTurn(
+    {},
+    'I want to rent a 2-bedroom apartment in Dubai Marina with a budget of AED 120K'
+  );
+  assert.equal(first.slots.purpose, 'rent');
+  assert.equal(first.slots.propertyType, 'apartment');
+  assert.equal(first.slots.location, 'Dubai Marina');
+  assert.equal(first.slots.beds, 2);
+  assert.equal(first.slots.budget.max, 120000);
+  assert.equal(shouldBlockQualification(first.slots, {}), false);
+  assert.equal(nextQuestion(first.slots).slot, 'furnished');
+
+  const profile = {
+    intent: CONVERSATION_INTENTS.RENT,
+    purpose: 'Rent',
+    qualificationSlots: first.slots,
+    lastSearchFilters: first.filters,
+    bedrooms: 2,
+    preferredAreas: ['Dubai Marina'],
+    budget: { min: null, max: 120000 },
+  };
+  const remembered = rememberedSlots(profile);
+  assert.equal(remembered.propertyType, 'apartment');
+  assert.equal(remembered.location, 'Dubai Marina');
+  assert.equal(remembered.beds, 2);
+  assert.equal(remembered.budget.max, 120000);
+  assert.equal(nextQuestionForProfile(profile).slot, 'furnished');
+  assert.equal(shouldBlockQualification(remembered, profile, 'what else do you have?'), false);
+
+  const later = applyRememberedTurn(profile, 'show me more like these');
+  assert.equal(later.slots.purpose, 'rent');
+  assert.equal(later.slots.propertyType, 'apartment');
+  assert.equal(later.slots.location, 'Dubai Marina');
+  assert.equal(later.slots.beds, 2);
+  assert.equal(later.slots.budget.max, 120000);
+  assert.equal(nextQuestion(later.slots).slot, 'furnished');
+});
+
+test('stored listing details hydrate even when qualificationSlots are missing', () => {
+  const profile = {
+    purpose: 'Rent',
+    bedrooms: 2,
+    preferredAreas: ['Dubai Marina'],
+    budget: { min: null, max: 120000 },
+    lastSearchFilters: marinaRentFilters(),
+  };
+  profile.lastSearchFilters.budgetMax = 120000;
+  const slots = rememberedSlots(profile);
+  assert.equal(slots.purpose, 'rent');
+  assert.equal(slots.propertyType, 'apartment');
+  assert.equal(slots.location, 'Dubai Marina');
+  assert.equal(slots.beds, 2);
+  assert.equal(slots.budget.max, 120000);
+  assert.equal(nextQuestionForProfile(profile).slot, 'furnished');
+  assert.notEqual(nextQuestionForProfile(profile).slot, 'location');
+  assert.notEqual(nextQuestionForProfile(profile).slot, 'beds');
+  assert.notEqual(nextQuestionForProfile(profile).slot, 'propertyType');
+  assert.notEqual(nextQuestionForProfile(profile).slot, 'budget');
+});
+
+test('a later turn can replace one remembered value without clearing the others', () => {
+  const first = applyRememberedTurn(
+    {},
+    'I want to rent a 2-bedroom apartment in Dubai Marina with a budget of AED 120K'
+  );
+  const profile = {
+    intent: CONVERSATION_INTENTS.RENT,
+    purpose: 'Rent',
+    qualificationSlots: first.slots,
+    lastSearchFilters: first.filters,
+    bedrooms: 2,
+    preferredAreas: ['Dubai Marina'],
+    budget: { min: null, max: 120000 },
+  };
+
+  const moved = applyRememberedTurn(profile, 'show me apartments in Downtown Dubai');
+  assert.equal(moved.slots.location, 'Downtown Dubai');
+  assert.equal(moved.slots.propertyType, 'apartment');
+  assert.equal(moved.slots.beds, 2);
+  assert.equal(moved.slots.budget.max, 120000);
+  assert.equal(moved.slots.purpose, 'rent');
+  assert.equal(moved.filters.location, 'Downtown Dubai');
+  assert.equal(moved.filters.bedrooms, 2);
+
+  const beds = applyRememberedTurn(
+    { ...profile, qualificationSlots: moved.slots, lastSearchFilters: moved.filters, preferredAreas: ['Downtown Dubai'] },
+    'I need 3 bedrooms'
+  );
+  assert.equal(beds.slots.beds, 3);
+  assert.equal(beds.slots.location, 'Downtown Dubai');
+  assert.equal(beds.slots.propertyType, 'apartment');
+  assert.equal(beds.filters.bedrooms, 3);
+
+  const typed = applyRememberedTurn(
+    { ...profile, qualificationSlots: beds.slots, lastSearchFilters: beds.filters, bedrooms: 3 },
+    'show me villas'
+  );
+  assert.equal(typed.slots.propertyType, 'villa');
+  assert.equal(typed.slots.location, 'Downtown Dubai');
+  assert.equal(typed.slots.beds, 3);
+  assert.equal(typed.slots.budget.max, 120000);
+
+  const budget = applyRememberedTurn(
+    { ...profile, qualificationSlots: typed.slots, lastSearchFilters: typed.filters, bedrooms: 3 },
+    'budget of AED 80K'
+  );
+  assert.equal(budget.slots.budget.max, 80000);
+  assert.equal(budget.slots.propertyType, 'villa');
+  assert.equal(budget.slots.location, 'Downtown Dubai');
+  assert.equal(budget.slots.beds, 3);
+});
+
+test('partial known details only ask for the missing slot', () => {
+  const first = applyRememberedTurn({}, 'I want to rent a 2-bedroom apartment in Dubai Marina');
+  assert.equal(first.slots.location, 'Dubai Marina');
+  assert.equal(first.slots.beds, 2);
+  assert.equal(first.slots.propertyType, 'apartment');
+  assert.equal(first.slots.budget, null);
+  assert.equal(nextQuestion(first.slots).slot, 'budget');
+  assert.equal(shouldBlockQualification(first.slots, {}), true);
+
+  const profile = {
+    qualificationSlots: first.slots,
+    lastSearchFilters: first.filters,
+    purpose: 'Rent',
+    bedrooms: 2,
+    preferredAreas: ['Dubai Marina'],
+  };
+  assert.equal(nextQuestionForProfile(profile).slot, 'budget');
+  const follow = applyRememberedTurn(profile, 'what else is available?');
+  assert.equal(follow.slots.location, 'Dubai Marina');
+  assert.equal(follow.slots.beds, 2);
+  assert.equal(nextQuestion(follow.slots).slot, 'budget');
+});
+
+test('natural listing intent switch keeps previous property details', () => {
+  const rent = startFreshIntent(
+    CONVERSATION_INTENTS.RENT,
+    'I want to rent a 2 bedroom apartment in Dubai Marina',
+    {}
+  );
+  assert.equal(rent.lastSearchFilters.purpose, 'Rent');
+  assert.equal(rent.lastSearchFilters.bedrooms, 2);
+  assert.equal(rent.lastSearchFilters.type, 'Apartment');
+  assert.equal(rent.lastSearchFilters.location, 'Dubai Marina');
+
+  const buy = startFreshIntent(CONVERSATION_INTENTS.BUY, 'I want to buy instead', rent);
+  assert.equal(buy.intent, CONVERSATION_INTENTS.BUY);
+  assert.equal(buy.lastSearchFilters.purpose, 'Buy');
+  assert.equal(buy.lastSearchFilters.bedrooms, 2);
+  assert.equal(buy.lastSearchFilters.type, 'Apartment');
+  assert.equal(buy.lastSearchFilters.location, 'Dubai Marina');
+  assert.equal(isExplicitIntentStarter('I want to buy instead'), false);
+
+  const remembered = rememberedSlots({
+    ...buy,
+    qualificationSlots: rememberedSlots(rent),
+  });
+  assert.equal(remembered.purpose, 'buy');
+  assert.equal(remembered.beds, 2);
+  assert.equal(remembered.propertyType, 'apartment');
+  assert.equal(remembered.location, 'Dubai Marina');
+});
+
+test('explicit menu starters still clear previous listing details', () => {
+  const rent = startFreshIntent(
+    CONVERSATION_INTENTS.RENT,
+    'I want to rent a 2 bedroom apartment in Dubai Marina',
+    {}
+  );
+  const reset = startFreshIntent(CONVERSATION_INTENTS.BUY, 'Buy a Property', rent);
+  assert.equal(reset.lastSearchFilters.purpose, 'Buy');
+  assert.equal(reset.lastSearchFilters.bedrooms, null);
+  assert.equal(reset.lastSearchFilters.type, null);
+  assert.equal(reset.lastSearchFilters.location, null);
+  assert.equal(nextQuestionForProfile(reset).slot, 'propertyType');
+});
+
 

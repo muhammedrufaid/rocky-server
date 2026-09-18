@@ -2592,10 +2592,20 @@ function currentConversationIntent(profile = {}) {
 }
 
 function startFreshIntent(intent, message, currentProfile = {}) {
+  const keepListingMemory =
+    isListingIntent(intent) &&
+    isListingIntent(currentConversationIntent(currentProfile)) &&
+    !isExplicitIntentStarter(message);
+
   const profile = {
-    preferredAreas: [],
-    budget: { min: null, max: null },
-    bedrooms: null,
+    preferredAreas: keepListingMemory ? [...(currentProfile.preferredAreas || [])].slice(-10) : [],
+    budget: keepListingMemory
+      ? {
+          min: currentProfile.budget?.min ?? null,
+          max: currentProfile.budget?.max ?? null,
+        }
+      : { min: null, max: null },
+    bedrooms: keepListingMemory ? currentProfile.bedrooms ?? null : null,
     purpose: intentToPurpose(intent),
     intent,
     lastPropertyCards: [],
@@ -2603,7 +2613,9 @@ function startFreshIntent(intent, message, currentProfile = {}) {
     searchAlreadyExecuted: false,
     lastSearchSignature: null,
     exploredAreas: [],
-    lastSearchFilters: emptySearchFilters(),
+    lastSearchFilters: keepListingMemory
+      ? copySearchFilters(currentProfile.lastSearchFilters || emptySearchFilters())
+      : emptySearchFilters(),
     slotFlow: { awaiting: null, alternatives: null },
     sellListing: emptySellListing(),
     serviceInquiry: emptyServiceInquiry(),
@@ -2616,11 +2628,28 @@ function startFreshIntent(intent, message, currentProfile = {}) {
     profile.lastSearchFilters.purpose = profile.purpose;
     if (profile.lastSearchFilters.location) {
       profile.preferredAreas = [profile.lastSearchFilters.location];
+    } else if (keepListingMemory && profile.preferredAreas.length) {
+      profile.lastSearchFilters.location =
+        profile.lastSearchFilters.location || profile.preferredAreas[0];
     }
     if (profile.lastSearchFilters.bedrooms != null) {
       profile.bedrooms = profile.lastSearchFilters.bedrooms;
     } else if (profile.lastSearchFilters.bedroomsMin != null) {
       profile.bedrooms = profile.lastSearchFilters.bedroomsMin;
+    }
+    if (keepListingMemory && profile.bedrooms != null && !isBedroomsResolved(profile.lastSearchFilters)) {
+      applyBedroomChoice(
+        profile.lastSearchFilters,
+        profile.bedrooms === 0 ? { exact: 0 } : { exact: Number(profile.bedrooms) }
+      );
+    }
+    if (keepListingMemory) {
+      if (profile.budget?.min != null && profile.lastSearchFilters.budgetMin == null) {
+        profile.lastSearchFilters.budgetMin = profile.budget.min;
+      }
+      if (profile.budget?.max != null && profile.lastSearchFilters.budgetMax == null) {
+        profile.lastSearchFilters.budgetMax = profile.budget.max;
+      }
     }
     if (needsListingIntake(profile.lastSearchFilters)) {
       profile.slotFlow = { awaiting: 'listingIntake', alternatives: null };

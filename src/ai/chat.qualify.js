@@ -358,6 +358,41 @@ function hydrateSlots(prevSlots, filters) {
   return mergeSlots(mergeSlots(emptySlots(), prevSlots), slotsFromFilters(filters), { onlyNulls: true });
 }
 
+function slotsFromProfileHints(profile = {}) {
+  const slots = emptySlots();
+  const purposeValue = profile.purpose || profile.lastSearchFilters?.purpose;
+  if (purposeValue === 'Rent' || purposeValue === 'rent') slots.purpose = 'rent';
+  else if (purposeValue === 'Buy' || purposeValue === 'buy') slots.purpose = 'buy';
+  else if (purposeValue === 'Off-plan') {
+    slots.purpose = 'buy';
+    slots.readiness = 'offplan';
+  }
+  if (profile.bedrooms === 0) slots.beds = 'studio';
+  else if (profile.bedrooms != null && profile.bedrooms !== '') slots.beds = Number(profile.bedrooms);
+  const budget = profile.budget || {};
+  if (budget.min != null || budget.max != null) {
+    slots.budget = {
+      min: budget.min ?? null,
+      max: budget.max ?? null,
+      period: budgetPeriod(slots.purpose),
+    };
+  }
+  const area = (profile.preferredAreas || []).find((value) => String(value || '').trim());
+  if (area) slots.location = String(area).trim();
+  return slots;
+}
+
+/**
+ * Rebuild qualification slots from everything already stored on the session:
+ * saved answers, last search filters, and top-level profile hints.
+ * Filled values are never dropped here — later user text can still replace them.
+ */
+function rememberedSlots(profile = {}) {
+  const stored = copySlots(profile.qualificationSlots || emptySlots());
+  const withFilters = syncSlotsWithFilters(stored, profile.lastSearchFilters || emptySearchFilters());
+  return mergeSlots(withFilters, slotsFromProfileHints(profile), { onlyNulls: true });
+}
+
 /**
  * Search filters are the source of truth once the deterministic pipeline has run,
  * so a slot inferred earlier can never override a filter resolved this turn.
@@ -372,6 +407,28 @@ function nextQuestion(slots = {}) {
     if (!isFilled(slots[slot])) return questionFor(slot, slots.purpose);
   }
   return null;
+}
+
+function nextQuestionForProfile(profile = {}) {
+  return nextQuestion(rememberedSlots(profile));
+}
+
+/**
+ * Overlay this turn's message on everything already stored, then write the
+ * result back onto search filters. Current-turn answers replace a slot;
+ * missing answers keep the previous value.
+ */
+function applyRememberedTurn(profile = {}, message = '', history = []) {
+  const slots = deriveSlots(
+    [...(history || []), { role: 'user', content: message }],
+    rememberedSlots(profile)
+  );
+  const filters = applySlotsToSearchFilters(
+    profile.lastSearchFilters || emptySearchFilters(),
+    slots,
+    { unblocking: false }
+  );
+  return { slots, filters };
 }
 
 function isCoreMissing(slots = {}) {
@@ -515,9 +572,13 @@ module.exports = {
   mergeSlots,
   slotsFromFilters,
   hydrateSlots,
+  rememberedSlots,
+  slotsFromProfileHints,
   syncSlotsWithFilters,
   deriveSlots,
+  applyRememberedTurn,
   nextQuestion,
+  nextQuestionForProfile,
   isCoreMissing,
   shouldBlockQualification,
   applySlotsToSearchFilters,
