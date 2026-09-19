@@ -1,6 +1,13 @@
 const OpenAI = require('openai');
 const { Conversation } = require('./chat.models');
 const { getSystemPrompt } = require('./chat.prompt');
+const {
+  shouldUseSse,
+  isResponseOpen,
+  createSseSession,
+  ChatAbortedError,
+  throwIfAborted,
+} = require('./chat.sse');
 const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
@@ -42,6 +49,89 @@ function getOpenAI() {
     throw new Error('OPENAI_API_KEY is not configured');
   }
   return new OpenAI({ apiKey });
+}
+
+function isAbortError(err) {
+  return (
+    err instanceof ChatAbortedError ||
+    err?.name === 'ChatAbortedError' ||
+    err?.name === 'APIUserAbortError'
+  );
+}
+
+/** §4.3 Path C JSON / done payload. */
+function buildPathCPayload(result, reply, suggestedCta) {
+  const payload = {
+    reply,
+    propertyCards: result.propertyCards || [],
+    sources: result.sources || [],
+    suggestedCta,
+    viewAllMatching: result.viewAllMatching || null,
+    // §2.1 — Path C must include leadCaptured (JSON and done).
+    leadCaptured: !!(result.leadCaptured || result.profile?.leadCaptured),
+  };
+  if (result.options) {
+    payload.requiresClarification = true;
+    payload.options = result.options;
+    payload.select = result.select || PURPOSE_SELECT;
+  }
+  return payload;
+}
+
+function metaFromLoopState(propertyCards, sources, viewAllMatching) {
+  return {
+    propertyCards: uniqueBy(propertyCards, (c) => c.id),
+    sources: uniqueBy(sources, (s) => s.url || s.title),
+    viewAllMatching: viewAllMatching || null,
+  };
+}
+
+async function persistChatTurn(conversation, { message, reply, profile }) {
+  // §7 — exactly one save per successful turn, after full reply text is known.
+  conversation.messages.push({ role: 'user', content: message, createdAt: new Date() });
+  conversation.messages.push({ role: 'assistant', content: reply, createdAt: new Date() });
+  conversation.messages = conversation.messages.slice(-MAX_STORED_MESSAGES);
+  conversation.userProfile = profile;
+  await conversation.save();
+}
+
+async function accumulateChatStream(stream, { onContentDelta, abortSignal } = {}) {
+  const msg = { role: 'assistant', content: '', tool_calls: [] };
+  let finish_reason = null;
+  let usage = null;
+
+  for await (const chunk of stream) {
+    throwIfAborted(abortSignal);
+    if (chunk.usage) usage = chunk.usage;
+    const choice = chunk.choices?.[0];
+    if (!choice) continue;
+    if (choice.finish_reason) finish_reason = choice.finish_reason;
+    const delta = choice.delta || {};
+    if (typeof delta.content === 'string' && delta.content) {
+      msg.content += delta.content;
+      if (onContentDelta) onContentDelta(delta.content);
+    }
+    if (!Array.isArray(delta.tool_calls)) continue;
+    for (const part of delta.tool_calls) {
+      const idx = part.index ?? 0;
+      if (!msg.tool_calls[idx]) {
+        msg.tool_calls[idx] = {
+          id: '',
+          type: part.type || 'function',
+          function: { name: '', arguments: '' },
+        };
+      }
+      const dest = msg.tool_calls[idx];
+      if (part.id) dest.id = part.id;
+      if (part.type) dest.type = part.type;
+      if (part.function?.name) dest.function.name += part.function.name;
+      if (part.function?.arguments) dest.function.arguments += part.function.arguments;
+    }
+  }
+
+  if (!msg.tool_calls.length) delete msg.tool_calls;
+  else msg.tool_calls = msg.tool_calls.filter(Boolean);
+  return { message: msg, finish_reason, usage };
 }
 
 function toStoredPropertyCards(cards = []) {
@@ -1348,10 +1438,12 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
   };
 }
 
-async function runModelLoop({ sessionId, userProfile, history, userMessage, turnIndex }) {
+async function runModelLoop({ sessionId, userProfile, history, userMessage, turnIndex, sse = null }) {
   const openai = getOpenAI();
   const model = process.env.OPENAI_CHAT_MODEL || process.env.OPENAI_MODEL || 'gpt-5-nano';
   const reasoningEffort = process.env.OPENAI_REASONING_EFFORT || 'minimal';
+  const abortSignal = sse?.signal || null;
+  const streamEnabled = Boolean(sse?.enabled);
 
   const messages = [
     { role: 'system', content: getSystemPrompt(userProfile) },
@@ -1377,39 +1469,100 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   let lastContentChunks = [];
   let searchContentHits = 0;
 
+  const snapshotMeta = () => metaFromLoopState(propertyCards, sources, viewAllMatching);
+
+  const completionParams = (forceContentAnswer, contentOnlyReply, hasToolResults) => ({
+    model,
+    messages,
+    tools: TOOL_DEFINITIONS,
+    tool_choice: forceContentAnswer ? 'none' : 'auto',
+    max_completion_tokens: contentOnlyReply
+      ? CONTENT_REPLY_MAX_TOKENS
+      : hasToolResults
+        ? REPLY_MAX_TOKENS
+        : TOOL_MAX_TOKENS,
+    reasoning_effort: reasoningEffort,
+  });
+
+  async function createAssistantMessage({ forceContentAnswer, contentOnlyReply, hasToolResults }) {
+    throwIfAborted(abortSignal);
+    const params = completionParams(forceContentAnswer, contentOnlyReply, hasToolResults);
+    const requestOptions = abortSignal ? { signal: abortSignal } : undefined;
+
+    if (!streamEnabled) {
+      const completion = await openai.chat.completions.create(params, requestOptions);
+      const msg = completion.choices?.[0]?.message;
+      if (!msg) throw new Error('Empty response from OpenAI');
+      console.log(
+        'finish_reason:',
+        completion.choices?.[0]?.finish_reason,
+        '| usage:',
+        completion.usage,
+        '| content_length:',
+        (msg.content || '').length
+      );
+      return msg;
+    }
+
+    // Live tokens only after tools are done and we know this round is text (§3, §6, §11).
+    if (forceContentAnswer) {
+      sse.begin(snapshotMeta());
+      const stream = await openai.chat.completions.create({ ...params, stream: true }, requestOptions);
+      const acc = await accumulateChatStream(stream, {
+        abortSignal,
+        onContentDelta: (text) => sse.token(text),
+      });
+      console.log(
+        'finish_reason:',
+        acc.finish_reason,
+        '| usage:',
+        acc.usage,
+        '| content_length:',
+        (acc.message.content || '').length
+      );
+      return acc.message;
+    }
+
+    // Auto round: stream internally so we can replay raw deltas if this IS the final text.
+    // Do not flush SSE yet — this round may still be tool_calls (§6).
+    const bufferedDeltas = [];
+    const stream = await openai.chat.completions.create({ ...params, stream: true }, requestOptions);
+    const acc = await accumulateChatStream(stream, {
+      abortSignal,
+      onContentDelta: (text) => bufferedDeltas.push(text),
+    });
+    console.log(
+      'finish_reason:',
+      acc.finish_reason,
+      '| usage:',
+      acc.usage,
+      '| content_length:',
+      (acc.message.content || '').length
+    );
+    const toolCalls = acc.message.tool_calls;
+    if (!toolCalls || !toolCalls.length) {
+      sse.begin(snapshotMeta());
+      for (const delta of bufferedDeltas) sse.token(delta);
+    }
+    return acc.message;
+  }
+
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
+    throwIfAborted(abortSignal);
     const hasToolResults = messages.some((m) => m.role === 'tool');
     const contentOnlyReply =
       hasToolResults && usedSearchContent && !usedSearchProperties && propertyCards.length === 0;
     // After a successful content search, force a text answer — models otherwise re-call
     // search_content until MAX_TOOL_ROUNDS and the user sees "could not finish".
     const forceContentAnswer = contentOnlyReply && searchContentHits > 0;
-    const completion = await openai.chat.completions.create({
-      model,
-      messages,
-      tools: TOOL_DEFINITIONS,
-      tool_choice: forceContentAnswer ? 'none' : 'auto',
-      max_completion_tokens: contentOnlyReply
-        ? CONTENT_REPLY_MAX_TOKENS
-        : hasToolResults
-          ? REPLY_MAX_TOKENS
-          : TOOL_MAX_TOKENS,
-      reasoning_effort: reasoningEffort,
+    const msg = await createAssistantMessage({
+      forceContentAnswer,
+      contentOnlyReply,
+      hasToolResults,
     });
-
-    const msg = completion.choices?.[0]?.message;
     if (!msg) {
       throw new Error('Empty response from OpenAI');
     }
-
-    console.log(
-      'finish_reason:',
-      completion.choices?.[0]?.finish_reason,
-      '| usage:',
-      completion.usage,
-      '| content_length:',
-      (msg.content || '').length
-    );
 
     messages.push(msg);
 
@@ -1472,6 +1625,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
           shownPropertyIds: profile.shownPropertyIds,
         });
       } catch (err) {
+        if (isAbortError(err)) throw err;
         result = {
           propertyCards: [],
           sources: [],
@@ -1480,6 +1634,8 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
           modelPayload: { error: err.message || 'Tool failed' },
         };
       }
+      // §8 — disconnect during an in-flight tool: discard; do not merge or persist.
+      throwIfAborted(abortSignal);
 
       console.log(
         'TOOL CALL:',
@@ -1725,50 +1881,86 @@ const chat = async (req, res) => {
       return res.status(200).json(payload);
     }
 
+    // Path C — LLM / tool loop. Path A/B never stream (§1, §10).
     const history = toOpenAIHistory(conversation.messages || []);
-
-    const result = await runModelLoop({
-      sessionId,
-      userProfile: profile,
-      history,
-      userMessage: message,
-      turnIndex: conversation.messages.length,
-    });
-
-    const reply =
-      String(result.reply || '').trim() ||
-      FRIENDLY_CHAT_ERROR;
-    const suggestedCta = result.options
-      ? null
-      : pickSuggestedCta({
-      propertyCards: result.propertyCards,
-      sources: result.sources,
-      leadCaptured: result.leadCaptured || result.profile.leadCaptured,
-      turnIndex: conversation.messages.length,
-    });
-
-    conversation.messages.push({ role: 'user', content: message, createdAt: new Date() });
-    conversation.messages.push({ role: 'assistant', content: reply, createdAt: new Date() });
-    conversation.messages = conversation.messages.slice(-MAX_STORED_MESSAGES);
-    conversation.userProfile = result.profile;
-    await conversation.save();
-
-    const payload = {
-      reply,
-      propertyCards: result.propertyCards,
-      sources: result.sources,
-      suggestedCta,
-      viewAllMatching: result.viewAllMatching || null,
+    const useSse = shouldUseSse(req);
+    const abortController = new AbortController();
+    const sse = useSse ? createSseSession(res, abortController.signal) : null;
+    let settled = false;
+    const onClose = () => {
+      // §8 — ignore close after a successful persist (req "close" also fires on normal end).
+      if (!settled) abortController.abort();
     };
-    if (result.options) {
-      payload.requiresClarification = true;
-      payload.options = result.options;
-      payload.select = result.select || PURPOSE_SELECT;
-    }
+    req.on('close', onClose);
 
-    return res.status(200).json(payload);
+    try {
+      const result = await runModelLoop({
+        sessionId,
+        userProfile: profile,
+        history,
+        userMessage: message,
+        turnIndex: conversation.messages.length,
+        sse,
+      });
+
+      throwIfAborted(abortController.signal);
+
+      const reply = String(result.reply || '').trim() || FRIENDLY_CHAT_ERROR;
+      const suggestedCta = result.options
+        ? null
+        : pickSuggestedCta({
+            propertyCards: result.propertyCards,
+            sources: result.sources,
+            leadCaptured: result.leadCaptured || result.profile.leadCaptured,
+            turnIndex: conversation.messages.length,
+          });
+
+      await persistChatTurn(conversation, {
+        message,
+        reply,
+        profile: result.profile,
+      });
+      settled = true;
+
+      const payload = buildPathCPayload(result, reply, suggestedCta);
+
+      if (!useSse) {
+        return res.status(200).json(payload);
+      }
+
+      // Zero-token Path C (in-loop clarification, exhaustion, synthesizeContentReply):
+      // emit no token events; full string lives on done.reply (§1, §4.2).
+      sse.begin({
+        propertyCards: payload.propertyCards,
+        sources: payload.sources,
+        viewAllMatching: payload.viewAllMatching,
+      });
+      sse.done(payload);
+      if (isResponseOpen(res)) res.end();
+      return;
+    } catch (error) {
+      if (isAbortError(error) || abortController.signal.aborted) {
+        // §8 — no persist, no write on a closed connection.
+        return;
+      }
+      if (sse?.started()) {
+        // §6 — point of no return: cannot send an HTTP status.
+        console.error('POST /api/chat SSE error:', error);
+        sse.error({ message: FRIENDLY_CHAT_ERROR, code: 'internal' });
+        if (isResponseOpen(res)) res.end();
+        return;
+      }
+      throw error;
+    } finally {
+      req.off('close', onClose);
+    }
   } catch (error) {
+    if (isAbortError(error)) return;
     console.error('POST /api/chat error:', error);
+    if (res.headersSent) {
+      if (isResponseOpen(res)) res.end();
+      return;
+    }
     const isValidation =
       /validation failed|Path `content` is required/i.test(String(error?.message || ''));
     return res.status(isValidation ? 200 : 500).json({
