@@ -2,6 +2,7 @@ const OpenAI = require('openai');
 const propertyDbService = require('../services/propertyDbService');
 const { Lead } = require('./chat.models');
 const ChatbotKnowledge = require('../models/ChatbotKnowledge');
+const { formatAed } = require('./chat.format');
 
 const VECTOR_INDEX_NAME = process.env.CHATBOT_VECTOR_INDEX || 'chatbot_knowledge_vector_index';
 const VECTOR_MIN_SCORE = Number(process.env.CHAT_VECTOR_MIN_SCORE) || 0.75;
@@ -268,6 +269,12 @@ const CONVERSATION_INTENTS = {
   PROPERTY_MANAGEMENT: 'PROPERTY_MANAGEMENT',
 };
 
+const SEARCH_OUTCOME = {
+  MATCHES_FOUND: 'MATCHES_FOUND',
+  BUDGET_TOO_LOW: 'BUDGET_TOO_LOW',
+  NO_INVENTORY: 'NO_INVENTORY',
+};
+
 const LISTING_INTENTS = new Set([
   CONVERSATION_INTENTS.BUY,
   CONVERSATION_INTENTS.RENT,
@@ -391,6 +398,17 @@ function isExplicitIntentStarter(text) {
 
 function isPurposeChipReply(text) {
   return /^(buy|rent|off[-\s]?plan)$/i.test(String(text || '').trim());
+}
+
+function isPropertyUiAction(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  if (!raw) return false;
+  return /^(view listing|book a viewing|see similar properties|view all matching properties|talk to an agent)$/.test(
+    raw
+  );
 }
 
 function normalizePurpose(value) {
@@ -804,6 +822,12 @@ function isOffPlanInformationalQuery(lower) {
   );
 }
 
+function isBuyContentQuestion(lower) {
+  return /\b(buying\s+costs?|cost\s+(?:of|to)\s+buy(?:ing)?|how\s+to\s+buy|can\s+(?:i|foreigners|you)\s+buy|before\s+buying|rules?\s+for\s+buy)\b/.test(
+    lower
+  );
+}
+
 function parsePurposeFromMessage(text) {
   const raw = String(text || '').trim();
   if (!raw) return null;
@@ -819,19 +843,26 @@ function parsePurposeFromMessage(text) {
     if (isOffPlanInformationalQuery(lower)) return null;
     return 'Off-plan';
   }
+  if (/\bunder\s+construction\b/.test(lower) && !isOffPlanInformationalQuery(lower)) {
+    return 'Off-plan';
+  }
 
-  // Buy: start-anchored intents + mid-sentence parity with Rent ("looking to buy", "for sale", "I'm…")
+  // Buy: start-anchored intents + mid-sentence ("to buy", "for sale", "buying a…")
   if (
     !/\brent\b|\blease\b|off[\s-_]*plan/.test(lower) &&
-    (/^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|i'?m\s+(looking\s+to\s+|looking\s+for\s+)?|i\s+am\s+(looking\s+to\s+|looking\s+for\s+)?|looking\s+to\s+|looking\s+for\s+)?(buy|purchase)\b/.test(
+    !isBuyContentQuestion(lower) &&
+    (/^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|i'?m\s+(looking\s+to\s+|looking\s+for\s+)?|i\s+am\s+(looking\s+to\s+|looking\s+for\s+)?|looking\s+to\s+|looking\s+for\s+)?(buy|purchase|buying|purchasing)\b/.test(
       lower
     ) ||
       /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+to\s+buy\b/.test(lower) ||
       /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+for\s+(?:a\s+|an\s+)?(?:to\s+)?buy\b/.test(lower) ||
-      /\b(?:want|would\s+like|('d\s+like))\s+to\s+buy\b/.test(lower) ||
-      /\b(?:want|would\s+like|('d\s+like))\s+to\s+purchase\b/.test(lower) ||
+      /\b(?:want|would\s+like|('d\s+like)|need)\s+to\s+buy\b/.test(lower) ||
+      /\b(?:want|would\s+like|('d\s+like)|need)\s+to\s+purchase\b/.test(lower) ||
+      /\bto\s+buy\b/.test(lower) ||
       /\bto\s+purchase\b/.test(lower) ||
-      /\bfor\s+sale\b/.test(lower))
+      /\bfor\s+sale\b/.test(lower) ||
+      /\bbuying\s+(?:a|an|the)\b/.test(lower) ||
+      /\bpurchasing\s+(?:a|an|the)\b/.test(lower))
   ) {
     return 'Buy';
   }
@@ -839,17 +870,19 @@ function parsePurposeFromMessage(text) {
   // Rent: same coverage including "I'm looking to rent" / "for rent" / "apartment to rent"
   if (
     !/\bbuy\b|\bpurchase\b|\bfor\s+sale\b|off[\s-_]*plan/.test(lower) &&
-    (/^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|i'?m\s+(looking\s+to\s+|looking\s+for\s+)?|i\s+am\s+(looking\s+to\s+|looking\s+for\s+)?|looking\s+to\s+|looking\s+for\s+)?(rent|rental|lease)\b/.test(
+    (/^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|i'?m\s+(looking\s+to\s+|looking\s+for\s+)?|i\s+am\s+(looking\s+to\s+|looking\s+for\s+)?|looking\s+to\s+|looking\s+for\s+)?(rent|rental|lease|renting|leasing)\b/.test(
       lower
     ) ||
       /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+to\s+rent\b/.test(lower) ||
       /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+for\b.{0,60}\b(to\s+rent|for\s+rent|rental)\b/.test(lower) ||
-      /\b(?:want|would\s+like|('d\s+like))\s+to\s+rent\b/.test(lower) ||
+      /\b(?:want|would\s+like|('d\s+like)|need)\s+to\s+rent\b/.test(lower) ||
       /\bneed\s+a\b.{0,40}\b(for\s+rent|to\s+rent)\b/.test(lower) ||
       /\b(apartment|villa|townhouse|penthouse|studio|flat|property|home)\s+to\s+rent\b/.test(lower) ||
       /\bfor\s+rent\b/.test(lower) ||
       /\bto\s+rent\b/.test(lower) ||
-      /\bto\s+lease\b/.test(lower))
+      /\bto\s+lease\b/.test(lower) ||
+      /\brenting\s+(?:a|an|the)\b/.test(lower) ||
+      /\bleasing\s+(?:a|an|the)\b/.test(lower))
   ) {
     return 'Rent';
   }
@@ -910,10 +943,8 @@ function applyBudgetChoice(filters, choice) {
 }
 
 function parseBudgetFromMessage(text, { requireBudgetContext = false } = {}) {
-  const raw = String(text || '')
-    .trim()
-    .toLowerCase()
-    .replace(/,/g, '');
+  const original = String(text || '').trim();
+  const raw = original.toLowerCase().replace(/,/g, '');
   if (!raw) return null;
 
   if (/^(any|skip|none|no preference|doesn'?t matter|no limit|no budget)$/.test(raw)) {
@@ -921,8 +952,12 @@ function parseBudgetFromMessage(text, { requireBudgetContext = false } = {}) {
   }
 
   const bedroomLike = parseBedroomChoice(raw);
-  const mentionsMoney = /(budget|aed|million|thousand|\bm\b|\bk\b|dirham)/.test(raw);
-  if (bedroomLike && !mentionsMoney) return null;
+  const mentionsMoney = /(budget|aed|million|thousand|\bm\b|\bk\b|dirham|maximum|max\b|under|below|up to|cap)/.test(
+    raw
+  );
+  const hadCommaNumber = /\d{1,3}(?:,\d{3})+/.test(original);
+  const mostlyNumber = /^(?:aed\s*)?\d{4,9}$/.test(raw);
+  if (bedroomLike && !mentionsMoney && !hadCommaNumber && !mostlyNumber) return null;
 
   const under = /(?:under|below|max(?:imum)?|up to|less than|within|cap(?:ped)?(?: at)?|no more than)\b/.test(raw);
 
@@ -937,7 +972,7 @@ function parseBudgetFromMessage(text, { requireBudgetContext = false } = {}) {
     const aed = raw.match(/(?:aed\s*)(\d{4,9})\b/);
     if (aed) n = Number(aed[1]);
   }
-  if (n == null && (under || mentionsMoney || requireBudgetContext)) {
+  if (n == null && (under || mentionsMoney || requireBudgetContext || hadCommaNumber || mostlyNumber)) {
     const plain = raw.match(/\b(\d{4,9})\b/);
     if (plain) n = Number(plain[1]);
   }
@@ -1064,11 +1099,17 @@ function parseEmptyResultChoice(text) {
   if (!raw) return null;
   if (/^nearby areas$/i.test(raw)) return { nearby: true };
   if (/^change budget$/i.test(raw)) return { budget: true };
+  if (/^change bedrooms$/i.test(raw)) return { askBedrooms: true };
+  if (/^property type$/i.test(raw)) return { askType: true };
   const tryBr = raw.match(/^try\s+(.+)$/i);
   if (tryBr) {
     const choice = parseBedroomChoice(tryBr[1]);
     if (choice) return { bedrooms: choice };
+    const loc = parseLocationFromMessage(`in ${tryBr[1]}`) || parseLocationFromMessage(raw);
+    if (loc) return { location: loc };
   }
+  const beds = parseBedroomChoice(raw);
+  if (beds) return { bedrooms: beds };
   return null;
 }
 
@@ -1113,7 +1154,7 @@ function parseBedroomChoice(text) {
   const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
   if (Object.prototype.hasOwnProperty.call(words, raw)) return { exact: words[raw] };
 
-  const wordBed = raw.match(/\b(one|two|three|four|five|six)\s*-?\s*(bed|br|bedroom)s?\b/);
+  const wordBed = raw.match(/\b(one|two|three|four|five|six)\s*-?\s*(bed|br|bhk|bedroom)s?\b/);
   if (wordBed) return { exact: words[wordBed[1]] };
 
   if (/^\d+$/.test(raw)) {
@@ -1121,7 +1162,7 @@ function parseBedroomChoice(text) {
     if (Number.isFinite(n) && n >= 0 && n <= 12) return { exact: n };
   }
 
-  const numbered = raw.match(/\b(\d+)\s*-?\s*(bed|br|bedroom)s?\b/);
+  const numbered = raw.match(/\b(\d+)\s*-?\s*(bed|br|bhk|bedroom)s?\b/);
   if (numbered) {
     const n = Number(numbered[1]);
     if (Number.isFinite(n) && n >= 0 && n <= 12) return { exact: n };
@@ -1145,6 +1186,8 @@ const PROPERTY_TYPE_MAP = [
   { canonical: 'Duplex', patterns: /\b(duplex|duplexes)\b/ },
   { canonical: 'Studio', patterns: /\b(studio apartment|studio unit)\b/ },
   { canonical: 'Office', patterns: /\b(office|offices|commercial)\b/ },
+  { canonical: 'Shop', patterns: /\b(shop|shops|retail)\b/ },
+  { canonical: 'Warehouse', patterns: /\b(warehouse|warehouses)\b/ },
 ];
 
 function normalizePropertyType(raw) {
@@ -1350,23 +1393,67 @@ function parseDesiredPropertyType(text) {
   return firstPropertyTypeIn(afterIntent ? afterIntent[1] : '') || firstPropertyTypeIn(raw);
 }
 
+function matchKnownAreaAlias(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  for (const row of SELL_AREA_ALIASES) {
+    if (row.match.test(raw)) return row.canonical;
+  }
+  return null;
+}
+
+function locationStopSuffix() {
+  return '(?:for\\s+sale|for\\s+rent|to\\s+buy|to\\s+rent|to\\s+lease|to\\s+purchase|under\\s+construction|off[\\s-]*plan|for|with|under|below|up\\s+to|at|max|budget)';
+}
+
 /**
- * Extracts a location from patterns like "in Dubai Hills", "in Arabian Ranches".
- * Returns the location string or null if none found. Never returns a vague
+ * Extracts a location from patterns like "in Dubai Hills", "in Arabian Ranches",
+ * "try Dubai Marina", or a known community alias. Never returns a vague
  * phrase such as "another location".
  */
 function parseLocationFromMessage(text) {
   const raw = String(text || '').trim();
   if (!raw) return null;
   if (isUnspecifiedLocationPhrase(raw)) return null;
-  // Match " in <location>" — location is everything after "in" until end or a filter word
-  const m = raw.match(/\bin\s+([A-Za-z0-9][A-Za-z0-9 '-]+?)(?:\s+(?:for|with|under|below|up\s+to|at|max)|$)/i);
-  if (!m) return null;
-  const loc = m[1].trim();
-  if (!loc || isUnspecifiedLocationPhrase(loc) || isNonPlaceLocationToken(loc)) return null;
-  // "in summer" / "in cash" etc. are not areas
-  if (isNonPlaceLocationToken(loc.split(/\s+/)[0])) return null;
-  return loc;
+  if (isPropertyUiAction(raw)) return null;
+
+  const inPattern = new RegExp(
+    `\\bin\\s+([A-Za-z0-9][A-Za-z0-9 '-]+?)(?:\\s+${locationStopSuffix()}|$)`,
+    'i'
+  );
+  const m = raw.match(inPattern);
+  if (m) {
+    const loc = m[1].trim();
+    if (loc && !isUnspecifiedLocationPhrase(loc) && !isNonPlaceLocationToken(loc)) {
+      if (!isNonPlaceLocationToken(loc.split(/\s+/)[0])) {
+        const alias = matchKnownAreaAlias(loc);
+        return alias || loc;
+      }
+    }
+  }
+
+  const tryMatch = raw.match(
+    /^(?:try|switch\s+to|how\s+about|what\s+about)\s+(.+)$/i
+  );
+  if (tryMatch) {
+    const rest = tryMatch[1].trim().replace(/[.!?]+$/g, '');
+    if (parseBedroomChoice(rest) || parseBudgetFromMessage(rest)) return null;
+    const restHead = rest.split(/\s+in\s+/i)[0].trim();
+    if (normalizePropertyType(restHead) && rest.split(/\s+/).length <= 3) return null;
+    const alias = matchKnownAreaAlias(rest);
+    if (alias) return alias;
+    if (
+      rest &&
+      !isUnspecifiedLocationPhrase(rest) &&
+      !isNonPlaceLocationToken(rest) &&
+      /^[A-Za-z0-9][A-Za-z0-9 '.-]{1,80}$/.test(rest) &&
+      rest.split(/\s+/).length <= 6
+    ) {
+      return rest.replace(/\b(please|instead)\b/gi, '').replace(/\s+/g, ' ').trim();
+    }
+  }
+
+  return matchKnownAreaAlias(raw);
 }
 
 /**
@@ -1488,6 +1575,7 @@ function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
 function isAmbiguousListingQuery(text) {
   const raw = String(text || '').trim().toLowerCase();
   if (!raw) return false;
+  if (isPropertyUiAction(raw)) return false;
   if (parseSellIntent(raw)) return false;
   if (parsePurposeFromMessage(raw)) return false;
   if (parseBedroomChoice(raw)) return false;
@@ -1529,6 +1617,7 @@ function matchesServiceInquiryPhrase(text) {
 function isListingFollowUp(text) {
   const raw = String(text || '').trim();
   if (!raw) return false;
+  if (isPropertyUiAction(raw)) return false;
   if (parseSellIntent(raw) || isSellCta(raw)) return false;
   if (isContentKnowledgeTopic(raw)) return false;
   if (isMultiPropertyServiceQuery(raw) || matchesServiceInquiryPhrase(raw)) return false;
@@ -2203,9 +2292,119 @@ async function countByFilters(filters, search) {
   try {
     const result = await fetchByPurpose(purpose, opts);
     return (result.properties || []).length > 0 ? result.total || (result.properties || []).length : 0;
-  } catch {
+  } catch (err) {
+    console.error('countByFilters failed:', err);
     return 0;
   }
+}
+
+function forcedFromPurpose(purpose) {
+  if (purpose === 'Rent') return { propertyPurpose: 'Rent' };
+  if (purpose === 'Off-plan') return { offPlan: 'Yes' };
+  if (purpose === 'Buy') return { propertyPurpose: 'Buy' };
+  return null;
+}
+
+async function getSegmentMarketStats(filters = {}) {
+  const purpose = normalizePurpose(filters.purpose);
+  const forced = forcedFromPurpose(purpose);
+  if (!forced) {
+    return { minimumPrice: null, averagePrice: null, maximumPrice: null, totalAvailable: 0 };
+  }
+  const unconstrained = copySearchFilters(filters);
+  unconstrained.budgetMin = null;
+  unconstrained.budgetMax = null;
+  delete unconstrained.excludeRefNos;
+  const opts = listingQueryOpts(unconstrained, (filters.location || '').toString().trim());
+  const queryFilters = { ...(opts.filters || {}) };
+  delete queryFilters.priceMin;
+  delete queryFilters.priceMax;
+  delete queryFilters.excludeRefNos;
+  if (purpose === 'Buy') queryFilters.offPlan = 'No';
+
+  try {
+    return await propertyDbService.getPropertyMarketStats({
+      search: opts.search,
+      filters: queryFilters,
+      forced,
+    });
+  } catch (err) {
+    console.error('getSegmentMarketStats failed:', err);
+    return { minimumPrice: null, averagePrice: null, maximumPrice: null, totalAvailable: 0 };
+  }
+}
+
+function purposePhrase(filters = {}) {
+  if (filters.purpose === 'Rent') return 'to rent';
+  if (filters.purpose === 'Off-plan') return 'off-plan';
+  return 'for sale';
+}
+
+function describeBedsAndType(filters = {}, { plural = false } = {}) {
+  const beds = describeBedroomPhrase(filters).trim();
+  const type = plural ? describeTypePhrase(filters, 2) : describeTypeSingular(filters).toLowerCase();
+  if (beds) return `${beds} ${type}`.replace(/\s+/g, ' ').trim();
+  return type;
+}
+
+function budgetTooLowReply(filters = {}, stats = {}) {
+  const loc = (filters.location || 'that area').toString().trim() || 'that area';
+  const segment = describeBedsAndType(filters, { plural: true });
+  const purposeBit = purposePhrase(filters);
+  const userMax = formatAed(filters.budgetMax);
+  const priceWord = filters.purpose === 'Rent' ? 'rental price' : 'sale price';
+  const beds = describeBedroomPhrase(filters).trim() || '';
+  const min = stats.minimumPrice != null ? formatAed(stats.minimumPrice) : null;
+  const avg = stats.averagePrice != null ? formatAed(stats.averagePrice) : null;
+
+  const lines = [
+    `I couldn't find any ${segment} ${purposeBit} in ${loc} within ${userMax}. Current prices are above that budget.`,
+  ];
+  if (min) {
+    const minLabel = beds ? `${beds} properties` : 'properties';
+    lines.push(`• Minimum ${priceWord} for ${minLabel}: around ${min}`);
+  }
+  if (avg) {
+    const avgLabel = beds ? `${beds} ${describeTypePhrase(filters, 2)}` : describeTypePhrase(filters, 2);
+    lines.push(`• Average ${priceWord} for ${avgLabel}: about ${avg}`);
+  }
+  lines.push(
+    `If you want to keep the ${userMax} cap, I can look for other areas or smaller unit types such as studios or 1-bedroom apartments.`
+  );
+  lines.push('Would you prefer another area or a smaller unit?');
+  return lines.join('\n\n');
+}
+
+function budgetTooLowOptions(filters = {}) {
+  const opts = ['Nearby areas'];
+  const n = Number(filters.bedrooms);
+  if (Number.isFinite(n) && n >= 2) {
+    opts.push('Studio', '1 BR');
+  } else if (n === 1) {
+    opts.push('Studio');
+  }
+  opts.push('Change budget');
+  return opts;
+}
+
+function noInventoryReply(filters = {}) {
+  const loc = (filters.location || 'that area').toString().trim() || 'that area';
+  const segment = describeBedsAndType(filters, { plural: true });
+  const purposeBit = purposePhrase(filters);
+  return (
+    `I couldn't find currently available ${segment} ${purposeBit} in ${loc}.\n\n` +
+    'I can broaden the search to nearby areas, another property type, or a different bedroom configuration.'
+  );
+}
+
+function noInventoryOptions() {
+  return ['Nearby areas', 'Change bedrooms', 'Property type'];
+}
+
+function userBudgetBelowSegmentMin(filters = {}, stats = {}) {
+  const userMax = Number(filters.budgetMax);
+  const min = Number(stats.minimumPrice);
+  return Number.isFinite(userMax) && Number.isFinite(min) && userMax < min && (stats.totalAvailable || 0) > 0;
 }
 
 /**
@@ -2470,9 +2669,100 @@ async function buildAlternativeChips(effectiveFilters, { nearbyOnly = false } = 
 
 async function emptyResultsResult(effectiveFilters) {
   const location = (effectiveFilters.location || '').toString().trim();
+  const hasBudgetCap = Number.isFinite(Number(effectiveFilters.budgetMax));
+
+  if (hasBudgetCap) {
+    const stats = await getSegmentMarketStats(effectiveFilters);
+    if (userBudgetBelowSegmentMin(effectiveFilters, stats)) {
+      return {
+        propertyCards: [],
+        sources: [],
+        leadCaptured: false,
+        profilePatch: {
+          ...profilePatchFromPropertyFilters(effectiveFilters),
+          lastSearchFilters: effectiveFilters,
+          slotFlow: { awaiting: 'emptyResults', alternatives: null },
+        },
+        viewAllMatching: null,
+        effectiveFilters,
+        needsEmptyResults: true,
+        searchOutcome: SEARCH_OUTCOME.BUDGET_TOO_LOW,
+        marketStats: stats,
+        clarificationReply: budgetTooLowReply(effectiveFilters, stats),
+        options: budgetTooLowOptions(effectiveFilters),
+        ...emptyResultsClarificationFields(),
+        modelPayload: {
+          count: 0,
+          needsEmptyResults: true,
+          searchOutcome: SEARCH_OUTCOME.BUDGET_TOO_LOW,
+          requestedLocation: location || null,
+          marketStats: stats,
+          instruction:
+            'Exact listings were 0 because the visitor budget is below current inventory. Use the server reply. Do not invent prices, counts, or ROI.',
+        },
+      };
+    }
+    if (!stats.totalAvailable) {
+      return {
+        propertyCards: [],
+        sources: [],
+        leadCaptured: false,
+        profilePatch: {
+          ...profilePatchFromPropertyFilters(effectiveFilters),
+          lastSearchFilters: effectiveFilters,
+          slotFlow: { awaiting: 'emptyResults', alternatives: null },
+        },
+        viewAllMatching: null,
+        effectiveFilters,
+        needsEmptyResults: true,
+        searchOutcome: SEARCH_OUTCOME.NO_INVENTORY,
+        marketStats: { minimumPrice: null, averagePrice: null, maximumPrice: null, totalAvailable: 0 },
+        clarificationReply: noInventoryReply(effectiveFilters),
+        options: noInventoryOptions(),
+        ...emptyResultsClarificationFields(),
+        modelPayload: {
+          count: 0,
+          needsEmptyResults: true,
+          searchOutcome: SEARCH_OUTCOME.NO_INVENTORY,
+          requestedLocation: location || null,
+          instruction:
+            'There is no matching inventory even without a budget filter. Do not invent minimum or average prices. Offer nearby areas, bedroom, or type changes.',
+        },
+      };
+    }
+  }
 
   const locationHasStock = await locationHasInventoryForPurposeType(effectiveFilters);
   const locationEmpty = !!location && !locationHasStock;
+
+  if (!hasBudgetCap && locationEmpty) {
+    return {
+      propertyCards: [],
+      sources: [],
+      leadCaptured: false,
+      profilePatch: {
+        ...profilePatchFromPropertyFilters(effectiveFilters),
+        lastSearchFilters: effectiveFilters,
+        slotFlow: { awaiting: 'emptyResults', alternatives: null },
+      },
+      viewAllMatching: null,
+      effectiveFilters,
+      needsEmptyResults: true,
+      searchOutcome: SEARCH_OUTCOME.NO_INVENTORY,
+      clarificationReply: noInventoryReply(effectiveFilters),
+      options: noInventoryOptions(),
+      ...emptyResultsClarificationFields(),
+      modelPayload: {
+        count: 0,
+        needsEmptyResults: true,
+        searchOutcome: SEARCH_OUTCOME.NO_INVENTORY,
+        requestedLocation: location || null,
+        locationEmpty: true,
+        instruction:
+          'There is no matching inventory for this segment. Do not invent prices. Offer nearby areas, bedroom, or type changes.',
+      },
+    };
+  }
 
   const alternatives = await buildAlternativeChips(effectiveFilters, { nearbyOnly: locationEmpty });
 
@@ -2498,8 +2788,8 @@ async function emptyResultsResult(effectiveFilters) {
     options = alternatives.map((a) => a.label);
     slotAwaiting = 'alternatives';
   } else {
-    reply = `${emptyResultsReply(effectiveFilters)} Would you like to adjust the area, bedrooms, or budget?`;
-    options = [];
+    reply = noInventoryReply(effectiveFilters);
+    options = noInventoryOptions();
     slotAwaiting = 'emptyResults';
   }
 
@@ -2517,16 +2807,18 @@ async function emptyResultsResult(effectiveFilters) {
     viewAllMatching: null,
     effectiveFilters,
     needsEmptyResults: true,
+    searchOutcome: SEARCH_OUTCOME.NO_INVENTORY,
     clarificationReply: reply,
-    options: options.length > 0 ? options : undefined,
-    ...(options.length > 0 ? emptyResultsClarificationFields() : {}),
+    options: options.length > 0 ? options : noInventoryOptions(),
+    ...emptyResultsClarificationFields(),
     modelPayload: {
       count: 0,
       needsEmptyResults: true,
+      searchOutcome: SEARCH_OUTCOME.NO_INVENTORY,
       requestedLocation: location || null,
       locationEmpty: !!locationEmpty,
       instruction:
-        'No listings matched. Do not invent alternatives. The server has checked real inventory and will show chips for confirmed options. Do not write a follow-up question. Do not use "I don\'t have" / "I couldn\'t find" phrasing.',
+        'No listings matched. Do not invent alternatives, prices, or counts. The server will show chips for confirmed options.',
     },
   };
 }
@@ -2592,6 +2884,21 @@ async function searchProperties(
       },
     };
   }
+  if (isPropertyUiAction(userMessage)) {
+    return {
+      propertyCards: [],
+      sources: [],
+      leadCaptured: false,
+      profilePatch: {},
+      viewAllMatching: null,
+      modelPayload: {
+        skipped: true,
+        count: 0,
+        instruction:
+          'The visitor tapped a listing UI action. Do not restart Buy/Rent/bedroom questions. Do not call search_properties again unless they ask to change filters.',
+      },
+    };
+  }
   if (
     slotFlow?.awaiting === 'sell' ||
     slotFlow?.awaiting === 'pmNeed' ||
@@ -2622,7 +2929,7 @@ async function searchProperties(
   const showMore = isShowMoreRequest(userMessage);
   if (!showMore) {
     const mentionedLocation = parseLocationFromMessage(userMessage);
-    if (mentionedLocation && !effectiveFilters.location) {
+    if (mentionedLocation) {
       effectiveFilters.location = mentionedLocation;
     }
 
@@ -2734,6 +3041,7 @@ async function searchProperties(
     buildViewAllMatching(total, effectiveFilters)
   );
   result.effectiveFilters = effectiveFilters;
+  result.searchOutcome = SEARCH_OUTCOME.MATCHES_FOUND;
   result.profilePatch = {
     ...(result.profilePatch || {}),
     lastSearchFilters: effectiveFilters,
@@ -2746,6 +3054,10 @@ async function searchProperties(
     isShowMore: showMore && excludeIds.length > 0,
     newCount: propertyCards.length,
   });
+  result.modelPayload = {
+    ...(result.modelPayload || {}),
+    searchOutcome: SEARCH_OUTCOME.MATCHES_FOUND,
+  };
   return result;
 }
 
@@ -3032,4 +3344,12 @@ module.exports = {
   bedroomsClarificationReply,
   rankRelatedContentSources,
   isHomepageUrl,
+  isPropertyUiAction,
+  SEARCH_OUTCOME,
+  formatAed,
+  budgetTooLowReply,
+  budgetTooLowOptions,
+  noInventoryReply,
+  noInventoryOptions,
+  getSegmentMarketStats,
 };

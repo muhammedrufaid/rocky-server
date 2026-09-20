@@ -8,7 +8,7 @@ const {
   ChatAbortedError,
   throwIfAborted,
 } = require('./chat.sse');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -846,6 +846,9 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
   const newLocSearch = applyNewLocationSearch(message, profile);
   if (newLocSearch) return newLocSearch;
 
+  const listingUpdate = applyListingFilterUpdate(message, profile);
+  if (listingUpdate) return listingUpdate;
+
   if (!awaiting) return null;
 
   if (awaiting === 'listingIntake') {
@@ -961,6 +964,33 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
           slotFlow: { awaiting: 'budget' },
         }),
         reply: 'What is your maximum budget in AED?',
+      };
+    }
+    if (emptyChoice?.askBedrooms) {
+      return bedroomClarifyPayload(mergeProfile(profile, { lastSearchFilters: last }), last.purpose || profile.purpose);
+    }
+    if (emptyChoice?.askType) {
+      return {
+        type: 'clarify',
+        profile: mergeProfile(profile, {
+          lastSearchFilters: last,
+          slotFlow: { awaiting: 'listingIntake', alternatives: null },
+        }),
+        reply:
+          'What property type should I search for — apartment, villa, townhouse, penthouse, or another type?',
+        options: ['Apartment', 'Villa', 'Townhouse', 'Penthouse'],
+      };
+    }
+    if (emptyChoice?.location) {
+      last.location = emptyChoice.location;
+      return {
+        type: 'continue',
+        profile: mergeProfile(profile, {
+          preferredAreas: [emptyChoice.location],
+          lastSearchFilters: last,
+          slotFlow: { awaiting: null, alternatives: null },
+          resetShownPropertyIds: true,
+        }),
       };
     }
     if (emptyChoice?.bedrooms) {
@@ -1168,7 +1198,7 @@ function applyNewLocationSearch(message, profile) {
   const looksLikeListing =
     /\b(show|find|search|looking|buy|purchase|rent|lease|for\s+sale|apartments?|villas?|townhouses?|penthouses?|duplexes?|studios?|flats?|propert(?:y|ies)|homes?|listings?)\b/i.test(
       message
-    );
+    ) || !!mentionedLocation;
   if (!looksLikeListing && !purposeFromMsg) return null;
 
   const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
@@ -1234,7 +1264,68 @@ function applyNewLocationSearch(message, profile) {
   };
 }
 
+function applyListingFilterUpdate(message, profile) {
+  if (isPropertyUiAction(message)) return null;
+  if (parseSellIntent(message) || isServiceInquiryMessage(message)) return null;
+  if (shouldSkipPropertySearch(message)) return null;
+
+  const awaiting = profile.slotFlow?.awaiting;
+  if (
+    awaiting &&
+    [
+      'purpose',
+      'sell',
+      'pmNeed',
+      'pmProperty',
+      'serviceContact',
+      'serviceLocation',
+      'sellServiceLocation',
+      'budget',
+    ].includes(awaiting)
+  ) {
+    return null;
+  }
+
+  const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+  const next = applyMessageToSearchFilters(last, message);
+  const purpose = next.purpose || last.purpose || profile.purpose || intentToPurpose(profile.intent);
+  if (purpose) next.purpose = purpose;
+
+  const unchanged =
+    JSON.stringify(copySearchFilters(last)) === JSON.stringify(copySearchFilters(next));
+  if (unchanged) return null;
+
+  const hasListingContext =
+    isListingIntent(profile.intent) ||
+    last.purpose ||
+    next.purpose ||
+    last.location ||
+    next.location ||
+    typesFromFilters(last).length ||
+    typesFromFilters(next).length;
+  if (!hasListingContext) return null;
+
+  const locationChanged =
+    !!last.location &&
+    !!next.location &&
+    last.location.trim().toLowerCase() !== next.location.trim().toLowerCase();
+
+  return {
+    type: 'continue',
+    profile: mergeProfile(profile, {
+      purpose: purpose || profile.purpose,
+      intent: purposeToIntent(purpose) || profile.intent,
+      preferredAreas: next.location ? [next.location] : undefined,
+      bedrooms: next.bedrooms ?? next.bedroomsMin ?? profile.bedrooms,
+      lastSearchFilters: next,
+      slotFlow: { awaiting: null, alternatives: null },
+      resetShownPropertyIds: locationChanged,
+    }),
+  };
+}
+
 function bedroomClarifyIfNeeded(message, profile) {
+  if (isPropertyUiAction(message)) return null;
   if (
     parseSellIntent(message) ||
     profile.slotFlow?.awaiting === 'sell' ||

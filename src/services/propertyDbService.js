@@ -547,6 +547,44 @@ const fetchSearchByAreaSuggestions = async (opts = {}) => {
   return { suggestions: suggestions.slice(0, limit) };
 };
 
+/**
+ * Inventory price stats for a listing segment (purpose/location/beds/type).
+ * Ignores the visitor's budget so we can explain a budget-too-low miss.
+ * Uses the same match/normalization pipeline as paginated listing search.
+ */
+const getPropertyMarketStats = async ({ search = '', filters = {}, forced = {} } = {}) => {
+  const filtersNoPrice = { ...(filters || {}) };
+  delete filtersNoPrice.priceMin;
+  delete filtersNoPrice.priceMax;
+  delete filtersNoPrice.excludeRefNos;
+
+  const pipeline = [
+    ...buildCommonPipeline({ search, filters: filtersNoPrice, forced }),
+    { $addFields: { __priceNum: numberExprFromStringField('price') } },
+    { $match: { __priceNum: { $ne: null, $gt: 0 } } },
+    {
+      $group: {
+        _id: null,
+        minimumPrice: { $min: '$__priceNum' },
+        averagePrice: { $avg: '$__priceNum' },
+        maximumPrice: { $max: '$__priceNum' },
+        totalAvailable: { $sum: 1 },
+      },
+    },
+  ];
+
+  const [row] = await Property.aggregate(pipeline).allowDiskUse(true);
+  if (!row) {
+    return { minimumPrice: null, averagePrice: null, maximumPrice: null, totalAvailable: 0 };
+  }
+  return {
+    minimumPrice: Number.isFinite(row.minimumPrice) ? row.minimumPrice : null,
+    averagePrice: Number.isFinite(row.averagePrice) ? row.averagePrice : null,
+    maximumPrice: Number.isFinite(row.maximumPrice) ? row.maximumPrice : null,
+    totalAvailable: row.totalAvailable || 0,
+  };
+};
+
 module.exports = {
   fetchAllProperties,
   fetchOffPlanProperties,
@@ -559,5 +597,6 @@ module.exports = {
   fetchSearchByAreaSuggestions,
   fetchUniquePropertyTypes,
   fetchUniquePropertyTypesInOrder,
+  getPropertyMarketStats,
 };
 

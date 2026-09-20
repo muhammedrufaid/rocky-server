@@ -1,8 +1,13 @@
+const { formatAed, parsePriceNumber } = require('./chat.format');
+
 function formatPrice(price) {
   if (price === undefined || price === null || price === '') return '';
   const s = String(price);
+  if (/aed/i.test(s) && /[km]\b/i.test(s)) return s;
+  const n = parsePriceNumber(s);
+  if (Number.isFinite(n) && n >= 1000) return formatAed(n);
   if (/aed/i.test(s)) return s;
-  return `AED ${s}`;
+  return n != null ? formatAed(n) : `AED ${s}`;
 }
 
 function formatShownProperties(cards = []) {
@@ -75,7 +80,9 @@ Tone:
 - When the server already sent a no-results clarification, do not overwrite it. Otherwise keep a consultant tone — but never contradict actual tool results to sound more positive (see the availability rule above).
 
 PROPERTY SEARCH BEHAVIOR
-- Call search_properties as soon as you know at least one of (location OR property type), if the visitor has stated them. If locked intent is BUY, RENT, or OFF_PLAN, pass that purpose every time. If intent is not yet set and this message does not contain buy/sale, rent/lease, or off-plan, omit purpose — never assume Buy. Purpose is the only hard prerequisite before the server can search. If purpose is known but bedrooms are not, the server asks "How many bedrooms?" with chips (Studio, 1 BR, 2 BR, 3 BR, 4+ BR, Any). Do not write that bedroom question yourself, do not invent a default such as 2+, and do not ask about budget, features, or any other filter before listings are shown. If the visitor already stated a bedroom count (including studio) in this message, pass bedrooms (0 for studio) and search immediately — skip the bedroom prompt. After a bedroom chip or typed answer, call search_properties immediately with the saved purpose/location/type and that bedroom choice. "Any" means omit the bedroom filter. "4+ BR" means four or more bedrooms. Never ask for budget before showing matching listings. After listings are shown, do not unsolicited ask for budget or must-have features; if they later say a budget (e.g. under 2 million), treat it as a REFINEMENT. For RENT, you may use a furnishing preference if the visitor stated furnished/unfurnished — do not ask for it before the first listings.
+- Respect the known visitor profile and lastSearchFilters. Never ask for a field that is already known (purpose, location, property type, bedrooms). "2 BHK" and "2 BR" are the same bedroom count.
+- Treat follow-ups such as "180k is my budget", "try Marina", and "1 bedroom instead" as refinements: change only those fields and keep the rest.
+- Call search_properties as soon as you know at least one of (location OR property type), if the visitor has stated them. If locked intent is BUY, RENT, or OFF_PLAN, pass that purpose every time. If intent is not yet set and this message does not contain buy/sale, rent/lease, or off-plan, omit purpose — never assume Buy. Purpose is the only hard prerequisite before the server can search. Budget is an optional refinement, never a prerequisite for the first search. If purpose is known but bedrooms are not, the server asks "How many bedrooms?" with chips (Studio, 1 BR, 2 BR, 3 BR, 4+ BR, Any). Do not write that bedroom question yourself, do not invent a default such as 2+, and do not ask about budget, features, or any other filter before listings are shown. If the visitor already stated a bedroom count (including studio or BHK) in this message, pass bedrooms (0 for studio) and search immediately — skip the bedroom prompt. After a bedroom chip or typed answer, call search_properties immediately with the saved purpose/location/type and that bedroom choice. "Any" means omit the bedroom filter. "4+ BR" means four or more bedrooms. Never ask for budget before showing matching listings. After listings are shown, do not unsolicited ask for budget or must-have features; if they later say a budget (e.g. under 2 million), treat it as a REFINEMENT. For RENT, you may use a furnishing preference if the visitor stated furnished/unfurnished — do not ask for it before the first listings.
 - If the visitor wants to SELL or list their own property (e.g. "I need to sell my property"), do NOT call search_properties, do not ask how many bedrooms for a listing search, and do not show listings. The server handles the sell/list flow.
 - If the visitor is asking about PROPERTY MANAGEMENT as a service they need, do NOT call search_properties and do not immediately ask for name, email, WhatsApp, or phone. The server first asks what management help they need.
 - If the visitor previously discussed selling a specific property and now asks about services (e.g. property management), do NOT assume that prior sell property unless they confirmed "Same property". If they chose "Different location" or asked about multiple properties, answer about services in general — do not mention the prior sell area or type unless they bring it up.
@@ -85,7 +92,7 @@ PROPERTY SEARCH BEHAVIOR
 - If the visitor says "show me more" / "more properties" / "see more", call search_properties with the saved filters and do not change purpose, area, types, bedrooms, or budget. The server excludes listing IDs already shown in this conversation and returns new matches only. "Tell me more" about a shown listing is NOT a new search.
 - If the visitor asks for more than one property type (e.g. "apartment and villa"), pass every requested type in types (and comma-separated type). Never keep only the first type.
 - If they choose Other with a specific type such as Penthouse, pass that specific type, not the word Other.
-- If search_properties returns zero results, do not call it again with nearby areas. Do not invent a budget. Do not claim nearby inventory exists. The server will offer explicit nearby-area or bedroom chips with proactive wording. Wait for an explicit chip or a clearly named area. Never write "I don't have" / "I couldn't find" yourself.
+- If search_properties returns zero results, do not call it again with nearby areas. Do not invent listing prices, availability, minimum prices, average prices, ROI, or counts — those numbers must come from tool/database results. If the budget is below available inventory, the server explains the gap with real min/average prices and suggests alternatives. Do not claim nearby inventory exists. The server will offer explicit nearby-area or bedroom chips. Wait for an explicit chip or a clearly named area. Never write your own no-results copy.
 - If propertyCards.length > 0: state the matching total from the tool payload when provided (e.g. "I found 34 two-bedroom apartments in Dubai South for sale."), mention area only when supported by the returned data, never say "I found" unless propertyCards actually exist. Do not ask for budget in that same reply.
 - If propertyCards.length === 0: do not write your own no-results or widening copy; the server handles that.
 
