@@ -8,7 +8,7 @@ const {
   ChatAbortedError,
   throwIfAborted,
 } = require('./chat.sse');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -278,21 +278,47 @@ function emptyClarificationPayload() {
   };
 }
 
+function listingSlotResponse(profile, filters, extraPatch = {}) {
+  const next = copySearchFilters(filters || emptySearchFilters());
+  const missing = nextMissingListingSlot(next);
+  const question = missing ? listingSlotQuestion(missing, next) : null;
+  const {
+    slotFlow: _ignoredSlotFlow,
+    lastSearchFilters: _ignoredFilters,
+    ...rest
+  } = extraPatch || {};
+  const patch = {
+    ...rest,
+    lastSearchFilters: next,
+    slotFlow: question
+      ? { awaiting: question.awaiting, alternatives: null }
+      : { awaiting: null, alternatives: null },
+  };
+  if (next.purpose) {
+    patch.purpose = next.purpose;
+    patch.intent = purposeToIntent(next.purpose) || rest.intent || profile.intent;
+  }
+  if (next.location) patch.preferredAreas = rest.preferredAreas || [next.location];
+  if (next.bedrooms != null) patch.bedrooms = next.bedrooms;
+  else if (next.bedroomsMin != null) patch.bedrooms = next.bedroomsMin;
+  if (!missing) {
+    return { type: 'continue', profile: mergeProfile(profile, patch) };
+  }
+  return {
+    type: 'clarify',
+    profile: mergeProfile(profile, patch),
+    reply: question.reply,
+    options: question.options,
+  };
+}
+
 function bedroomClarifyPayload(profile, purpose) {
   const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
   if (purpose) last.purpose = purpose;
-  const resolvedPurpose = purpose || last.purpose || profile.purpose;
-  return {
-    type: 'clarify',
-    profile: mergeProfile(profile, {
-      purpose: resolvedPurpose,
-      intent: purposeToIntent(resolvedPurpose) || profile.intent,
-      lastSearchFilters: last,
-      slotFlow: { awaiting: 'bedrooms' },
-    }),
-    reply: bedroomsClarificationReply(),
-    options: BEDROOM_OPTIONS,
-  };
+  return listingSlotResponse(profile, last, {
+    purpose: purpose || last.purpose || profile.purpose,
+    intent: purposeToIntent(purpose || last.purpose) || profile.intent,
+  });
 }
 
 function leaveSearchSlotForGeneralQuestion(profile) {
@@ -790,14 +816,15 @@ function applyConversationIntent(message, profile, explicitIntent = null) {
 
   const current = currentConversationIntent(profile);
   const starter = isExplicitIntentStarter(message);
-  const awaitingPurpose = profile.slotFlow?.awaiting === 'purpose';
+  const switching = !!(current && detected !== current);
+  const restart = starter || !!requestedIntent;
 
-  if (awaitingPurpose && isPurposeChipReply(message) && isListingIntent(detected) && !starter) {
+  // In-sentence "to buy" / purpose chips must merge into the current search
+  // profile. Only menu starters and true intent switches reset.
+  if (isListingIntent(detected) && !starter && !switching && !requestedIntent) {
     return null;
   }
 
-  const switching = !!(current && detected !== current);
-  const restart = starter;
   if (!switching && !restart && current === detected) return null;
 
   const nextProfile = startFreshIntent(detected, message, profile);
@@ -854,34 +881,15 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
   if (awaiting === 'listingIntake') {
     const last = applyMessageToSearchFilters(
       copySearchFilters(profile.lastSearchFilters || emptySearchFilters()),
-      message
+      message,
+      { awaiting }
     );
     const purpose = last.purpose || profile.purpose || intentToPurpose(profile.intent);
     if (purpose) last.purpose = purpose;
-    const hasAnchor = !!(last.location || typesFromFilters(last).length || isBedroomsResolved(last));
-    if (!hasAnchor) {
-      return {
-        type: 'clarify',
-        profile: mergeProfile(profile, {
-          purpose,
-          lastSearchFilters: last,
-          slotFlow: { awaiting: 'listingIntake', alternatives: null },
-        }),
-        reply: listingIntakeReply(profile.intent, last),
-      };
-    }
-    const nextProfile = mergeProfile(profile, {
+    return listingSlotResponse(profile, last, {
       purpose,
       intent: profile.intent || purposeToIntent(purpose),
-      preferredAreas: last.location ? [last.location] : undefined,
-      bedrooms: last.bedrooms ?? last.bedroomsMin ?? profile.bedrooms,
-      lastSearchFilters: last,
-      slotFlow: { awaiting: null, alternatives: null },
     });
-    if (!isBedroomsResolved(last) && (last.location || typesFromFilters(last).length)) {
-      return bedroomClarifyPayload(nextProfile, purpose);
-    }
-    return { type: 'continue', profile: nextProfile };
   }
 
   if (awaiting === 'purpose') {
@@ -890,26 +898,10 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
 
     const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
     last.purpose = purpose;
-    if (!isBedroomsResolved(last)) {
-      return bedroomClarifyPayload(
-        mergeProfile(profile, {
-          purpose,
-          intent: purposeToIntent(purpose),
-          lastSearchFilters: last,
-        }),
-        purpose
-      );
-    }
-
-    return {
-      type: 'continue',
-      profile: mergeProfile(profile, {
-        purpose,
-        intent: purposeToIntent(purpose),
-        lastSearchFilters: last,
-        slotFlow: { awaiting: null },
-      }),
-    };
+    return listingSlotResponse(profile, last, {
+      purpose,
+      intent: purposeToIntent(purpose),
+    });
   }
 
   if (awaiting === 'bedrooms') {
@@ -918,27 +910,12 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
       if (!isVagueConfirm(message) && !isListingFollowUp(message)) {
         return leaveSearchSlotForGeneralQuestion(profile);
       }
-      return {
-        type: 'clarify',
-        profile,
-        reply: bedroomsClarificationReply(),
-        options: BEDROOM_OPTIONS,
-      };
+      return listingSlotResponse(profile, profile.lastSearchFilters || emptySearchFilters());
     }
 
     const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
     applyBedroomChoice(last, choice);
-    const patch = {
-      lastSearchFilters: last,
-      slotFlow: { awaiting: null },
-    };
-    if (choice.exact != null) patch.bedrooms = choice.exact;
-    if (choice.min != null) patch.bedrooms = choice.min;
-
-    return {
-      type: 'continue',
-      profile: mergeProfile(profile, patch),
-    };
+    return listingSlotResponse(profile, last);
   }
 
   if (awaiting === 'emptyResults') {
@@ -957,14 +934,10 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
       };
     }
     if (emptyChoice?.budget) {
-      return {
-        type: 'clarify',
-        profile: mergeProfile(profile, {
-          lastSearchFilters: last,
-          slotFlow: { awaiting: 'budget' },
-        }),
-        reply: 'What is your maximum budget in AED?',
-      };
+      last.budgetProvided = false;
+      last.budgetMin = null;
+      last.budgetMax = null;
+      return listingSlotResponse(profile, last);
     }
     if (emptyChoice?.askBedrooms) {
       return bedroomClarifyPayload(mergeProfile(profile, { lastSearchFilters: last }), last.purpose || profile.purpose);
@@ -1108,14 +1081,7 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
     last.location = named;
     const resolvedPurpose = last.purpose || profile.purpose || null;
     if (resolvedPurpose) last.purpose = resolvedPurpose;
-    return {
-      type: 'continue',
-      profile: mergeProfile(profile, {
-        preferredAreas: [named],
-        lastSearchFilters: last,
-        slotFlow: { awaiting: null, alternatives: null },
-      }),
-    };
+    return listingSlotResponse(profile, last, { preferredAreas: [named] });
   }
 
   if (awaiting === 'nearbyArea') {
@@ -1151,20 +1117,12 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
       if (!isVagueConfirm(message) && !isListingFollowUp(message)) {
         return leaveSearchSlotForGeneralQuestion(profile);
       }
-      return {
-        type: 'clarify',
-        profile,
-        reply: 'What is your maximum budget in AED?',
-      };
+      return listingSlotResponse(profile, last);
     }
     applyBudgetChoice(last, budget);
-    return {
-      type: 'continue',
-      profile: mergeProfile(profile, {
-        lastSearchFilters: last,
-        slotFlow: { awaiting: null },
-      }),
-    };
+    return listingSlotResponse(profile, last, {
+      budget: { min: last.budgetMin ?? null, max: last.budgetMax ?? null },
+    });
   }
 
   return null;
@@ -1258,10 +1216,7 @@ function applyNewLocationSearch(message, profile) {
   }
   if (resolvedLocation) patch.preferredAreas = [resolvedLocation];
 
-  return {
-    type: 'continue',
-    profile: mergeProfile(profile, patch),
-  };
+  return listingSlotResponse(profile, newFilters, patch);
 }
 
 function applyListingFilterUpdate(message, profile) {

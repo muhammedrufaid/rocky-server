@@ -3574,4 +3574,9 @@ module.exports = {
   isBudgetProvided,
   listingSlotQuestion,
   qualifyListingSearch,
+  BUY_BUDGET_OPTIONS,
+  RENT_BUDGET_OPTIONS,
+  PROPERTY_TYPE_OPTIONS,
+  budgetClarificationReply,
+  propertyTypeClarificationReply,
 };
