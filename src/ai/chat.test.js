@@ -11,6 +11,7 @@ const {
   sellClarificationReply,
   shouldSkipPropertySearch,
   isListingFollowUp,
+  isAmbiguousListingQuery,
   advanceSellListing,
   emptySellListing,
   isAlreadySharedDetails,
@@ -62,7 +63,17 @@ const {
   copySearchFilters,
   emptySearchFilters,
   applyBedroomChoice,
+  executeTool,
+  isPropertyUiAction,
+  SEARCH_OUTCOME,
+  formatAed,
+  parseBedroomChoice,
+  parseBudgetFromMessage,
+  isBedroomsResolved,
+  purposeClarificationReply,
+  bedroomsClarificationReply,
 } = require('./chat.tools');
+const propertyDbService = require('../services/propertyDbService');
 
 function runSellTurns(messages) {
   let listing = emptySellListing();
@@ -565,4 +576,215 @@ test('also villa merges onto the current type instead of replacing it', () => {
   const merged = mergePropertyTypes(['Apartment'], ['Villa'], 'also villa');
   assert.deepEqual(merged, ['Apartment', 'Villa']);
 });
+
+function sampleBuyApartment(overrides = {}) {
+  return {
+    propertyRefNo: 'RO-B-1',
+    propertyTitle: '2BR apartment in Dubai South',
+    price: '1200000',
+    bedrooms: '2',
+    bathrooms: '2',
+    propertySize: '900',
+    propertySizeUnit: 'sqft',
+    propertyPurpose: 'Buy',
+    images: ['https://example.com/a.jpg'],
+    ...overrides,
+  };
+}
+
+test('natural language extracts buy, 2 BHK, apartment, and Dubai South without clarification', () => {
+  const msg = 'I need a 2 BHK apartment in Dubai South to buy.';
+  assert.equal(parsePurposeFromMessage(msg), 'Buy');
+  assert.equal(parseConversationIntent(msg), CONVERSATION_INTENTS.BUY);
+  assert.deepEqual(parseBedroomChoice(msg), parseBedroomChoice('2 BR'));
+  assert.equal(parseBedroomChoice(msg).exact, 2);
+  assert.equal(parseLocationFromMessage(msg), 'Dubai South');
+
+  const profile = startFreshIntent(CONVERSATION_INTENTS.BUY, msg, {});
+  assert.equal(profile.intent, CONVERSATION_INTENTS.BUY);
+  assert.equal(profile.lastSearchFilters.purpose, 'Buy');
+  assert.equal(profile.lastSearchFilters.bedrooms, 2);
+  assert.equal(profile.lastSearchFilters.type, 'Apartment');
+  assert.equal(profile.lastSearchFilters.location, 'Dubai South');
+  assert.equal(isBedroomsResolved(profile.lastSearchFilters), true);
+  assert.equal(needsListingIntake(profile.lastSearchFilters), false);
+  assert.equal(listingStartReply(CONVERSATION_INTENTS.BUY, profile, msg), null);
+  assert.equal(purposeClarificationReply(), 'What are you looking for?');
+  assert.equal(bedroomsClarificationReply(), 'How many bedrooms?');
+});
+
+test('extracts max budget from a full listing sentence', () => {
+  const msg = 'I need a 2 BHK apartment in Dubai South to buy under AED 1.5M.';
+  const filters = applyMessageToSearchFilters(emptySearchFilters(), msg);
+  assert.equal(filters.purpose, 'Buy');
+  assert.equal(filters.bedrooms, 2);
+  assert.equal(filters.type, 'Apartment');
+  assert.equal(filters.location, 'Dubai South');
+  assert.equal(filters.budgetMax, 1500000);
+  assert.equal(parseBudgetFromMessage('AED 180k').budgetMax, 180000);
+  assert.equal(parseBudgetFromMessage('1.2m').budgetMax, 1200000);
+  assert.equal(parseBudgetFromMessage('AED 1.2 million').budgetMax, 1200000);
+  assert.equal(parseBudgetFromMessage('180,000').budgetMax, 180000);
+});
+
+test('follow-up budget is merged onto the existing search profile', () => {
+  let filters = applyMessageToSearchFilters(
+    emptySearchFilters(),
+    'I need a 2 BHK apartment in Dubai South to buy.'
+  );
+  filters = applyMessageToSearchFilters(filters, 'My budget is 180K.');
+  assert.equal(filters.purpose, 'Buy');
+  assert.equal(filters.bedrooms, 2);
+  assert.equal(filters.type, 'Apartment');
+  assert.equal(filters.location, 'Dubai South');
+  assert.equal(filters.budgetMax, 180000);
+  assert.equal(parsePurposeFromMessage('My budget is 180K.'), null);
+  assert.equal(parseBedroomChoice('My budget is 180K.'), null);
+});
+
+test('zero exact results below inventory min is budget-too-low with real stats', async (t) => {
+  t.mock.method(propertyDbService, 'fetchBuyProperties', async () => ({ properties: [], total: 0 }));
+  t.mock.method(propertyDbService, 'getPropertyMarketStats', async () => ({
+    minimumPrice: 1_100_000,
+    averagePrice: 1_700_000,
+    maximumPrice: 2_400_000,
+    totalAvailable: 12,
+  }));
+
+  const last = applyMessageToSearchFilters(
+    emptySearchFilters(),
+    'I need a 2 BHK apartment in Dubai South to buy.'
+  );
+  const result = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: last,
+      userMessage: 'My budget is 180K.',
+      intent: CONVERSATION_INTENTS.BUY,
+    }
+  );
+
+  assert.equal(result.needsPurpose, undefined);
+  assert.equal(result.needsBedrooms, undefined);
+  assert.equal(result.searchOutcome, SEARCH_OUTCOME.BUDGET_TOO_LOW);
+  assert.match(result.clarificationReply, /AED 180K/);
+  assert.match(result.clarificationReply, /AED 1\.1M/);
+  assert.match(result.clarificationReply, /AED 1\.7M/);
+  assert.deepEqual(result.options, ['Nearby areas', 'Studio', '1 BR', 'Change budget']);
+});
+
+test('no segment inventory does not invent market prices', async (t) => {
+  t.mock.method(propertyDbService, 'fetchBuyProperties', async () => ({ properties: [], total: 0 }));
+  t.mock.method(propertyDbService, 'getPropertyMarketStats', async () => ({
+    minimumPrice: null,
+    averagePrice: null,
+    maximumPrice: null,
+    totalAvailable: 0,
+  }));
+
+  const last = applyMessageToSearchFilters(
+    emptySearchFilters(),
+    'I need a 4 BHK apartment in Dubai South to buy.'
+  );
+  const result = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: last,
+      userMessage: 'My budget is 180K.',
+      intent: CONVERSATION_INTENTS.BUY,
+    }
+  );
+
+  assert.equal(result.searchOutcome, SEARCH_OUTCOME.NO_INVENTORY);
+  assert.equal(/AED 1\.|minimum sale price|average sale price/i.test(result.clarificationReply), false);
+  assert.match(result.clarificationReply, /couldn't find currently available/i);
+  assert.deepEqual(result.options, ['Nearby areas', 'Change bedrooms', 'Property type']);
+});
+
+test('listings are returned immediately when no budget is supplied', async (t) => {
+  t.mock.method(propertyDbService, 'fetchBuyProperties', async () => ({
+    properties: [sampleBuyApartment()],
+    total: 3,
+  }));
+
+  const last = applyMessageToSearchFilters(
+    emptySearchFilters(),
+    'I need a 2 BHK apartment in Dubai South to buy.'
+  );
+  const result = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: last,
+      userMessage: 'I need a 2 BHK apartment in Dubai South to buy.',
+      intent: CONVERSATION_INTENTS.BUY,
+    }
+  );
+
+  assert.equal(result.searchOutcome, SEARCH_OUTCOME.MATCHES_FOUND);
+  assert.equal(result.needsPurpose, undefined);
+  assert.equal(result.needsBedrooms, undefined);
+  assert.equal((result.propertyCards || []).length > 0, true);
+  assert.equal(/what is your (maximum )?budget/i.test(result.replyOverride || ''), false);
+});
+
+test('try Dubai Marina changes only location', () => {
+  let filters = applyMessageToSearchFilters(
+    emptySearchFilters(),
+    'I need a 2 BHK apartment in Dubai South to buy.'
+  );
+  filters = applyMessageToSearchFilters(filters, 'Under 1.5M.');
+  filters = applyMessageToSearchFilters(filters, 'Try Dubai Marina.');
+  assert.equal(filters.location, 'Dubai Marina');
+  assert.equal(filters.purpose, 'Buy');
+  assert.equal(filters.bedrooms, 2);
+  assert.equal(filters.type, 'Apartment');
+  assert.equal(filters.budgetMax, 1500000);
+
+  filters = applyMessageToSearchFilters(filters, 'Try 1 bedroom.');
+  assert.equal(filters.bedrooms, 1);
+  assert.equal(filters.location, 'Dubai Marina');
+  assert.equal(filters.purpose, 'Buy');
+  assert.equal(filters.type, 'Apartment');
+  assert.equal(filters.budgetMax, 1500000);
+});
+
+test('view listing UI actions do not restart property qualification', async () => {
+  const msg = 'View listing';
+  assert.equal(isPropertyUiAction(msg), true);
+  assert.equal(isPropertyUiAction('Book a viewing'), true);
+  assert.equal(isListingFollowUp(msg), false);
+  assert.equal(parseConversationIntent(msg), null);
+  assert.equal(isAmbiguousListingQuery(msg), false);
+
+  const profile = startFreshIntent(
+    CONVERSATION_INTENTS.BUY,
+    'I need a 2 BHK apartment in Dubai South to buy.',
+    {}
+  );
+  const result = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: profile.lastSearchFilters,
+      userMessage: msg,
+      intent: profile.intent,
+    }
+  );
+  assert.equal(result.modelPayload?.skipped, true);
+  assert.equal(result.needsPurpose, undefined);
+  assert.equal(result.needsBedrooms, undefined);
+});
+
+test('AED formatter uses compact K/M values', () => {
+  assert.equal(formatAed(180000), 'AED 180K');
+  assert.equal(formatAed(950000), 'AED 950K');
+  assert.equal(formatAed(1100000), 'AED 1.1M');
+  assert.equal(formatAed(1700000), 'AED 1.7M');
+  assert.equal(formatAed(2000000), 'AED 2M');
+  assert.equal(formatAed(12500000), 'AED 12.5M');
+});
+
 
