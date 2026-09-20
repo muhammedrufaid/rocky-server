@@ -8,7 +8,7 @@ const {
   ChatAbortedError,
   throwIfAborted,
 } = require('./chat.sse');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -804,7 +804,7 @@ function applyConversationIntent(message, profile, explicitIntent = null) {
   const reply = listingStartReply(detected, nextProfile, message);
   const options = listingStartOptions(detected, nextProfile, message);
 
-  if (isListingIntent(detected) && !needsListingIntake(nextProfile.lastSearchFilters || {})) {
+  if (isListingIntent(detected) && !nextMissingListingSlot(nextProfile.lastSearchFilters || {})) {
     return {
       type: 'continue',
       profile: nextProfile,
@@ -1265,62 +1265,13 @@ function applyNewLocationSearch(message, profile) {
 }
 
 function applyListingFilterUpdate(message, profile) {
-  if (isPropertyUiAction(message)) return null;
-  if (parseSellIntent(message) || isServiceInquiryMessage(message)) return null;
-  if (shouldSkipPropertySearch(message)) return null;
-
-  const awaiting = profile.slotFlow?.awaiting;
-  if (
-    awaiting &&
-    [
-      'purpose',
-      'sell',
-      'pmNeed',
-      'pmProperty',
-      'serviceContact',
-      'serviceLocation',
-      'sellServiceLocation',
-      'budget',
-    ].includes(awaiting)
-  ) {
-    return null;
-  }
-
-  const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
-  const next = applyMessageToSearchFilters(last, message);
-  const purpose = next.purpose || last.purpose || profile.purpose || intentToPurpose(profile.intent);
-  if (purpose) next.purpose = purpose;
-
-  const unchanged =
-    JSON.stringify(copySearchFilters(last)) === JSON.stringify(copySearchFilters(next));
-  if (unchanged) return null;
-
-  const hasListingContext =
-    isListingIntent(profile.intent) ||
-    last.purpose ||
-    next.purpose ||
-    last.location ||
-    next.location ||
-    typesFromFilters(last).length ||
-    typesFromFilters(next).length;
-  if (!hasListingContext) return null;
-
-  const locationChanged =
-    !!last.location &&
-    !!next.location &&
-    last.location.trim().toLowerCase() !== next.location.trim().toLowerCase();
-
+  const result = qualifyListingSearch(message, profile);
+  if (!result) return null;
   return {
-    type: 'continue',
-    profile: mergeProfile(profile, {
-      purpose: purpose || profile.purpose,
-      intent: purposeToIntent(purpose) || profile.intent,
-      preferredAreas: next.location ? [next.location] : undefined,
-      bedrooms: next.bedrooms ?? next.bedroomsMin ?? profile.bedrooms,
-      lastSearchFilters: next,
-      slotFlow: { awaiting: null, alternatives: null },
-      resetShownPropertyIds: locationChanged,
-    }),
+    type: result.type,
+    profile: mergeProfile(profile, result.profilePatch),
+    reply: result.reply,
+    options: result.options,
   };
 }
 
@@ -1329,7 +1280,6 @@ function bedroomClarifyIfNeeded(message, profile) {
   if (
     parseSellIntent(message) ||
     profile.slotFlow?.awaiting === 'sell' ||
-    profile.slotFlow?.awaiting === 'listingIntake' ||
     profile.slotFlow?.awaiting === 'pmNeed' ||
     profile.slotFlow?.awaiting === 'pmProperty' ||
     profile.sellListing?.intent === 'sell' ||
@@ -1339,32 +1289,14 @@ function bedroomClarifyIfNeeded(message, profile) {
     return null;
   }
   if (shouldSkipPropertySearch(message) || isGeneralKnowledgeQuery(message)) return null;
-  if (parseBedroomChoice(message)) return null;
-  const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
-  const purpose =
-    parsePurposeFromMessage(message) ||
-    last.purpose ||
-    profile.purpose ||
-    intentToPurpose(profile.intent) ||
-    null;
-  if (!purpose) return null;
-  if (isBedroomsResolved(last)) return null;
-  if (!last.location && !typesFromFilters(last).length) return null;
-  const listingLike =
-    isAmbiguousListingQuery(message) ||
-    !!parsePurposeFromMessage(message) ||
-    profile.slotFlow?.awaiting === 'bedrooms' ||
-    isListingIntent(profile.intent);
-  if (!listingLike) return null;
-  last.purpose = purpose;
-  return bedroomClarifyPayload(
-    mergeProfile(profile, {
-      purpose,
-      intent: purposeToIntent(purpose),
-      lastSearchFilters: last,
-    }),
-    purpose
-  );
+  const result = qualifyListingSearch(message, profile);
+  if (!result || result.type !== 'clarify') return null;
+  return {
+    type: 'clarify',
+    profile: mergeProfile(profile, result.profilePatch),
+    reply: result.reply,
+    options: result.options,
+  };
 }
 
 async function maybeCaptureServiceLead(sessionId, profile) {
@@ -1458,7 +1390,13 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
     });
   }
 
-  if (result.needsPurpose) {
+  if (
+    result.needsPurpose ||
+    result.needsBedrooms ||
+    result.needsPropertyType ||
+    result.needsLocation ||
+    result.needsBudget
+  ) {
     return {
       reply: result.clarificationReply || purposeClarificationReply(),
       profile: nextProfile,
@@ -1468,20 +1406,6 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
       viewAllMatching: null,
       requiresClarification: true,
       options: result.options || PURPOSE_OPTIONS,
-      select: PURPOSE_SELECT,
-    };
-  }
-
-  if (result.needsBedrooms) {
-    return {
-      reply: result.clarificationReply || bedroomsClarificationReply(),
-      profile: nextProfile,
-      propertyCards: [],
-      sources: [],
-      suggestedCta: null,
-      viewAllMatching: null,
-      requiresClarification: true,
-      options: BEDROOM_OPTIONS,
       select: PURPOSE_SELECT,
     };
   }
@@ -1546,11 +1470,9 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   const sources = [];
   let leadCaptured = false;
   let profile = userProfile;
-  let lastSearchNeedsPurpose = false;
-  let lastSearchNeedsBedrooms = false;
+  let lastSearchNeedsSlot = false;
   let lastSearchNeedsEmptyResults = false;
-  let purposeClarifyReply = '';
-  let bedroomsClarifyReply = '';
+  let slotClarifyReply = '';
   let emptyClarifyReply = '';
   let emptyClarifyOptions = null;
   let viewAllMatching = null;
@@ -1754,9 +1676,20 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
 
       if (call.function?.name === 'search_properties') {
         const returnedCards = result.propertyCards?.length ?? 0;
-        if (result.needsPurpose || result.modelPayload?.needsPurpose) {
-          lastSearchNeedsPurpose = true;
-          purposeClarifyReply = result.clarificationReply || purposeClarificationReply();
+        const needsSlot =
+          result.needsPurpose ||
+          result.needsBedrooms ||
+          result.needsPropertyType ||
+          result.needsLocation ||
+          result.needsBudget ||
+          result.modelPayload?.needsPurpose ||
+          result.modelPayload?.needsBedrooms ||
+          result.modelPayload?.needsPropertyType ||
+          result.modelPayload?.needsLocation ||
+          result.modelPayload?.needsBudget;
+        if (needsSlot) {
+          lastSearchNeedsSlot = true;
+          slotClarifyReply = result.clarificationReply || purposeClarificationReply();
           clarificationOptions = result.options || PURPOSE_OPTIONS;
           if (result.effectiveFilters) {
             const nextFilters = copySearchFilters(result.effectiveFilters);
@@ -1765,23 +1698,12 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
             }
             profile = mergeProfile(profile, {
               lastSearchFilters: nextFilters,
-              slotFlow: { awaiting: 'purpose' },
-            });
-          }
-        }
-        if (result.needsBedrooms || result.modelPayload?.needsBedrooms) {
-          lastSearchNeedsBedrooms = true;
-          bedroomsClarifyReply = result.clarificationReply || bedroomsClarifyReply;
-          if (result.effectiveFilters) {
-            profile = mergeProfile(profile, {
-              lastSearchFilters: result.effectiveFilters,
-              slotFlow: { awaiting: 'bedrooms' },
+              slotFlow: result.profilePatch?.slotFlow || { awaiting: 'purpose' },
             });
           }
         }
         if (result.modelPayload?.skipped) {
-          lastSearchNeedsPurpose = false;
-          lastSearchNeedsBedrooms = false;
+          lastSearchNeedsSlot = false;
           lastSearchNeedsEmptyResults = false;
         } else if (result.needsEmptyResults || result.modelPayload?.needsEmptyResults) {
           lastSearchNeedsEmptyResults = true;
@@ -1797,8 +1719,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
           }
         }
         if (returnedCards > 0) {
-          lastSearchNeedsPurpose = false;
-          lastSearchNeedsBedrooms = false;
+          lastSearchNeedsSlot = false;
           lastSearchNeedsEmptyResults = false;
           viewAllMatching = result.viewAllMatching || null;
           profile = mergeProfile(profile, {
@@ -1816,9 +1737,9 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
       });
     }
 
-    if (lastSearchNeedsPurpose && propertyCards.length === 0) {
+    if (lastSearchNeedsSlot && propertyCards.length === 0) {
       return {
-        reply: purposeClarifyReply || purposeClarificationReply(),
+        reply: slotClarifyReply || purposeClarificationReply(),
         propertyCards: uniqueBy(propertyCards, (c) => c.id),
         sources: uniqueBy(sources, (s) => s.url || s.title),
         leadCaptured,
@@ -1826,20 +1747,6 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         viewAllMatching: null,
         requiresClarification: true,
         options: clarificationOptions || PURPOSE_OPTIONS,
-        select: PURPOSE_SELECT,
-      };
-    }
-
-    if (lastSearchNeedsBedrooms && propertyCards.length === 0) {
-      return {
-        reply: bedroomsClarifyReply || bedroomsClarificationReply(),
-        propertyCards: uniqueBy(propertyCards, (c) => c.id),
-        sources: uniqueBy(sources, (s) => s.url || s.title),
-        leadCaptured,
-        profile,
-        viewAllMatching: null,
-        requiresClarification: true,
-        options: BEDROOM_OPTIONS,
         select: PURPOSE_SELECT,
       };
     }

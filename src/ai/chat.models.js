@@ -52,6 +52,7 @@ const conversationSchema = new mongoose.Schema(
         bedroomsResolved: { type: Boolean, default: false },
         budgetMin: { type: Number, default: null },
         budgetMax: { type: Number, default: null },
+        budgetProvided: { type: Boolean, default: false },
         type: { type: String, default: null, trim: true },
         types: { type: [String], default: [] },
         purpose: { type: String, default: null, trim: true },
