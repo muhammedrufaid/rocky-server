@@ -86,6 +86,16 @@ function buildPathCPayload(result, reply, suggestedCta) {
     payload.options = result.options;
     payload.select = result.select || PURPOSE_SELECT;
   }
+  return attachPropertySearchMeta(payload, result);
+}
+
+function attachPropertySearchMeta(payload, source = {}) {
+  if (!payload || !source) return payload;
+  if (source.hasMore !== undefined) payload.hasMore = !!source.hasMore;
+  if (source.total !== undefined) payload.total = source.total;
+  if (source.returnedCount !== undefined) payload.returnedCount = source.returnedCount;
+  if (source.remaining !== undefined) payload.remaining = source.remaining;
+  if (source.nextCursor !== undefined) payload.nextCursor = source.nextCursor;
   return payload;
 }
 
@@ -1464,6 +1474,11 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
       requiresClarification: true,
       options: responseOpts,
       select: PURPOSE_SELECT,
+      hasMore: false,
+      total: result.total ?? 0,
+      returnedCount: 0,
+      remaining: 0,
+      nextCursor: null,
     };
   }
 
@@ -1476,6 +1491,11 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
     sources: result.sources || [],
     suggestedCta: null,
     viewAllMatching: result.viewAllMatching || null,
+    hasMore: !!result.hasMore,
+    total: result.total ?? result.modelPayload?.total ?? 0,
+    returnedCount: result.returnedCount ?? (result.propertyCards || []).length,
+    remaining: result.remaining ?? 0,
+    nextCursor: result.hasMore ? result.nextCursor || 'shownPropertyIds' : null,
   };
   if (Array.isArray(result.options) && result.options.length) {
     success.requiresClarification = true;
@@ -1513,6 +1533,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   let usedSearchProperties = false;
   let lastContentChunks = [];
   let searchContentHits = 0;
+  let lastSearchPagination = null;
 
   const snapshotMeta = () => metaFromLoopState(propertyCards, sources, viewAllMatching);
 
@@ -1627,6 +1648,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         leadCaptured,
         profile,
         viewAllMatching,
+        ...(lastSearchPagination || {}),
       };
     }
 
@@ -1707,6 +1729,13 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
       if (result.profilePatch) profile = mergeProfile(profile, result.profilePatch);
 
       if (call.function?.name === 'search_properties') {
+        lastSearchPagination = {
+          hasMore: !!result.hasMore,
+          total: result.total ?? result.modelPayload?.total ?? 0,
+          returnedCount: result.returnedCount ?? (result.propertyCards || []).length,
+          remaining: result.remaining ?? result.modelPayload?.remaining ?? 0,
+          nextCursor: result.hasMore ? result.nextCursor || 'shownPropertyIds' : null,
+        };
         const returnedCards = result.propertyCards?.length ?? 0;
         const needsSlot =
           result.needsPurpose ||
@@ -1780,6 +1809,8 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         requiresClarification: true,
         options: clarificationOptions || PURPOSE_OPTIONS,
         select: PURPOSE_SELECT,
+        hasMore: false,
+        nextCursor: null,
       };
     }
 
@@ -1794,6 +1825,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         requiresClarification: true,
         options: emptyClarifyOptions || emptyResultOptions(profile.lastSearchFilters || {}),
         select: PURPOSE_SELECT,
+        ...(lastSearchPagination || { hasMore: false, nextCursor: null }),
       };
     }
   }
@@ -1812,6 +1844,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
     leadCaptured,
     profile,
     viewAllMatching,
+    ...(lastSearchPagination || {}),
   };
 }
 
@@ -1932,6 +1965,7 @@ const chat = async (req, res) => {
         payload.options = forced.options;
         payload.select = forced.select || PURPOSE_SELECT;
       }
+      attachPropertySearchMeta(payload, forced);
       return res.status(200).json(payload);
     }
 

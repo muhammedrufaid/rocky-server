@@ -315,6 +315,7 @@ const LISTING_INTENTS = new Set([
 function emptySearchFilters() {
   return {
     location: null,
+    locationAny: false,
     bedrooms: null,
     bedroomsMin: null,
     bedroomsAny: false,
@@ -390,8 +391,12 @@ function uniqueIdList(list = []) {
 
 function copySearchFilters(filters = {}) {
   const types = typesFromFilters(filters);
+  const locationAny =
+    filters.locationAny === true || isUnrestrictedLocationPhrase(filters.location);
+  const location = locationAny ? null : sanitizeSearchLocation(filters.location);
   return {
-    location: filters.location || null,
+    location,
+    locationAny,
     bedrooms: filters.bedrooms ?? null,
     bedroomsMin: filters.bedroomsMin ?? null,
     bedroomsAny: !!filters.bedroomsAny,
@@ -505,6 +510,14 @@ function parseSellIntent(text) {
     /\b(can\s+i\s+sell|could\s+i\s+sell|am\s+i\s+allowed\s+to\s+sell|is\s+it\s+(?:possible|allowed)\s+to\s+sell|before\s+completion|how\s+(?:do|can|does)\s+(?:i|one|you)\s+sell|what\s+happens\s+if\s+i\s+sell|rules?\s+for\s+sell|sell(?:ing)?\s+(?:before|after|rules?|process|fees?))\b/.test(
       raw
     )
+  ) {
+    return false;
+  }
+  // "I need an apartment for sale" is a buy search, not list-my-property.
+  if (
+    /\b(i\s+(need|want|would\s+like)|looking\s+for|show\s+me|find(?:\s+me)?)\b/.test(raw) &&
+    /\bfor\s+sale\b/.test(raw) &&
+    !/\b(sell|selling|list(?:ing)?\s+my)\b/.test(raw)
   ) {
     return false;
   }
@@ -1406,7 +1419,7 @@ function describeTypeSingular(filters = {}) {
 }
 
 function foundListingsReply(filters = {}, total = 0, { isShowMore = false, newCount = 0 } = {}) {
-  const loc = (filters.location || '').toString().trim();
+  const area = describeLocationClause(filters);
   const beds = describeBedroomPhrase(filters);
   const count = Number.isFinite(Number(total)) ? Number(total) : 0;
   const shownNow = Number.isFinite(Number(newCount)) && newCount > 0 ? newCount : count;
@@ -1414,7 +1427,6 @@ function foundListingsReply(filters = {}, total = 0, { isShowMore = false, newCo
   let purposeBit = 'for sale';
   if (filters.purpose === 'Rent') purposeBit = 'to rent';
   if (filters.purpose === 'Off-plan') purposeBit = 'off-plan';
-  const area = loc ? ` in ${loc}` : '';
   const purposeSuffix = filters.purpose === 'Off-plan' ? '' : ` ${purposeBit}`;
   if (isShowMore) {
     const budgetBit = describeBudgetPossessive(filters);
@@ -1425,8 +1437,12 @@ function foundListingsReply(filters = {}, total = 0, { isShowMore = false, newCo
     .trim();
 }
 
-function moreMatchesOptions() {
-  return ['Show more', 'Change budget', 'Nearby areas'];
+function moreMatchesOptions(filters = {}, { hasMore = false } = {}) {
+  const opts = [];
+  if (hasMore) opts.push('Show more');
+  opts.push('Change budget');
+  if (hasLocationConstraint(filters)) opts.push('Nearby areas');
+  return opts;
 }
 
 function describeBudgetRange(filters = {}) {
@@ -1471,8 +1487,7 @@ function describeBudgetPossessive(filters = {}) {
 }
 
 function exactResultsExhaustedReply(filters = {}, stats = {}) {
-  const loc = (filters.location || '').toString().trim();
-  const area = loc ? ` in ${loc}` : '';
+  const area = describeLocationClause(filters);
   const segment = describeBedsAndType(filters, { plural: true });
   const budgetBit = describeBudgetRange(filters);
   const where = `${segment}${area}${budgetBit ? ` ${budgetBit}` : ''}`.replace(/\s+/g, ' ').trim();
@@ -1486,10 +1501,21 @@ function exactResultsExhaustedReply(filters = {}, stats = {}) {
   } else if (min) {
     lines.push(`Current ${segment}${area} start from around ${min}.`);
   }
-  lines.push(
-    'You can broaden the search by increasing your budget, trying a smaller unit, or checking nearby areas.'
-  );
+  lines.push(searchBroadenReply(filters, { budgetHint: true }));
   return lines.join('\n\n');
+}
+
+function bedroomFallbackOptions(filters = {}) {
+  if (!requiresBedroomsForSearch(filters)) return [];
+  const n = Number(filters.bedrooms);
+  if (Number.isFinite(n) && n >= 4) return ['Try 3 BR'];
+  if (Number.isFinite(n) && n >= 2) return ['Try 1 BR'];
+  if (n === 1) return ['Try Studio'];
+  return ['Change bedrooms'];
+}
+
+function nearbyFallbackOptions(filters = {}) {
+  return hasLocationConstraint(filters) ? ['Nearby areas'] : [];
 }
 
 function exactResultsExhaustedOptions(filters = {}) {
@@ -1497,40 +1523,51 @@ function exactResultsExhaustedOptions(filters = {}) {
   const capped = isBudgetProvided(filters) && (filters.budgetMin != null || filters.budgetMax != null);
   const anyBudget = isBudgetProvided(filters) && filters.budgetMin == null && filters.budgetMax == null;
   if (capped) opts.push('Increase budget');
-  const n = Number(filters.bedrooms);
-  if (Number.isFinite(n) && n >= 2) opts.push('Try 1 BR');
-  else if (n === 1) opts.push('Try Studio');
-  opts.push('Nearby areas');
+  opts.push(...bedroomFallbackOptions(filters).filter((opt) => opt !== 'Change bedrooms'));
+  opts.push(...nearbyFallbackOptions(filters));
   if (!anyBudget) opts.push('Any budget');
   if (!opts.includes('Increase budget') && !opts.includes('Any budget')) opts.push('Change budget');
   return opts;
 }
 
+function searchBroadenReply(filters = {}, { budgetHint = false } = {}) {
+  const parts = [];
+  if (budgetHint) parts.push('increasing your budget');
+  if (hasLocationConstraint(filters)) parts.push('checking nearby areas');
+  if (requiresBedroomsForSearch(filters)) parts.push('trying another bedroom configuration');
+  parts.push('trying a different property type');
+  if (!budgetHint && !requiresBedroomsForSearch(filters)) {
+    parts.unshift('changing your budget');
+  }
+  if (parts.length === 1) return `I can broaden the search by ${parts[0]}.`;
+  if (parts.length === 2) return `I can broaden the search by ${parts[0]} or ${parts[1]}.`;
+  return `I can broaden the search by ${parts.slice(0, -1).join(', ')}, or ${parts[parts.length - 1]}.`;
+}
+
 function noAdditionalSegmentReply(filters = {}) {
-  const loc = (filters.location || '').toString().trim() || 'that area';
   const segment = describeBedsAndType(filters, { plural: true });
+  const place = describeLocationClause(filters);
   return (
-    `I couldn't find any additional ${segment} currently available in ${loc}.\n\n` +
-    'I can broaden the search by trying nearby areas, another bedroom configuration, or a different property type.'
+    `I couldn't find any additional ${segment} currently available${place}.\n\n` +
+    searchBroadenReply(filters)
   );
 }
 
 function noAdditionalSegmentOptions(filters = {}) {
-  const opts = ['Nearby areas'];
-  const n = Number(filters.bedrooms);
-  if (Number.isFinite(n) && n >= 2) opts.push('Try 1 BR');
-  else if (n === 1) opts.push('Try Studio');
-  else opts.push('Change bedrooms');
-  opts.push('Change property type');
+  const opts = [...nearbyFallbackOptions(filters), ...bedroomFallbackOptions(filters), 'Change property type'];
+  if (!requiresBedroomsForSearch(filters) && !opts.includes('Change budget')) opts.push('Change budget');
   return opts;
 }
 
 function emptyResultsReply(filters = {}) {
-  const loc = (filters.location || 'that area').toString().trim() || 'that area';
-  const beds = describeBedroomPhrase(filters).trim(); // e.g. "1-bedroom" or ""
-  const type = describeTypeSingular(filters);         // e.g. "Villa" or "property"
+  const loc = hasLocationConstraint(filters)
+    ? String(filters.location).trim()
+    : '';
+  const beds = describeBedroomPhrase(filters).trim();
+  const type = describeTypeSingular(filters);
   const bedsType = beds ? `${beds} ${type.toLowerCase()}` : type.toLowerCase();
-  return `Looking for a ${bedsType} in ${loc} — let me check the closest options for you.`;
+  if (loc) return `Looking for a ${bedsType} in ${loc} — let me check the closest options for you.`;
+  return `Looking for a ${bedsType} — let me check the closest options for you.`;
 }
 
 /** Soft nearby-offer copy when the requested location has zero inventory for purpose+type. */
@@ -1549,14 +1586,19 @@ function locationEmptyNearbyReply(filters = {}, nearbyAreas = []) {
 }
 
 function emptyResultOptions(filters = {}) {
-  const opts = [];
-  const n = Number(filters.bedrooms);
-  const min = Number(filters.bedroomsMin);
-  if (min >= 4 || n >= 4) opts.push('Try 3 BR');
-  else if (n === 3) opts.push('Try 2 BR');
-  else if (n === 2) opts.push('Try 1 BR');
-  else if (n === 1) opts.push('Try Studio');
-  opts.push('Nearby areas', 'Change budget');
+  const opts = [...bedroomFallbackOptions(filters).filter((opt) => opt !== 'Change bedrooms')];
+  if (requiresBedroomsForSearch(filters)) {
+    const n = Number(filters.bedrooms);
+    const min = Number(filters.bedroomsMin);
+    const beds = [];
+    if (min >= 4 || n >= 4) beds.push('Try 3 BR');
+    else if (n === 3) beds.push('Try 2 BR');
+    else if (n === 2) beds.push('Try 1 BR');
+    else if (n === 1) beds.push('Try Studio');
+    opts.length = 0;
+    opts.push(...beds);
+  }
+  opts.push(...nearbyFallbackOptions(filters), 'Change budget');
   return opts;
 }
 
@@ -1895,7 +1937,9 @@ function getRequiredSearchFields(profileOrFilters = {}) {
     : copySearchFilters(profileOrFilters);
   const required = ['intent'];
   if (requiresBedroomsForSearch(filters)) required.push('bedrooms');
-  required.push('propertyType', 'location', 'budget');
+  required.push('propertyType');
+  if (!filters.locationAny) required.push('location');
+  required.push('budget');
   return required;
 }
 
@@ -1988,6 +2032,62 @@ function isUnspecifiedLocationPhrase(text) {
   );
 }
 
+/**
+ * True when the visitor wants no area/community restriction.
+ * "any location", "anywhere", "any area is fine", "anywhere in Dubai" clear the location filter.
+ * Distinct from isUnspecifiedLocationPhrase, which asks for a replacement area.
+ */
+function isUnrestrictedLocationPhrase(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  if (!raw) return false;
+  if (/\bany\s+budget\b/.test(raw) && !/\bany\s+(location|locations|area|areas|place|places|community|communities)\b/.test(raw)) {
+    if (!/\banywhere\b/.test(raw)) return false;
+  }
+  if (/\banywhere\s+near\b/.test(raw)) return false;
+  if (/\banywhere(\s+in\s+dubai)?\b/.test(raw)) return true;
+  if (/\b(any|all)\s+(location|locations|area|areas|place|places|community|communities)\b/.test(raw)) return true;
+  if (/\b(location|area|community)\s+(doesn'?t|does\s+not)\s+matter\b/.test(raw)) return true;
+  if (/\b(doesn'?t|does\s+not)\s+matter\s+where\b/.test(raw)) return true;
+  if (/\bno\s+(specific|particular|preferred)\s+(location|area|community)\b/.test(raw)) return true;
+  if (/\bno\s+preference\s+(on|for|about)\s+(the\s+)?(location|area|community|where)\b/.test(raw)) return true;
+  if (/\b(all\s+over\s+dubai|across\s+dubai|dubai[\s-]*wide)\b/.test(raw)) return true;
+  if (/\bwherever(\s+(in\s+dubai|is\s+fine|you\s+(have|can)))\b/.test(raw)) return true;
+  if (/^(any|anywhere|all areas|all locations)$/.test(raw)) return true;
+  if (/\bany\s+area\s+is\s+fine\b/.test(raw)) return true;
+  return false;
+}
+
+function sanitizeSearchLocation(value) {
+  const loc = String(value || '').trim();
+  if (!loc) return null;
+  if (isUnrestrictedLocationPhrase(loc) || isUnspecifiedLocationPhrase(loc) || isNonPlaceLocationToken(loc)) {
+    return null;
+  }
+  return loc;
+}
+
+function hasLocationConstraint(filters = {}) {
+  if (filters.locationAny === true) return false;
+  const loc = sanitizeSearchLocation(filters.location);
+  return !!loc;
+}
+
+function describeLocationClause(filters = {}, { fallback = '' } = {}) {
+  if (!hasLocationConstraint(filters)) return fallback ? ` ${fallback}` : '';
+  const loc = String(filters.location || '').trim();
+  return loc ? ` in ${loc}` : fallback ? ` ${fallback}` : '';
+}
+
+function applyUnrestrictedLocation(filters) {
+  if (!filters) return filters;
+  filters.location = null;
+  filters.locationAny = true;
+  return filters;
+}
+
 /** Words that look like "in X" but are not Dubai communities. */
 function isNonPlaceLocationToken(text) {
   const raw = String(text || '')
@@ -1995,6 +2095,12 @@ function isNonPlaceLocationToken(text) {
     .toLowerCase()
     .replace(/[.!?]/g, '');
   if (!raw) return true;
+  if (
+    /^(any|all|anywhere|wherever|somewhere)$/i.test(raw) ||
+    /^(any|all)\s+(location|locations|area|areas|place|places|community|communities)$/i.test(raw)
+  ) {
+    return true;
+  }
   if (
     /^(summer|winter|spring|autumn|fall|general|cash|aed|dirhams?|call|person|question|advance|full|part|total|future|past|present|dubai\s+property)$/i.test(
       raw
@@ -2084,7 +2190,7 @@ function locationStopSuffix() {
 function parseLocationFromMessage(text) {
   const raw = String(text || '').trim();
   if (!raw) return null;
-  if (isUnspecifiedLocationPhrase(raw)) return null;
+  if (isUnspecifiedLocationPhrase(raw) || isUnrestrictedLocationPhrase(raw)) return null;
   if (isPropertyUiAction(raw)) return null;
 
   const inPattern = new RegExp(
@@ -2094,7 +2200,12 @@ function parseLocationFromMessage(text) {
   const m = raw.match(inPattern);
   if (m) {
     const loc = m[1].trim();
-    if (loc && !isUnspecifiedLocationPhrase(loc) && !isNonPlaceLocationToken(loc)) {
+    if (
+      loc &&
+      !isUnspecifiedLocationPhrase(loc) &&
+      !isUnrestrictedLocationPhrase(loc) &&
+      !isNonPlaceLocationToken(loc)
+    ) {
       if (!isNonPlaceLocationToken(loc.split(/\s+/)[0])) {
         const alias = matchKnownAreaAlias(loc);
         return alias || loc;
@@ -2115,6 +2226,7 @@ function parseLocationFromMessage(text) {
     if (
       rest &&
       !isUnspecifiedLocationPhrase(rest) &&
+      !isUnrestrictedLocationPhrase(rest) &&
       !isNonPlaceLocationToken(rest) &&
       /^[A-Za-z0-9][A-Za-z0-9 '.-]{1,80}$/.test(rest) &&
       rest.split(/\s+/).length <= 6
@@ -2135,7 +2247,14 @@ function parseLocationReply(text) {
   const raw = String(text || '')
     .trim()
     .replace(/[.!?]/g, '');
-  if (!raw || isUnspecifiedLocationPhrase(raw) || isGeneralKnowledgeQuery(raw)) return null;
+  if (
+    !raw ||
+    isUnspecifiedLocationPhrase(raw) ||
+    isUnrestrictedLocationPhrase(raw) ||
+    isGeneralKnowledgeQuery(raw)
+  ) {
+    return null;
+  }
   if (isVagueConfirm(raw)) return null;
   if (parsePurposeFromMessage(raw)) return null;
   if (parseBedroomChoice(raw)) return null;
@@ -2237,7 +2356,9 @@ function nextMissingListingSlot(filters = {}) {
     if (field === 'intent' && !normalizePurpose(filters.purpose)) return 'intent';
     if (field === 'bedrooms' && !isBedroomsResolved(filters)) return 'bedrooms';
     if (field === 'propertyType' && !typesFromFilters(filters).length) return 'propertyType';
-    if (field === 'location' && !String(filters.location || '').trim()) return 'location';
+    if (field === 'location' && !filters.locationAny && !String(filters.location || '').trim()) {
+      return 'location';
+    }
     if (field === 'budget' && !isBudgetProvided(filters)) return 'budget';
   }
   return null;
@@ -2429,7 +2550,8 @@ function qualifyListingSearch(message, profile = {}) {
     !!last.location &&
     !!next.location &&
     last.location.trim().toLowerCase() !== next.location.trim().toLowerCase();
-  if (locationChanged) patch.resetShownPropertyIds = true;
+  const locationCleared = !!last.location && !next.location;
+  if (locationChanged || locationCleared) patch.resetShownPropertyIds = true;
   return { type: 'continue', profilePatch: patch, missing: null };
 }
 
@@ -2457,17 +2579,22 @@ function coalesceFilter(incoming, fallback) {
 
 function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
   const last = lastSearchFilters || {};
-  const locationProvided = isProvidedText(filters.location);
+  const incomingLocation = sanitizeSearchLocation(filters.location);
+  const locationProvided = isProvidedText(incomingLocation);
   const lastLocationSet = isProvidedText(last.location);
   const incomingTypes = typesFromFilters(filters);
   const lastTypes = typesFromFilters(last);
   const preservedTypes = lastTypes.length ? lastTypes : incomingTypes;
-  const locationChanged = locationProvided && lastLocationSet && textsDiffer(filters.location, last.location);
+  const locationChanged = locationProvided && lastLocationSet && textsDiffer(incomingLocation, last.location);
+  const incomingAny = filters.locationAny === true || isUnrestrictedLocationPhrase(filters.location);
 
   const merged = {
-    location: locationChanged
-      ? coalesceFilter(filters.location, null)
-      : coalesceFilter(filters.location, last.location),
+    location: incomingAny
+      ? null
+      : locationChanged
+        ? coalesceFilter(incomingLocation, null)
+        : coalesceFilter(incomingLocation, last.location),
+    locationAny: incomingAny || (!locationProvided && last.locationAny === true),
     bedrooms: last.bedrooms ?? null,
     bedroomsMin: last.bedroomsMin ?? null,
     bedroomsAny: last.bedroomsAny === true,
@@ -2478,6 +2605,7 @@ function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
     furnished: coalesceFilter(filters.furnished, last.furnished),
     purpose: last.purpose || null,
   };
+  if (locationProvided) merged.locationAny = false;
   applyTypesToFilters(merged, preservedTypes);
   return normalizeSearchProfileAfterPatch(last, merged);
 }
@@ -2536,6 +2664,7 @@ function isListingFollowUp(text) {
   if (parsePropertyTypeChange(raw)) return true;
   if (parsePropertyTypesFromMessage(raw).length > 1) return true;
   if (wantsDifferentLocation(raw)) return true;
+  if (isUnrestrictedLocationPhrase(raw)) return true;
   if (parseEmptyResultChoice(raw)) return true;
   if (isAmbiguousListingQuery(raw)) return true;
   if (parseLocationFromMessage(raw)) return true;
@@ -2850,16 +2979,27 @@ function applyMessageToSearchFilters(filters, message, { awaiting } = {}) {
   }
 
   const types = parsePropertyTypesFromMessage(message);
-  let location = parseLocationFromMessage(message);
-  if (!location && (awaiting === 'location' || awaiting === 'nearbyArea')) {
+  const awaitingLocation = awaiting === 'location' || awaiting === 'nearbyArea';
+  const standaloneAnyLocation =
+    awaitingLocation && /^(any|all|anywhere|skip|no preference)$/i.test(raw.replace(/[.!?]/g, ''));
+  const unrestrictedLocation = isUnrestrictedLocationPhrase(raw) || standaloneAnyLocation;
+  let location = unrestrictedLocation ? null : parseLocationFromMessage(message);
+  if (!unrestrictedLocation && !location && awaitingLocation) {
     location = parseLocationReply(message);
   }
-  const beds = awaiting === 'budget' ? null : parseBedroomChoice(message);
+  const skipBedsForLocationAny =
+    unrestrictedLocation && !/\b(studio|bed|br|bhk|bedroom)s?\b/i.test(raw);
+  const beds = awaiting === 'budget' || skipBedsForLocationAny ? null : parseBedroomChoice(message);
   const budget = parseBudgetFromMessage(message, { requireBudgetContext: awaiting === 'budget' });
   const furnished = parseFurnishedFromMessage(message);
   const purpose = parsePurposeFromMessage(message);
   if (types.length) applyTypesToFilters(next, mergePropertyTypes(typesFromFilters(next), types, message));
-  if (location) next.location = location;
+  if (unrestrictedLocation) {
+    applyUnrestrictedLocation(next);
+  } else if (location) {
+    next.location = location;
+    next.locationAny = false;
+  }
   if (beds) applyBedroomChoice(next, beds);
   if (budget) applyBudgetChoice(next, budget);
   if (furnished) next.furnished = furnished;
@@ -2880,7 +3020,7 @@ function listingIntakeReply(intent) {
 }
 
 function needsListingIntake(filters = {}) {
-  return !filters.location && !typesFromFilters(filters).length;
+  return !filters.location && !filters.locationAny && !typesFromFilters(filters).length;
 }
 
 function parseConversationIntent(text) {
@@ -3121,7 +3261,7 @@ async function fetchPropertyCards(filters, search) {
   const opts = listingQueryOpts(filters, search);
   const requested = normalizePurpose(filters.purpose);
   if (!requested) {
-    return { propertyCards: [], usedPurpose: null, total: 0, remaining: 0 };
+    return { propertyCards: [], usedPurpose: null, total: 0, remainingAfterExclude: 0 };
   }
   const exclude = uniqueIdList(filters.excludeRefNos || []);
   const unfilteredOpts = {
@@ -3134,13 +3274,48 @@ async function fetchPropertyCards(filters, search) {
     ? await fetchByPurpose(requested, unfilteredOpts)
     : null;
   const result = await fetchByPurpose(requested, opts);
-  const total = exclude.length ? unfiltered.total || 0 : result.total || 0;
+  const remainingAfterExclude = result.total || 0;
+  const total = exclude.length ? unfiltered.total || 0 : remainingAfterExclude;
   return {
     propertyCards: dedupePropertyCards((result.properties || []).map(toPropertyCard)),
     usedPurpose: requested,
     total,
-    remaining: result.total || 0,
+    remainingAfterExclude,
   };
+}
+
+function searchPaginationMeta({
+  total = 0,
+  remainingAfterExclude = 0,
+  returnedCount = 0,
+  shownCount = 0,
+} = {}) {
+  const remaining = Math.max(0, (Number(remainingAfterExclude) || 0) - (Number(returnedCount) || 0));
+  return {
+    total: Number(total) || 0,
+    returnedCount: Number(returnedCount) || 0,
+    shownCount: Number(shownCount) || 0,
+    remaining,
+    hasMore: remaining > 0,
+    nextCursor: remaining > 0 ? 'shownPropertyIds' : null,
+  };
+}
+
+function attachSearchPagination(result, pagination = {}) {
+  if (!result) return result;
+  result.hasMore = !!pagination.hasMore;
+  result.total = pagination.total ?? 0;
+  result.returnedCount = pagination.returnedCount ?? 0;
+  result.remaining = pagination.remaining ?? 0;
+  result.nextCursor = pagination.hasMore ? pagination.nextCursor || 'shownPropertyIds' : null;
+  if (result.modelPayload && typeof result.modelPayload === 'object') {
+    result.modelPayload.total = result.total;
+    result.modelPayload.returnedCount = result.returnedCount;
+    result.modelPayload.remaining = result.remaining;
+    result.modelPayload.hasMore = result.hasMore;
+    result.modelPayload.nextCursor = result.nextCursor;
+  }
+  return result;
 }
 
 function propertySearchResult(propertyCards, filters, extraPayload = {}, viewAllMatching = null) {
@@ -3286,7 +3461,8 @@ function describeBedsAndType(filters = {}, { plural = false } = {}) {
 }
 
 function budgetTooLowReply(filters = {}, stats = {}) {
-  const loc = (filters.location || 'that area').toString().trim() || 'that area';
+  const loc = hasLocationConstraint(filters) ? String(filters.location).trim() : '';
+  const area = loc ? ` in ${loc}` : '';
   const segment = describeBedsAndType(filters, { plural: true });
   const budgetLabel = describeBudgetBare(filters);
   const min = stats.minimumPrice != null ? formatAed(stats.minimumPrice) : null;
@@ -3294,44 +3470,37 @@ function budgetTooLowReply(filters = {}, stats = {}) {
 
   const lines = [
     budgetLabel
-      ? `No ${segment} matched your ${budgetLabel} budget in ${loc}.`
-      : `I couldn't find any ${segment} in ${loc} within the stated budget.`,
+      ? `No ${segment} matched your ${budgetLabel} budget${area}.`
+      : `I couldn't find any ${segment}${area} within the stated budget.`,
   ];
   if (min && avg) {
     lines.push(
-      `Current available ${segment} in ${loc} start from around ${min}, with an average asking price of ${avg}.`
+      `Current available ${segment}${area} start from around ${min}, with an average asking price of ${avg}.`
     );
   } else if (min) {
-    lines.push(`Current available ${segment} in ${loc} start from around ${min}.`);
+    lines.push(`Current available ${segment}${area} start from around ${min}.`);
   }
   return lines.join('\n\n');
 }
 
 function budgetTooLowOptions(filters = {}) {
-  const opts = ['Increase budget', 'Any budget', 'Nearby areas'];
-  const n = Number(filters.bedrooms);
-  if (requiresBedroomsForSearch(filters) && Number.isFinite(n) && n >= 2) {
-    opts.push('Try 1 BR');
-  } else if (requiresBedroomsForSearch(filters) && n === 1) {
-    opts.push('Try Studio');
-  }
+  const opts = ['Increase budget', 'Any budget', ...nearbyFallbackOptions(filters)];
+  opts.push(...bedroomFallbackOptions(filters).filter((opt) => opt !== 'Change bedrooms'));
   return opts;
 }
 
 function noInventoryReply(filters = {}) {
-  const loc = (filters.location || 'that area').toString().trim() || 'that area';
+  const area = describeLocationClause(filters);
   const segment = describeBedsAndType(filters, { plural: true });
   const purposeBit = purposePhrase(filters);
-  const broaden = requiresBedroomsForSearch(filters)
-    ? 'I can broaden the search to nearby areas, another property type, or a different bedroom configuration.'
-    : 'I can broaden the search to nearby areas or another property type.';
-  return `I couldn't find currently available ${segment} ${purposeBit} in ${loc}.\n\n${broaden}`;
+  return `I couldn't find currently available ${segment} ${purposeBit}${area}.\n\n${searchBroadenReply(filters)}`;
 }
 
 function noInventoryOptions(filters = {}) {
-  const opts = ['Nearby areas'];
+  const opts = [...nearbyFallbackOptions(filters)];
   if (requiresBedroomsForSearch(filters)) opts.push('Change bedrooms');
   opts.push('Property type');
+  if (!requiresBedroomsForSearch(filters)) opts.push('Change budget');
   return opts;
 }
 
@@ -3545,13 +3714,15 @@ async function buildAlternativeChips(effectiveFilters, { nearbyOnly = false } = 
   const candidates = [];
 
   // A — nearby areas with same type + same bedrooms
-  const nearbyAreas = nearbyAreaOptions(location);
-  for (const area of nearbyAreas.slice(0, 3)) {
-    candidates.push({
-      label: nearbyAreaChipLabel(area, effectiveFilters),
-      patch: { location: area },
-      priority: 1,
-    });
+  if (hasLocationConstraint(effectiveFilters)) {
+    const nearbyAreas = nearbyAreaOptions(location);
+    for (const area of nearbyAreas.slice(0, 3)) {
+      candidates.push({
+        label: nearbyAreaChipLabel(area, effectiveFilters),
+        patch: { location: area },
+        priority: 1,
+      });
+    }
   }
 
   // B — same location + alternative property types
@@ -3565,13 +3736,15 @@ async function buildAlternativeChips(effectiveFilters, { nearbyOnly = false } = 
   }
 
   // C — adjacent bedroom counts at same location + same type
-  const adjBeds = adjacentBedroomCounts(effectiveFilters);
-  for (const adj of adjBeds) {
-    candidates.push({
-      label: adj.label,
-      patch: { bedroomChoice: { exact: adj.exact } },
-      priority: 3,
-    });
+  if (requiresBedroomsForSearch(effectiveFilters)) {
+    const adjBeds = adjacentBedroomCounts(effectiveFilters);
+    for (const adj of adjBeds) {
+      candidates.push({
+        label: adj.label,
+        patch: { bedroomChoice: { exact: adj.exact } },
+        priority: 3,
+      });
+    }
   }
 
   // Probe each candidate concurrently
@@ -3919,31 +4092,37 @@ async function searchProperties(
     !!previousLocation &&
     !!effectiveFilters.location &&
     textsDiffer(previousLocation, effectiveFilters.location);
+  const locationCleared = !!previousLocation && !effectiveFilters.location;
   const purposeChanged =
     !!normalizePurpose(lastSearchFilters?.purpose) &&
     !!purpose &&
     normalizePurpose(lastSearchFilters?.purpose) !== purpose;
-  const resetShown = locationChanged || purposeChanged;
+  const resetShown = locationChanged || locationCleared || purposeChanged;
 
   const excludeIds = resetShown ? [] : uniqueIdList(shownPropertyIds);
   effectiveFilters.excludeRefNos = excludeIds;
 
   console.log(
-    'search_properties purpose gate:',
+    'PROPERTY_SEARCH_STATE',
     JSON.stringify({
-      toolPurpose: filters.purpose ?? null,
-      trustedPurpose: purpose,
-      lastPurpose: lastSearchFilters?.purpose ?? null,
-      fromMessage: parsePurposeFromMessage(userMessage),
-      types: typesFromFilters(effectiveFilters),
+      rawText: userMessage || '',
+      previous: {
+        location: lastSearchFilters?.location || null,
+        locationAny: !!lastSearchFilters?.locationAny,
+        type: lastSearchFilters?.type || null,
+        purpose: lastSearchFilters?.purpose || null,
+        bedrooms: lastSearchFilters?.bedrooms ?? null,
+      },
+      normalized: {
+        location: effectiveFilters.location || null,
+        locationAny: !!effectiveFilters.locationAny,
+        type: effectiveFilters.type || null,
+        types: typesFromFilters(effectiveFilters),
+        purpose: purpose || effectiveFilters.purpose || null,
+        category: searchCategory(effectiveFilters),
+      },
       showMore,
       excludeCount: excludeIds.length,
-      toolBedrooms: filters.bedrooms ?? null,
-      trustedBedrooms: effectiveFilters.bedrooms ?? null,
-      bedroomsResolved: !!effectiveFilters.bedroomsResolved,
-      toolBudgetMax: filters.budgetMax ?? null,
-      trustedBudgetMax: effectiveFilters.budgetMax ?? null,
-      budgetProvided: !!effectiveFilters.budgetProvided,
     })
   );
 
@@ -3952,12 +4131,15 @@ async function searchProperties(
     return missingSlotResult(missing, effectiveFilters);
   }
 
-  const search = (effectiveFilters.location || '').toString().trim();
+  const search = hasLocationConstraint(effectiveFilters)
+    ? String(effectiveFilters.location).trim()
+    : '';
   console.log(
     'search_properties executing:',
     JSON.stringify({
       purpose,
       location: search || null,
+      locationAny: !!effectiveFilters.locationAny,
       type: effectiveFilters.type || null,
       types: typesFromFilters(effectiveFilters),
       bedrooms: effectiveFilters.bedrooms ?? null,
@@ -3968,27 +4150,81 @@ async function searchProperties(
       excludeCount: excludeIds.length,
     })
   );
-  const { propertyCards, usedPurpose, total, remaining } = await fetchPropertyCards(
+  const { propertyCards, usedPurpose, total, remainingAfterExclude } = await fetchPropertyCards(
     effectiveFilters,
     search
   );
   effectiveFilters.purpose = usedPurpose;
   delete effectiveFilters.excludeRefNos;
 
+  const pagination = searchPaginationMeta({
+    total,
+    remainingAfterExclude,
+    returnedCount: propertyCards.length,
+    shownCount: excludeIds.length,
+  });
+  console.log(
+    'PROPERTY_SEARCH_RESULTS',
+    JSON.stringify({
+      filters: {
+        location: search || null,
+        type: effectiveFilters.type || null,
+        purpose: usedPurpose || null,
+      },
+      returned: propertyCards.length,
+      total: pagination.total,
+      remaining: pagination.remaining,
+      hasMore: pagination.hasMore,
+    })
+  );
+
   if (propertyCards.length === 0) {
     if (excludeIds.length && total > 0) {
-      return exhaustedResultsResult(effectiveFilters, {
+      const exhausted = await exhaustedResultsResult(effectiveFilters, {
         shownCount: excludeIds.length,
         excludeRefNos: excludeIds,
       });
+      console.log(
+        'PROPERTY_SEARCH_ACTIONS',
+        JSON.stringify({
+          propertyType: effectiveFilters.type || null,
+          category: searchCategory(effectiveFilters),
+          actions: exhausted.options || [],
+        })
+      );
+      return attachSearchPagination(exhausted, {
+        total,
+        returnedCount: 0,
+        remaining: 0,
+        hasMore: false,
+        shownCount: excludeIds.length,
+      });
     }
-    return emptyResultsResult(effectiveFilters);
+    const empty = await emptyResultsResult(effectiveFilters);
+    console.log(
+      'PROPERTY_SEARCH_ACTIONS',
+      JSON.stringify({
+        propertyType: effectiveFilters.type || null,
+        category: searchCategory(effectiveFilters),
+        actions: empty.options || [],
+      })
+    );
+    return attachSearchPagination(empty, {
+      total,
+      returnedCount: 0,
+      remaining: 0,
+      hasMore: false,
+      shownCount: excludeIds.length,
+    });
   }
 
   const extraPayload = {
     requestedLocation: search || null,
-    total,
-    remaining,
+    total: pagination.total,
+    remaining: pagination.remaining,
+    returnedCount: pagination.returnedCount,
+    hasMore: pagination.hasMore,
+    nextCursor: pagination.nextCursor,
   };
   const result = propertySearchResult(
     propertyCards,
@@ -4011,14 +4247,27 @@ async function searchProperties(
     newCount: propertyCards.length,
   });
   if (showMore) {
-    result.options = moreMatchesOptions();
-    result.requiresClarification = true;
-    result.select = PURPOSE_SELECT;
+    const opts = moreMatchesOptions(effectiveFilters, { hasMore: pagination.hasMore });
+    if (opts.length) {
+      result.options = opts;
+      result.requiresClarification = true;
+      result.select = PURPOSE_SELECT;
+    }
   }
   result.modelPayload = {
     ...(result.modelPayload || {}),
     searchOutcome: SEARCH_OUTCOME.MATCHES_FOUND,
   };
+  attachSearchPagination(result, pagination);
+  console.log(
+    'PROPERTY_SEARCH_ACTIONS',
+    JSON.stringify({
+      propertyType: effectiveFilters.type || null,
+      category: searchCategory(effectiveFilters),
+      actions: result.options || [],
+      hasMore: result.hasMore,
+    })
+  );
   return result;
 }
 
@@ -4329,6 +4578,8 @@ module.exports = {
   parseLocationFromMessage,
   parseLocationReply,
   wantsDifferentLocation,
+  isUnrestrictedLocationPhrase,
+  hasLocationConstraint,
   locationClarificationReply,
   parseDesiredPropertyType,
   parsePropertyTypeChange,
@@ -4367,6 +4618,7 @@ module.exports = {
   exactResultsExhaustedOptions,
   exactResultsExhaustedReply,
   noAdditionalSegmentOptions,
+  noAdditionalSegmentReply,
   noMoreExactOptions: exactResultsExhaustedOptions,
   noMoreExactMatchesReply: exactResultsExhaustedReply,
 };

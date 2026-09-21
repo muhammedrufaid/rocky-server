@@ -32,6 +32,7 @@ function getSystemPrompt(userProfile = {}) {
     intent: userProfile.intent || null,
     lastSearchFilters: userProfile.lastSearchFilters || {
       location: null,
+      locationAny: false,
       bedrooms: null,
       bedroomsMin: null,
       bedroomsAny: false,
