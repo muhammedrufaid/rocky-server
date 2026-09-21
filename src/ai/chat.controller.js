@@ -1396,7 +1396,7 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
     };
   }
 
-  return {
+  const success = {
     reply:
       result.replyOverride ||
       foundListingsReply(result.effectiveFilters || nextProfile.lastSearchFilters, result.modelPayload?.total),
@@ -1406,6 +1406,12 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
     suggestedCta: null,
     viewAllMatching: result.viewAllMatching || null,
   };
+  if (Array.isArray(result.options) && result.options.length) {
+    success.requiresClarification = true;
+    success.options = result.options;
+    success.select = result.select || PURPOSE_SELECT;
+  }
+  return success;
 }
 
 async function runModelLoop({ sessionId, userProfile, history, userMessage, turnIndex, sse = null }) {
@@ -1782,24 +1788,28 @@ const chat = async (req, res) => {
       profile = slotResult.profile;
     }
 
-    const bedroomGate = bedroomClarifyIfNeeded(message, profile);
-    if (bedroomGate) {
-      return clarificationResponse(res, {
-        reply: bedroomGate.reply,
-        profile: bedroomGate.profile,
-        conversation,
-        message,
-        options: bedroomGate.options,
-      });
+    if (!isShowMoreRequest(message)) {
+      const bedroomGate = bedroomClarifyIfNeeded(message, profile);
+      if (bedroomGate) {
+        return clarificationResponse(res, {
+          reply: bedroomGate.reply,
+          profile: bedroomGate.profile,
+          conversation,
+          message,
+          options: bedroomGate.options,
+        });
+      }
     }
 
     const last = profile.lastSearchFilters || emptySearchFilters();
     const listingReady =
       isListingIntent(profile.intent) ||
       !!(parsePurposeFromMessage(message) || last.purpose || profile.purpose);
+    const listingContinuation =
+      isShowMoreRequest(message) &&
+      (isListingIntent(profile.intent) || !!(profile.purpose || last.purpose));
     const canSearchNow =
-      slotResult?.type === 'continue' &&
-      listingReady &&
+      ((slotResult?.type === 'continue' && listingReady) || listingContinuation) &&
       profile.intent !== CONVERSATION_INTENTS.SELL_PROPERTY &&
       profile.intent !== CONVERSATION_INTENTS.PROPERTY_MANAGEMENT;
 

@@ -290,6 +290,7 @@ const SEARCH_OUTCOME = {
   MATCHES_FOUND: 'MATCHES_FOUND',
   BUDGET_TOO_LOW: 'BUDGET_TOO_LOW',
   NO_INVENTORY: 'NO_INVENTORY',
+  NO_MORE_MATCHES: 'NO_MORE_MATCHES',
 };
 
 const LISTING_INTENTS = new Set([
@@ -425,9 +426,7 @@ function isPropertyUiAction(text) {
     .toLowerCase()
     .replace(/[.!?]/g, '');
   if (!raw) return false;
-  return /^(view listing|book a viewing|see similar properties|view all matching properties|talk to an agent)$/.test(
-    raw
-  );
+  return /^(view listing|book a viewing|view all matching properties|talk to an agent)$/.test(raw);
 }
 
 function normalizePurpose(value) {
@@ -1093,13 +1092,59 @@ function foundListingsReply(filters = {}, total = 0, { isShowMore = false, newCo
   const area = loc ? ` in ${loc}` : '';
   const purposeSuffix = filters.purpose === 'Off-plan' ? '' : ` ${purposeBit}`;
   if (isShowMore) {
-    return `Here are ${shownNow} more matching ${beds}${type}${area}${purposeSuffix}.`
-      .replace(/\s+/g, ' ')
-      .trim();
+    const budgetBit =
+      isBudgetProvided(filters) && (filters.budgetMin != null || filters.budgetMax != null)
+        ? ' within your budget'
+        : '';
+    return `Here are more ${beds}${type}${area}${budgetBit}.`.replace(/\s+/g, ' ').trim();
   }
   return `I found ${count} ${beds}${type}${area}${purposeSuffix}. Would you like the details?`
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function moreMatchesOptions() {
+  return ['See more', 'Change budget', 'Nearby areas'];
+}
+
+function describeBudgetRange(filters = {}) {
+  const min = Number(filters.budgetMin);
+  const max = Number(filters.budgetMax);
+  const hasMin = Number.isFinite(min);
+  const hasMax = Number.isFinite(max);
+  if (hasMin && hasMax) {
+    const maxLabel = formatAed(max).replace(/^AED\s/, '');
+    return `within ${formatAed(min)}–${maxLabel}`;
+  }
+  if (hasMax) return `within ${formatAed(max)}`;
+  if (hasMin) return `from ${formatAed(min)}`;
+  return '';
+}
+
+function noMoreExactMatchesReply(filters = {}) {
+  const loc = (filters.location || '').toString().trim();
+  const area = loc ? ` in ${loc}` : '';
+  const segment = describeBedsAndType(filters, { plural: true });
+  const budgetBit = describeBudgetRange(filters);
+  const where = `${segment}${area}${budgetBit ? ` ${budgetBit}` : ''}`;
+  return (
+    `I couldn't find any more ${where}.\n\n` +
+    'Would you like me to broaden the search?'
+  ).replace(/\s+\n/g, '\n');
+}
+
+function noMoreExactOptions(filters = {}) {
+  const opts = [];
+  const capped = isBudgetProvided(filters) && (filters.budgetMin != null || filters.budgetMax != null);
+  const anyBudget = isBudgetProvided(filters) && filters.budgetMin == null && filters.budgetMax == null;
+  if (capped) opts.push('Increase budget');
+  opts.push('Nearby areas');
+  const n = Number(filters.bedrooms);
+  if (Number.isFinite(n) && n >= 2) opts.push('1 BR');
+  else if (n === 1) opts.push('Studio');
+  if (!anyBudget) opts.push('Any budget');
+  if (!opts.includes('Increase budget') && !opts.includes('Any budget')) opts.push('Change budget');
+  return opts;
 }
 
 function emptyResultsReply(filters = {}) {
@@ -1160,7 +1205,7 @@ function parseEmptyResultChoice(text) {
   const raw = String(text || '').trim();
   if (!raw) return null;
   if (/^nearby areas$/i.test(raw)) return { nearby: true };
-  if (/^change budget$/i.test(raw)) return { budget: true };
+  if (/^(change|increase) budget$/i.test(raw)) return { budget: true };
   if (/^change bedrooms$/i.test(raw)) return { askBedrooms: true };
   if (/^property type$/i.test(raw)) return { askType: true };
   const tryBr = raw.match(/^try\s+(.+)$/i);
@@ -1342,14 +1387,21 @@ function isShowMoreRequest(text) {
   if (/\btell\s+me\s+more\b/.test(raw) || /\bmore\s+details\b/.test(raw) || /\bthe\s+(first|second|third)\b/.test(raw)) {
     return false;
   }
+  if (/^see similar( properties)?$/.test(raw)) return true;
   if (
-    /^(show(\s+me)?\s+more(\s+(properties|listings|options|results|please))?|more(\s+(properties|listings|options|results|please))?|see\s+more|another(\s+(ones?|properties|listings|options))?|next(\s+(page|batch|set|ones?))?)$/i.test(
+    /^(show(\s+me)?\s+more(\s+(properties|listings|options|results|please))?|more(\s+(properties|listings|options|results|please))?|see\s+more(\s+(properties|listings|options|results))?|another(\s+(ones?|properties|listings|options))?|next(\s+(page|batch|set|ones?))?)$/i.test(
       raw
     )
   ) {
     return true;
   }
   return /\b(show|see|give)\s+(me\s+)?more(\s+(properties|listings|options|results))?\b/.test(raw);
+}
+
+function hasActiveListingSearch(profile = {}) {
+  if (isListingIntent(profile.intent)) return true;
+  if (normalizePurpose(profile.purpose || profile.lastSearchFilters?.purpose)) return true;
+  return false;
 }
 
 function filtersFromRequestBody(body = {}) {
@@ -1675,7 +1727,10 @@ function qualifyListingSearch(message, profile = {}) {
   ) {
     return null;
   }
-  if (['emptyResults', 'alternatives', 'nearbyArea'].includes(awaiting) && parseEmptyResultChoice(message)) {
+  if (
+    ['emptyResults', 'alternatives', 'nearbyArea'].includes(awaiting) &&
+    (parseEmptyResultChoice(message)?.askType || parseEmptyResultChoice(message)?.askBedrooms)
+  ) {
     return null;
   }
 
@@ -1714,6 +1769,42 @@ function qualifyListingSearch(message, profile = {}) {
     !isListingFollowUp(message)
   ) {
     return null;
+  }
+
+  const emptyChoice = parseEmptyResultChoice(message);
+  if ((hasListingContext || extracted) && emptyChoice?.budget) {
+    next.budgetProvided = false;
+    next.budgetMin = null;
+    next.budgetMax = null;
+    const budgetQuestion = listingSlotQuestion('budget', next);
+    return {
+      type: 'clarify',
+      missing: 'budget',
+      profilePatch: {
+        purpose: next.purpose || profile.purpose,
+        intent: purposeToIntent(next.purpose) || profile.intent,
+        preferredAreas: next.location ? [next.location] : undefined,
+        bedrooms: next.bedrooms ?? next.bedroomsMin ?? profile.bedrooms,
+        lastSearchFilters: next,
+        slotFlow: { awaiting: 'budget', alternatives: null },
+      },
+      reply: budgetQuestion.reply,
+      options: budgetQuestion.options,
+    };
+  }
+  if ((hasListingContext || extracted) && emptyChoice?.nearby) {
+    return {
+      type: 'clarify',
+      missing: 'location',
+      profilePatch: {
+        purpose: next.purpose || profile.purpose,
+        intent: purposeToIntent(next.purpose) || profile.intent,
+        lastSearchFilters: next,
+        slotFlow: { awaiting: 'nearbyArea', alternatives: null },
+      },
+      reply: 'Which nearby area should I try?',
+      options: nearbyAreaOptions(next.location),
+    };
   }
 
   const missing = nextMissingListingSlot(next);
@@ -3063,15 +3154,6 @@ async function emptyResultsResult(effectiveFilters) {
 }
 
 function exhaustedResultsResult(effectiveFilters, shownCount = 0) {
-  const loc = (effectiveFilters.location || '').toString().trim();
-  const area = loc ? ` in ${loc}` : '';
-  const type = describeTypePhrase(effectiveFilters, shownCount);
-  const purposeBit =
-    effectiveFilters.purpose === 'Rent'
-      ? 'to rent'
-      : effectiveFilters.purpose === 'Off-plan'
-        ? 'off-plan'
-        : 'for sale';
   return {
     propertyCards: [],
     sources: [],
@@ -3084,18 +3166,18 @@ function exhaustedResultsResult(effectiveFilters, shownCount = 0) {
     viewAllMatching: null,
     effectiveFilters,
     needsEmptyResults: true,
-    clarificationReply: `I've already shown the matching ${type}${area} ${purposeBit}. Would you like to adjust the area, bedrooms, budget, or property type?`
-      .replace(/\s+/g, ' ')
-      .trim(),
-    options: emptyResultOptions(effectiveFilters),
+    searchOutcome: SEARCH_OUTCOME.NO_MORE_MATCHES,
+    clarificationReply: noMoreExactMatchesReply(effectiveFilters),
+    options: noMoreExactOptions(effectiveFilters),
     ...emptyResultsClarificationFields(),
     modelPayload: {
       count: 0,
       needsEmptyResults: true,
       exhausted: true,
+      searchOutcome: SEARCH_OUTCOME.NO_MORE_MATCHES,
       shownCount,
       instruction:
-        'All matching listings for this search were already shown. Do not repeat previous property cards. Do not invent new listings.',
+        'All matching listings for this search were already shown. Do not repeat previous property cards. Do not invent new listings. Do not say you cannot pull matches — the server already searched.',
     },
   };
 }
@@ -3105,10 +3187,8 @@ async function searchProperties(
   { lastSearchFilters, slotFlow, userMessage, intent, shownPropertyIds = [] } = {}
 ) {
   const lockedIntent = normalizeIntentValue(intent);
-  if (
-    shouldSkipPropertySearch(userMessage) &&
-    !isShowMoreRequest(userMessage)
-  ) {
+  const showMore = isShowMoreRequest(userMessage);
+  if (shouldSkipPropertySearch(userMessage) && !showMore) {
     return {
       propertyCards: [],
       sources: [],
@@ -3123,7 +3203,7 @@ async function searchProperties(
       },
     };
   }
-  if (isPropertyUiAction(userMessage)) {
+  if (isPropertyUiAction(userMessage) && !showMore) {
     return {
       propertyCards: [],
       sources: [],
@@ -3165,7 +3245,6 @@ async function searchProperties(
   const effectiveFilters = resolveEffectiveFilters(filters, lastSearchFilters);
   clearUntrustedBedrooms(effectiveFilters);
 
-  const showMore = isShowMoreRequest(userMessage);
   if (!showMore) {
     const overlaid = applyMessageToSearchFilters(effectiveFilters, userMessage, {
       awaiting: slotFlow?.awaiting,
@@ -3269,6 +3348,11 @@ async function searchProperties(
     isShowMore: showMore && excludeIds.length > 0,
     newCount: propertyCards.length,
   });
+  if (showMore) {
+    result.options = moreMatchesOptions();
+    result.requiresClarification = true;
+    result.select = PURPOSE_SELECT;
+  }
   result.modelPayload = {
     ...(result.modelPayload || {}),
     searchOutcome: SEARCH_OUTCOME.MATCHES_FOUND,
@@ -3501,6 +3585,7 @@ module.exports = {
   typesFromFilters,
   applyTypesToFilters,
   isShowMoreRequest,
+  hasActiveListingSearch,
   filtersFromRequestBody,
   uniqueIdList,
   listingQueryOpts,
@@ -3579,4 +3664,7 @@ module.exports = {
   PROPERTY_TYPE_OPTIONS,
   budgetClarificationReply,
   propertyTypeClarificationReply,
+  moreMatchesOptions,
+  noMoreExactOptions,
+  noMoreExactMatchesReply,
 };

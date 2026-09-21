@@ -95,9 +95,12 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
 
   const match = [];
 
-  const excludeRefNos = Array.isArray(filters.excludeRefNos)
-    ? filters.excludeRefNos.map((v) => String(v || '').trim()).filter(Boolean)
-    : [];
+  const excludeRefNos = [
+    ...(Array.isArray(filters.excludeRefNos) ? filters.excludeRefNos : []),
+    ...(Array.isArray(filters.excludePropertyRefNos) ? filters.excludePropertyRefNos : []),
+  ]
+    .map((v) => String(v || '').trim())
+    .filter(Boolean);
   if (excludeRefNos.length) {
     match.push({ propertyRefNo: { $nin: excludeRefNos } });
   }

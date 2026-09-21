@@ -56,6 +56,7 @@ const {
   typesFromFilters,
   applyTypesToFilters,
   isShowMoreRequest,
+  hasActiveListingSearch,
   filtersFromRequestBody,
   uniqueIdList,
   listingQueryOpts,
@@ -78,6 +79,8 @@ const {
   BUY_BUDGET_OPTIONS,
   RENT_BUDGET_OPTIONS,
   PROPERTY_TYPE_OPTIONS,
+  moreMatchesOptions,
+  noMoreExactOptions,
 } = require('./chat.tools');
 const propertyDbService = require('../services/propertyDbService');
 
@@ -123,6 +126,7 @@ test('content questions skip property search (flexi rent, summer, golden visa)',
 
 test('listing follow-ups still search', () => {
   for (const phrase of [
+    'See similar properties',
     'show me villas there',
     'find another villa in Dubai South',
     'Try 1 BR',
@@ -510,9 +514,14 @@ test('show me more is pagination; tell me more is not', () => {
   assert.equal(isShowMoreRequest('Show me more'), true);
   assert.equal(isShowMoreRequest('show me more properties'), true);
   assert.equal(isShowMoreRequest('see more'), true);
+  assert.equal(isShowMoreRequest('See similar properties'), true);
+  assert.equal(isShowMoreRequest('more listings'), true);
+  assert.equal(isShowMoreRequest('more properties'), true);
   assert.equal(isShowMoreRequest('tell me more'), false);
   assert.equal(isShowMoreRequest('more details'), false);
   assert.equal(isShowMoreRequest('the first one'), false);
+  assert.equal(isPropertyUiAction('See similar properties'), false);
+  assert.equal(isPropertyUiAction('View listing'), true);
 });
 
 test('adding a property type preserves bedrooms, budget, area, and rent purpose', () => {
@@ -956,6 +965,225 @@ test('try Dubai Marina changes only location', () => {
   assert.equal(filters.purpose, 'Buy');
   assert.equal(filters.type, 'Apartment');
   assert.equal(filters.budgetMax, 1500000);
+});
+
+function completeSouthBuyFilters() {
+  let filters = applyMessageToSearchFilters(
+    emptySearchFilters(),
+    'I need a 2 BHK apartment in Dubai South to buy'
+  );
+  return applyMessageToSearchFilters(filters, 'AED 1M - 1.5M');
+}
+
+function mockBuyInventory(t, listings) {
+  const seenExcludes = [];
+  t.mock.method(propertyDbService, 'fetchBuyProperties', async (opts) => {
+    const exclude = [
+      ...(opts.filters?.excludeRefNos || []),
+      ...(opts.filters?.excludePropertyRefNos || []),
+    ];
+    seenExcludes.push(exclude);
+    const properties = listings.filter((p) => !exclude.includes(p.propertyRefNo));
+    return { properties, total: properties.length };
+  });
+  return seenExcludes;
+}
+
+function continuationProfile(shown = ['A']) {
+  const lastSearchFilters = completeSouthBuyFilters();
+  return {
+    intent: CONVERSATION_INTENTS.BUY,
+    purpose: 'Buy',
+    lastSearchFilters,
+    shownPropertyIds: shown,
+    slotFlow: { awaiting: null },
+  };
+}
+
+test('See similar properties reuses filters, excludes shown IDs, and does not skip to the LLM', async (t) => {
+  const listings = [
+    sampleBuyApartment({ propertyRefNo: 'A' }),
+    sampleBuyApartment({ propertyRefNo: 'B' }),
+    sampleBuyApartment({ propertyRefNo: 'C' }),
+  ];
+  const seenExcludes = mockBuyInventory(t, listings);
+  const profile = continuationProfile(['A']);
+  assert.equal(hasActiveListingSearch(profile), true);
+  assert.equal(isShowMoreRequest('See similar properties'), true);
+  assert.equal(isPropertyUiAction('See similar properties'), false);
+
+  const result = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: profile.lastSearchFilters,
+      userMessage: 'See similar properties',
+      intent: profile.intent,
+      shownPropertyIds: profile.shownPropertyIds,
+    }
+  );
+
+  assert.equal(result.modelPayload?.skipped, undefined);
+  assert.equal(result.searchOutcome, SEARCH_OUTCOME.MATCHES_FOUND);
+  assert.equal(seenExcludes.length > 0, true);
+  assert.equal(seenExcludes.some((ids) => ids.includes('A')), true);
+  assert.deepEqual((result.propertyCards || []).map((c) => c.id).sort(), ['B', 'C']);
+  assert.equal((result.propertyCards || []).some((c) => c.id === 'A'), false);
+  assert.match(result.replyOverride, /more 2-bedroom apartments in Dubai South/i);
+  assert.deepEqual(result.options, moreMatchesOptions());
+  assert.equal(result.effectiveFilters.purpose, 'Buy');
+  assert.equal(result.effectiveFilters.bedrooms, 2);
+  assert.equal(result.effectiveFilters.location, 'Dubai South');
+  assert.equal(result.effectiveFilters.budgetMin, 1000000);
+  assert.equal(result.effectiveFilters.budgetMax, 1500000);
+  assert.deepEqual(result.profilePatch.shownPropertyIds.sort(), ['B', 'C']);
+});
+
+test('Show more uses the same continuation search as See similar properties', async (t) => {
+  const listings = [
+    sampleBuyApartment({ propertyRefNo: 'A' }),
+    sampleBuyApartment({ propertyRefNo: 'B' }),
+  ];
+  const seenExcludes = mockBuyInventory(t, listings);
+  const profile = continuationProfile(['A']);
+  const result = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: profile.lastSearchFilters,
+      userMessage: 'Show more',
+      intent: profile.intent,
+      shownPropertyIds: profile.shownPropertyIds,
+    }
+  );
+  assert.equal(result.modelPayload?.skipped, undefined);
+  assert.equal(result.searchOutcome, SEARCH_OUTCOME.MATCHES_FOUND);
+  assert.equal(seenExcludes.some((ids) => ids.includes('A')), true);
+  assert.deepEqual((result.propertyCards || []).map((c) => c.id), ['B']);
+  assert.deepEqual(result.options, moreMatchesOptions());
+});
+
+test('no additional exact matches returns deterministic refinements, not an LLM skip', async (t) => {
+  const listings = [sampleBuyApartment({ propertyRefNo: 'A' })];
+  mockBuyInventory(t, listings);
+  const profile = continuationProfile(['A']);
+  const result = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: profile.lastSearchFilters,
+      userMessage: 'See similar properties',
+      intent: profile.intent,
+      shownPropertyIds: profile.shownPropertyIds,
+    }
+  );
+  assert.equal(result.modelPayload?.skipped, undefined);
+  assert.equal(result.searchOutcome, SEARCH_OUTCOME.NO_MORE_MATCHES);
+  assert.equal((result.propertyCards || []).length, 0);
+  assert.match(result.clarificationReply, /couldn't find any more 2-bedroom apartments in Dubai South/i);
+  assert.match(result.clarificationReply, /AED 1M–1\.5M/);
+  assert.deepEqual(result.options, noMoreExactOptions(profile.lastSearchFilters));
+  assert.equal(result.options.includes('1 BR'), true);
+  assert.equal(result.options.includes('Increase budget'), true);
+  assert.equal(result.options.includes('Any budget'), true);
+  assert.equal(result.options.includes('Nearby areas'), true);
+});
+
+test('1 BR continuation keeps buy apartment Dubai South budget and searches', async (t) => {
+  mockBuyInventory(t, [sampleBuyApartment({ propertyRefNo: 'D', bedrooms: '1' })]);
+  const profile = continuationProfile(['A']);
+  const qualified = qualifyListingSearch('1 BR', profile);
+  assert.equal(qualified.type, 'continue');
+  assert.equal(qualified.profilePatch.lastSearchFilters.purpose, 'Buy');
+  assert.equal(qualified.profilePatch.lastSearchFilters.type, 'Apartment');
+  assert.equal(qualified.profilePatch.lastSearchFilters.location, 'Dubai South');
+  assert.equal(qualified.profilePatch.lastSearchFilters.bedrooms, 1);
+  assert.equal(qualified.profilePatch.lastSearchFilters.budgetMin, 1000000);
+  assert.equal(qualified.profilePatch.lastSearchFilters.budgetMax, 1500000);
+
+  const result = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: qualified.profilePatch.lastSearchFilters,
+      userMessage: '1 BR',
+      intent: CONVERSATION_INTENTS.BUY,
+      shownPropertyIds: ['A'],
+    }
+  );
+  assert.equal(result.modelPayload?.skipped, undefined);
+  assert.equal(result.needsBudget, undefined);
+  assert.equal(result.effectiveFilters.bedrooms, 1);
+  assert.equal(result.effectiveFilters.purpose, 'Buy');
+  assert.equal(result.effectiveFilters.location, 'Dubai South');
+  assert.equal(result.effectiveFilters.budgetMax, 1500000);
+});
+
+test('Change budget keeps listing criteria and asks budget without searching', async (t) => {
+  t.mock.method(propertyDbService, 'fetchBuyProperties', async () => {
+    throw new Error('search must not run until a new budget is supplied');
+  });
+  const profile = continuationProfile(['A']);
+  const result = qualifyListingSearch('Change budget', profile);
+  assert.equal(result.type, 'clarify');
+  assert.equal(result.missing, 'budget');
+  assert.equal(result.profilePatch.lastSearchFilters.purpose, 'Buy');
+  assert.equal(result.profilePatch.lastSearchFilters.bedrooms, 2);
+  assert.equal(result.profilePatch.lastSearchFilters.type, 'Apartment');
+  assert.equal(result.profilePatch.lastSearchFilters.location, 'Dubai South');
+  assert.equal(result.profilePatch.lastSearchFilters.budgetProvided, false);
+  assert.match(result.reply, /budget/i);
+  assert.deepEqual(result.options, BUY_BUDGET_OPTIONS);
+
+  const search = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: result.profilePatch.lastSearchFilters,
+      userMessage: 'Change budget',
+      intent: CONVERSATION_INTENTS.BUY,
+      slotFlow: result.profilePatch.slotFlow,
+    }
+  );
+  assert.equal(search.needsBudget, true);
+  assert.equal((search.propertyCards || []).length, 0);
+  assert.equal(propertyDbService.fetchBuyProperties.mock.calls.length, 0);
+});
+
+test('subsequent show more never returns already shown listing IDs', async (t) => {
+  const listings = [
+    sampleBuyApartment({ propertyRefNo: 'A' }),
+    sampleBuyApartment({ propertyRefNo: 'B' }),
+    sampleBuyApartment({ propertyRefNo: 'C' }),
+  ];
+  const seenExcludes = mockBuyInventory(t, listings);
+  const first = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: completeSouthBuyFilters(),
+      userMessage: 'See similar properties',
+      intent: CONVERSATION_INTENTS.BUY,
+      shownPropertyIds: ['A'],
+    }
+  );
+  const firstIds = (first.propertyCards || []).map((c) => c.id);
+  assert.deepEqual(firstIds.sort(), ['B', 'C']);
+
+  const shown = uniqueIdList(['A', ...firstIds]);
+  const second = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: completeSouthBuyFilters(),
+      userMessage: 'See more',
+      intent: CONVERSATION_INTENTS.BUY,
+      shownPropertyIds: shown,
+    }
+  );
+  assert.equal((second.propertyCards || []).some((c) => shown.includes(c.id)), false);
+  assert.equal(seenExcludes.some((ids) => ids.includes('A') && ids.includes('B') && ids.includes('C')), true);
+  assert.equal(second.searchOutcome, SEARCH_OUTCOME.NO_MORE_MATCHES);
 });
 
 test('view listing UI actions do not restart property qualification', async () => {
