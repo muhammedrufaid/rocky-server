@@ -898,10 +898,74 @@ test('missing location asks area then budget', () => {
   assert.equal(second.profilePatch.lastSearchFilters.location, 'Dubai South');
 });
 
-test('rent budget chips are yearly ranges', () => {
-  const result = qualifyListingSearch('I need a 2 BHK apartment in Dubai South to rent', {});
-  assert.equal(result.missing, 'budget');
-  assert.deepEqual(result.options, RENT_BUDGET_OPTIONS);
+test('rent budget chips are yearly below/above ceilings, not ranges', () => {
+  assert.deepEqual(RENT_BUDGET_OPTIONS, [
+    'Below AED 60K/year',
+    'Below AED 100K/year',
+    'Below AED 150K/year',
+    'Below AED 250K/year',
+    'Above AED 250K/year',
+    'Any budget',
+  ]);
+  assert.equal(RENT_BUDGET_OPTIONS.some((option) => / - /.test(option)), false);
+  assert.equal(RENT_BUDGET_OPTIONS.includes('AED 60K - 100K/year'), false);
+  assert.equal(RENT_BUDGET_OPTIONS.includes('AED 100K - 150K/year'), false);
+  assert.equal(RENT_BUDGET_OPTIONS.includes('AED 150K - 250K/year'), false);
+
+  const first = qualifyListingSearch('I need a 2 BHK apartment in Dubai South to rent', {});
+  assert.equal(first.missing, 'budget');
+  assert.deepEqual(first.options, RENT_BUDGET_OPTIONS);
+  assert.deepEqual(BUY_BUDGET_OPTIONS, [
+    'Below AED 1M',
+    'Below AED 1.5M',
+    'Below AED 2M',
+    'Below AED 3M',
+    'Above AED 3M',
+    'Any budget',
+  ]);
+
+  const expected = [
+    ['Below AED 60K/year', { budgetMin: null, budgetMax: 60000 }],
+    ['Below AED 100K/year', { budgetMin: null, budgetMax: 100000 }],
+    ['Below AED 150K/year', { budgetMin: null, budgetMax: 150000 }],
+    ['Below AED 250K/year', { budgetMin: null, budgetMax: 250000 }],
+    ['Above AED 250K/year', { budgetMin: 250000, budgetMax: null }],
+    ['Any budget', { budgetMin: null, budgetMax: null }],
+  ];
+  for (const [label, bounds] of expected) {
+    const parsed = parseBudgetFromMessage(label);
+    if (label === 'Any budget') {
+      assert.equal(parsed.any, true, label);
+    } else if (bounds.budgetMax != null) {
+      assert.equal(parsed.budgetMax, bounds.budgetMax, label);
+      assert.equal(parsed.budgetMin, undefined, label);
+    } else {
+      assert.equal(parsed.budgetMin, bounds.budgetMin, label);
+      assert.equal(parsed.budgetMax, undefined, label);
+    }
+    const applied = qualifyListingSearch(label, profileFromQualify(first));
+    const filters = applied.profilePatch.lastSearchFilters;
+    assert.equal(applied.type, 'continue', label);
+    assert.equal(filters.budgetProvided, true, label);
+    assert.equal(filters.budgetMin, bounds.budgetMin, label);
+    assert.equal(filters.budgetMax, bounds.budgetMax, label);
+  }
+
+  assert.equal(parseBudgetFromMessage('below 60k').budgetMax, 60000);
+  assert.equal(parseBudgetFromMessage('under 60k').budgetMax, 60000);
+  assert.equal(parseBudgetFromMessage('up to 60k').budgetMax, 60000);
+  assert.equal(parseBudgetFromMessage('max 60k').budgetMax, 60000);
+  assert.equal(parseBudgetFromMessage('below 100k').budgetMax, 100000);
+  assert.equal(parseBudgetFromMessage('under 100k').budgetMax, 100000);
+  assert.equal(parseBudgetFromMessage('below 150k').budgetMax, 150000);
+  assert.equal(parseBudgetFromMessage('below 250k').budgetMax, 250000);
+  assert.equal(parseBudgetFromMessage('above 250k').budgetMin, 250000);
+  assert.equal(parseBudgetFromMessage('over 250k').budgetMin, 250000);
+  assert.equal(parseBudgetFromMessage('250k+').budgetMin, 250000);
+
+  const typedRange = parseBudgetFromMessage('AED 100K - 150K/year');
+  assert.equal(typedRange.budgetMin, 100000);
+  assert.equal(typedRange.budgetMax, 150000);
 });
 
 test('extracts max budget from a full listing sentence', () => {

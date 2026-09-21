@@ -280,13 +280,21 @@ const BUY_BUDGET_CHIP_MAP = {
   'any budget': { any: true },
 };
 const RENT_BUDGET_OPTIONS = [
-  'Up to AED 60K/year',
-  'AED 60K - 100K/year',
-  'AED 100K - 150K/year',
-  'AED 150K - 250K/year',
-  'AED 250K+/year',
+  'Below AED 60K/year',
+  'Below AED 100K/year',
+  'Below AED 150K/year',
+  'Below AED 250K/year',
+  'Above AED 250K/year',
   'Any budget',
 ];
+const RENT_BUDGET_CHIP_MAP = {
+  'below aed 60k': { budgetMax: 60_000 },
+  'below aed 100k': { budgetMax: 100_000 },
+  'below aed 150k': { budgetMax: 150_000 },
+  'below aed 250k': { budgetMax: 250_000 },
+  'above aed 250k': { budgetMin: 250_000 },
+  'any budget': { any: true },
+};
 const SELL_OPTIONS = ['Get a valuation', 'Talk to an agent'];
 const SELL_TYPE_OPTIONS = PROPERTY_TYPE_OPTIONS;
 const PM_NEED_OPTIONS = [
@@ -1682,6 +1690,7 @@ function parseBudgetFromMessage(text, { requireBudgetContext = false } = {}) {
     return { any: true };
   }
   if (BUY_BUDGET_CHIP_MAP[raw]) return { ...BUY_BUDGET_CHIP_MAP[raw] };
+  if (RENT_BUDGET_CHIP_MAP[raw]) return { ...RENT_BUDGET_CHIP_MAP[raw] };
   if (/^(any|skip|none|no preference|doesn'?t matter)$/.test(raw)) {
     return requireBudgetContext ? { any: true } : null;
   }
