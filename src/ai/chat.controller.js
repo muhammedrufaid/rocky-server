@@ -8,6 +8,17 @@ const {
   ChatAbortedError,
   throwIfAborted,
 } = require('./chat.sse');
+const {
+  emptyViewingRequest,
+  copyViewingRequest,
+  applyViewingRequestFlow,
+  isBookViewingAction,
+  isListingSearchOverride,
+  finalizeViewingCapture,
+  normalizeSearchProfileAfterPatch,
+  requiresBedroomsForSearch,
+  buildViewingLeadIntent,
+} = require('./chat.tools');
 const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
@@ -166,6 +177,7 @@ function mergeProfile(current, patch) {
     },
     sellListing: copySellListing(current.sellListing || {}),
     serviceInquiry: copyServiceInquiry(current.serviceInquiry || {}),
+    viewingRequest: copyViewingRequest(current.viewingRequest || {}),
     leadCaptured: current.leadCaptured || false,
   };
 
@@ -179,10 +191,10 @@ function mergeProfile(current, patch) {
     next.preferredAreas = next.preferredAreas.slice(-10);
   }
   if (patch.budget) {
-    if (patch.budget.min !== undefined && patch.budget.min !== null) next.budget.min = patch.budget.min;
-    if (patch.budget.max !== undefined && patch.budget.max !== null) next.budget.max = patch.budget.max;
+    if (patch.budget.min !== undefined) next.budget.min = patch.budget.min;
+    if (patch.budget.max !== undefined) next.budget.max = patch.budget.max;
   }
-  if (patch.bedrooms !== undefined && patch.bedrooms !== null) next.bedrooms = patch.bedrooms;
+  if (patch.bedrooms !== undefined) next.bedrooms = patch.bedrooms;
   if (patch.purpose) next.purpose = patch.purpose;
   if (patch.intent) next.intent = patch.intent;
   if (Array.isArray(patch.lastPropertyCards)) {
@@ -213,6 +225,12 @@ function mergeProfile(current, patch) {
     next.serviceInquiry = copyServiceInquiry({
       ...(next.serviceInquiry || {}),
       ...patch.serviceInquiry,
+    });
+  }
+  if (patch.viewingRequest) {
+    next.viewingRequest = copyViewingRequest({
+      ...(next.viewingRequest || {}),
+      ...patch.viewingRequest,
     });
   }
   if (patch.leadCaptured) next.leadCaptured = true;
@@ -257,6 +275,7 @@ async function loadConversation(sessionId) {
         slotFlow: { awaiting: null },
         sellListing: emptySellListing(),
         serviceInquiry: emptyServiceInquiry(),
+        viewingRequest: emptyViewingRequest(),
         leadCaptured: false,
       },
     });
@@ -279,7 +298,8 @@ function emptyClarificationPayload() {
 }
 
 function listingSlotResponse(profile, filters, extraPatch = {}) {
-  const next = copySearchFilters(filters || emptySearchFilters());
+  const previous = profile.lastSearchFilters || emptySearchFilters();
+  const next = normalizeSearchProfileAfterPatch(previous, filters || emptySearchFilters());
   const missing = nextMissingListingSlot(next);
   const question = missing ? listingSlotQuestion(missing, next) : null;
   const {
@@ -299,8 +319,17 @@ function listingSlotResponse(profile, filters, extraPatch = {}) {
     patch.intent = purposeToIntent(next.purpose) || rest.intent || profile.intent;
   }
   if (next.location) patch.preferredAreas = rest.preferredAreas || [next.location];
-  if (next.bedrooms != null) patch.bedrooms = next.bedrooms;
-  else if (next.bedroomsMin != null) patch.bedrooms = next.bedroomsMin;
+  if (requiresBedroomsForSearch(next)) {
+    if (next.bedrooms != null) patch.bedrooms = next.bedrooms;
+    else if (next.bedroomsMin != null) patch.bedrooms = next.bedroomsMin;
+    else patch.bedrooms = null;
+  } else {
+    patch.bedrooms = null;
+  }
+  patch.budget = {
+    min: next.budgetMin ?? null,
+    max: next.budgetMax ?? null,
+  };
   if (!missing) {
     return { type: 'continue', profile: mergeProfile(profile, patch) };
   }
@@ -737,15 +766,10 @@ function applyPropertyTypeChange(message, profile) {
     if (beds) applyBedroomChoice(last, beds);
     const budget = parseBudgetFromMessage(message);
     if (budget) applyBudgetChoice(last, budget);
-    return {
-      type: 'continue',
-      profile: mergeProfile(profile, {
-        purpose: resolvedPurpose || profile.purpose,
-        preferredAreas: last.location ? [last.location] : undefined,
-        lastSearchFilters: last,
-        slotFlow: { awaiting: null, alternatives: null },
-      }),
-    };
+    return listingSlotResponse(profile, last, {
+      purpose: resolvedPurpose || profile.purpose,
+      preferredAreas: last.location ? [last.location] : undefined,
+    });
   }
 
   const newType = parsePropertyTypeChange(message) || (incoming.length === 1 ? incoming[0] : null);
@@ -760,21 +784,16 @@ function applyPropertyTypeChange(message, profile) {
   applyTypesToFilters(last, mergePropertyTypes(currentTypes, [newType], message));
   last.purpose = resolvedPurpose;
 
-  // Named area while location is empty (e.g. after "somewhere else"): keep bedrooms and search
   if (mentionedLocation && !last.location) {
     last.location = mentionedLocation;
-    return {
-      type: 'continue',
-      profile: mergeProfile(profile, {
-        preferredAreas: [mentionedLocation],
-        lastSearchFilters: last,
-        slotFlow: { awaiting: null, alternatives: null },
-      }),
-    };
+    return listingSlotResponse(profile, last, {
+      preferredAreas: [mentionedLocation],
+    });
   }
 
-  // Type change with no current location: ask for area, do not search
   if (!last.location) {
+    const normalized = listingSlotResponse(profile, last, {});
+    if (normalized.type === 'clarify') return normalized;
     return {
       type: 'clarify',
       profile: mergeProfile(profile, {
@@ -786,13 +805,7 @@ function applyPropertyTypeChange(message, profile) {
     };
   }
 
-  return {
-    type: 'continue',
-    profile: mergeProfile(profile, {
-      lastSearchFilters: last,
-      slotFlow: { awaiting: null },
-    }),
-  };
+  return listingSlotResponse(profile, last, {});
 }
 
 function applyShowMore(message, profile) {
@@ -825,6 +838,24 @@ function applyConversationIntent(message, profile, explicitIntent = null) {
     return null;
   }
 
+  if (
+    switching &&
+    isListingIntent(detected) &&
+    isListingIntent(current) &&
+    !starter &&
+    !requestedIntent
+  ) {
+    const previous = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    if (!previous.purpose) previous.purpose = intentToPurpose(current);
+    const patched = copySearchFilters(previous);
+    patched.purpose = intentToPurpose(detected);
+    return listingSlotResponse(profile, patched, {
+      intent: detected,
+      purpose: patched.purpose,
+      resetShownPropertyIds: true,
+    });
+  }
+
   if (!switching && !restart && current === detected) return null;
 
   const nextProfile = startFreshIntent(detected, message, profile);
@@ -847,6 +878,15 @@ function applyConversationIntent(message, profile, explicitIntent = null) {
 }
 
 function resolvePendingSlots(message, profile, history = [], explicitIntent = null) {
+  if (isListingSearchOverride(message) && profile.viewingRequest?.active) {
+    profile = mergeProfile(profile, {
+      viewingRequest: { ...copyViewingRequest(profile.viewingRequest), active: false },
+      slotFlow: ['viewingContact', 'viewingTime'].includes(profile.slotFlow?.awaiting)
+        ? { awaiting: null, alternatives: null }
+        : profile.slotFlow,
+    });
+  }
+
   const intentGate = applyConversationIntent(message, profile, explicitIntent);
   if (intentGate) return intentGate;
 
@@ -857,6 +897,16 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
 
   const sellFlow = applySellFlow(message, profile, history);
   if (sellFlow) return sellFlow;
+
+  const viewingFlow = applyViewingRequestFlow(message, profile, history);
+  if (viewingFlow) {
+    return {
+      type: viewingFlow.type,
+      profile: mergeProfile(profile, viewingFlow.profilePatch || {}),
+      reply: viewingFlow.reply,
+      options: viewingFlow.options,
+    };
+  }
 
   const showMore = applyShowMore(message, profile);
   if (showMore) return showMore;
@@ -1154,7 +1204,7 @@ function applyNewLocationSearch(message, profile) {
 
   // Must look like a listing search (type nouns include plurals; Buy/Rent verbs count too)
   const looksLikeListing =
-    /\b(show|find|search|looking|buy|purchase|rent|lease|for\s+sale|apartments?|villas?|townhouses?|penthouses?|duplexes?|studios?|flats?|propert(?:y|ies)|homes?|listings?)\b/i.test(
+    /\b(show|find|search|looking|buy|purchase|rent|lease|for\s+sale|apartments?|villas?|townhouses?|penthouses?|duplexes?|studios?|flats?|offices?|propert(?:y|ies)|homes?|listings?)\b/i.test(
       message
     ) || !!mentionedLocation;
   if (!looksLikeListing && !purposeFromMsg) return null;
@@ -1231,7 +1281,9 @@ function applyListingFilterUpdate(message, profile) {
 }
 
 function bedroomClarifyIfNeeded(message, profile) {
-  if (isPropertyUiAction(message)) return null;
+  if (isPropertyUiAction(message) || isBookViewingAction(message)) return null;
+  if (['viewingContact', 'viewingTime'].includes(profile.slotFlow?.awaiting)) return null;
+  if (profile.viewingRequest?.active) return null;
   if (
     parseSellIntent(message) ||
     profile.slotFlow?.awaiting === 'sell' ||
@@ -1298,6 +1350,26 @@ async function maybeCaptureSellLead(sessionId, profile, message) {
     nextProfile = mergeProfile(profile, result.profilePatch);
   }
   return { profile: nextProfile, leadCaptured: !!result.leadCaptured };
+}
+
+async function maybeCaptureViewingLead(sessionId, profile) {
+  const vr = copyViewingRequest(profile.viewingRequest || {});
+  const result = await executeTool(
+    'capture_lead',
+    {
+      name: vr.name,
+      phone: vr.phone,
+      email: vr.email || '',
+      intent: buildViewingLeadIntent(vr),
+      emailOptional: true,
+    },
+    { sessionId, leadAlreadyCaptured: false }
+  );
+  let nextProfile = profile;
+  if (result.profilePatch) {
+    nextProfile = mergeProfile(profile, result.profilePatch);
+  }
+  return { profile: nextProfile, leadCaptured: !!result.leadCaptured, result };
 }
 
 async function clarificationResponse(res, { reply, profile, conversation, message, options, leadCaptured = false }) {
@@ -1761,6 +1833,26 @@ const chat = async (req, res) => {
       conversation.messages || [],
       bodyIntent
     );
+
+    if (slotResult?.type === 'submit_viewing') {
+      const captured = await maybeCaptureViewingLead(sessionId, slotResult.profile);
+      const finalized = finalizeViewingCapture(
+        captured.profile.viewingRequest,
+        captured.result
+      );
+      const profileForResponse = mergeProfile(captured.profile, {
+        viewingRequest: finalized.viewingRequest,
+        slotFlow: { awaiting: null, alternatives: null },
+      });
+      return clarificationResponse(res, {
+        reply: finalized.reply,
+        profile: profileForResponse,
+        conversation,
+        message,
+        options: finalized.options,
+        leadCaptured: finalized.leadCaptured,
+      });
+    }
 
     if (slotResult?.type === 'clarify') {
       let profileForResponse = slotResult.profile;

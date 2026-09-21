@@ -597,6 +597,283 @@ function parseContactDetails(text, current = {}) {
   };
 }
 
+const VIEWING_TIME_OPTIONS = [
+  'Saturday morning',
+  'Saturday afternoon',
+  'Sunday morning',
+  'Sunday afternoon',
+  'Agent can coordinate',
+];
+
+function isBookViewingAction(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  return raw === 'book a viewing';
+}
+
+function isViewingClosePhrase(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  if (!raw) return false;
+  return /^(no|no thanks|no thank you|nothing else|nothing to share|that'?s all|thats all|nope|i'?m good|im good|all good)$/.test(
+    raw
+  );
+}
+
+function isListingSearchOverride(text) {
+  const raw = String(text || '').trim();
+  if (!raw || isBookViewingAction(raw) || isPropertyUiAction(raw)) return false;
+  if (isShowMoreRequest(raw) || isViewingClosePhrase(raw)) return false;
+  if (parsePropertyTypesFromMessage(raw).length) return true;
+  if (
+    parseLocationFromMessage(raw) &&
+    /\b(show|find|search|looking|apartments?|villas?|offices?|properties|homes?|listings?)\b/i.test(raw)
+  ) {
+    return true;
+  }
+  return /\b(show me|find me|looking for)\b/i.test(raw) && !!parseLocationFromMessage(raw);
+}
+
+function parseViewingPreference(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  if (!raw) return null;
+  if (/^agent can coordinate$/.test(raw) || /\bagent can coordinate\b/.test(raw) || /\byou can coordinate\b/.test(raw)) {
+    return { date: null, time: 'Agent can coordinate' };
+  }
+  if (/^weekends?$/.test(raw) || /\bweekends?\b/.test(raw) && !/\b(saturday|sunday|morning|afternoon|evening)\b/.test(raw)) {
+    return { date: 'weekends', time: null };
+  }
+  const dayTime = raw.match(
+    /\b(saturday|sunday|tomorrow)\b(?:\s+(morning|afternoon|evening))?\b/
+  );
+  if (dayTime) {
+    const day = dayTime[1].replace(/^\w/, (c) => c.toUpperCase());
+    const slot = dayTime[2] ? dayTime[2] : null;
+    if (slot) return { date: day, time: `${day} ${slot}` };
+    return { date: day, time: null };
+  }
+  if (/^(morning|afternoon|evening)$/.test(raw)) {
+    return { date: null, time: raw };
+  }
+  return null;
+}
+
+function viewingHasRequiredContact(vr = {}) {
+  return looksCollected(vr.name) && looksCollected(vr.phone);
+}
+
+function viewingContactPrompt(vr = {}) {
+  if (looksCollected(vr.name) && !looksCollected(vr.phone) && !looksCollected(vr.email)) {
+    return 'Please share a phone number or email so the agent can reach you.';
+  }
+  if (looksCollected(vr.name) && looksCollected(vr.email) && !looksCollected(vr.phone)) {
+    return 'I also need a phone number so the agent can reach you.';
+  }
+  if (!looksCollected(vr.name) && (looksCollected(vr.phone) || looksCollected(vr.email))) {
+    return 'Please share your name as well.';
+  }
+  return 'I can arrange a viewing for this property. Please share your name and either your phone number or email.';
+}
+
+function viewingTimePrompt() {
+  return 'Do you have a preferred weekend time, or should the agent coordinate a suitable slot with you?';
+}
+
+function viewingSuccessReply(vr = {}) {
+  const when = vr.preferredTime || vr.preferredDate;
+  if (when && !/^agent can coordinate$/i.test(String(when))) {
+    return `Your viewing request has been recorded for ${when}. A Rocky Real Estate specialist will contact you using the details you provided.`;
+  }
+  return 'Your viewing request has been recorded. A Rocky Real Estate specialist will contact you using the details you provided.';
+}
+
+function viewingFailureReply() {
+  return "I have your details, but I couldn't submit the viewing request right now. Please try again or contact the team directly.";
+}
+
+function viewingCompleteOptions() {
+  return ['See similar properties', 'New property search'];
+}
+
+function viewingCloseReply() {
+  return "You're all set. The team will contact you about the viewing.";
+}
+
+function buildViewingLeadIntent(vr = {}) {
+  const bits = ['Viewing request'];
+  if (vr.propertyRefNo) bits.push(`ref ${vr.propertyRefNo}`);
+  if (vr.propertyTitle) bits.push(vr.propertyTitle);
+  const when = vr.preferredTime || vr.preferredDate;
+  if (when) bits.push(when);
+  return bits.join(' — ').slice(0, 200);
+}
+
+function selectedViewingProperty(profile = {}) {
+  const cards = profile.lastPropertyCards || [];
+  const first = cards[0] || {};
+  return {
+    propertyRefNo: first.id || null,
+    propertyTitle: first.title || null,
+  };
+}
+
+function seedViewingContact(profile = {}, history = []) {
+  const fromHistory = contactFromHistory(history);
+  const sell = profile.sellListing || {};
+  const service = profile.serviceInquiry || {};
+  const vr = profile.viewingRequest || {};
+  return {
+    name: vr.name || sell.name || service.name || fromHistory.name || null,
+    email: vr.email || sell.email || service.email || fromHistory.email || null,
+    phone: vr.phone || sell.phone || service.phone || fromHistory.phone || fromHistory.whatsapp || null,
+  };
+}
+
+function finalizeViewingCapture(viewingRequest, captureResult) {
+  const vr = copyViewingRequest(viewingRequest);
+  const ok = !!(captureResult?.leadCaptured || captureResult?.modelPayload?.ok);
+  if (ok) {
+    vr.submitted = true;
+    vr.active = false;
+    return {
+      viewingRequest: vr,
+      reply: viewingSuccessReply(vr),
+      options: viewingCompleteOptions(),
+      leadCaptured: true,
+    };
+  }
+  vr.submitted = false;
+  vr.active = true;
+  return {
+    viewingRequest: vr,
+    reply: viewingFailureReply(),
+    options: undefined,
+    leadCaptured: false,
+  };
+}
+
+function applyViewingRequestFlow(message, profile = {}, history = []) {
+  const awaiting = profile.slotFlow?.awaiting;
+  const previous = copyViewingRequest(profile.viewingRequest || {});
+  const inViewing =
+    previous.active ||
+    awaiting === 'viewingContact' ||
+    awaiting === 'viewingTime' ||
+    isBookViewingAction(message);
+
+  if (!inViewing && previous.submitted && isViewingClosePhrase(message)) {
+    return {
+      type: 'clarify',
+      profilePatch: {
+        viewingRequest: { ...previous, active: false },
+        slotFlow: { awaiting: null, alternatives: null },
+      },
+      reply: viewingCloseReply(),
+      options: undefined,
+    };
+  }
+
+  if (!inViewing) return null;
+  if (isListingSearchOverride(message)) return null;
+
+  const vr = copyViewingRequest(previous);
+
+  if (isBookViewingAction(message)) {
+    const selected = selectedViewingProperty(profile);
+    vr.active = true;
+    vr.submitted = false;
+    vr.askedTimeRefinement = false;
+    vr.preferredDate = null;
+    vr.preferredTime = null;
+    vr.propertyRefNo = selected.propertyRefNo || vr.propertyRefNo;
+    vr.propertyTitle = selected.propertyTitle || vr.propertyTitle;
+    const seeded = seedViewingContact({ ...profile, viewingRequest: vr }, history);
+    vr.name = seeded.name;
+    vr.email = seeded.email;
+    vr.phone = seeded.phone;
+  } else if (previous.submitted && isViewingClosePhrase(message)) {
+    vr.active = false;
+    return {
+      type: 'clarify',
+      profilePatch: {
+        viewingRequest: vr,
+        slotFlow: { awaiting: null, alternatives: null },
+      },
+      reply: viewingCloseReply(),
+    };
+  }
+
+  if (!isBookViewingAction(message)) {
+    const contact = parseContactDetails(message, vr);
+    vr.name = contact.name || vr.name;
+    vr.email = contact.email || vr.email;
+    vr.phone = contact.phone || contact.whatsapp || vr.phone;
+    const pref = parseViewingPreference(message);
+    if (pref) {
+      if (pref.date) vr.preferredDate = pref.date;
+      if (pref.time) vr.preferredTime = pref.time;
+    }
+    if (isViewingClosePhrase(message) && viewingHasRequiredContact(vr)) {
+      vr.preferredTime = vr.preferredTime || 'Agent can coordinate';
+    }
+  }
+
+  if (!viewingHasRequiredContact(vr)) {
+    return {
+      type: 'clarify',
+      profilePatch: {
+        viewingRequest: vr,
+        slotFlow: { awaiting: 'viewingContact', alternatives: null },
+      },
+      reply: viewingContactPrompt(vr),
+    };
+  }
+
+  const hasSpecificTime = !!(vr.preferredTime || (vr.preferredDate && vr.preferredDate !== 'weekends'));
+  const weekendsOnly = vr.preferredDate === 'weekends' && !vr.preferredTime;
+
+  if (weekendsOnly && !vr.askedTimeRefinement) {
+    vr.askedTimeRefinement = true;
+    return {
+      type: 'clarify',
+      profilePatch: {
+        viewingRequest: vr,
+        slotFlow: { awaiting: 'viewingTime', alternatives: null },
+      },
+      reply: viewingTimePrompt(),
+      options: VIEWING_TIME_OPTIONS.slice(),
+    };
+  }
+
+  if (!hasSpecificTime && !vr.askedTimeRefinement && !isViewingClosePhrase(message)) {
+    vr.askedTimeRefinement = true;
+    return {
+      type: 'clarify',
+      profilePatch: {
+        viewingRequest: vr,
+        slotFlow: { awaiting: 'viewingTime', alternatives: null },
+      },
+      reply: viewingTimePrompt(),
+      options: VIEWING_TIME_OPTIONS.slice(),
+    };
+  }
+
+  return {
+    type: 'submit_viewing',
+    profilePatch: {
+      viewingRequest: vr,
+      slotFlow: { awaiting: null, alternatives: null },
+    },
+  };
+}
+
 function contactFromHistory(messages = []) {
   let contact = { name: null, phone: null, email: null, whatsapp: null };
   for (const item of messages || []) {
@@ -1090,6 +1367,7 @@ function isVagueConfirm(text) {
 function describeBedroomPhrase(filters = {}) {
   if (filters.bedroomsAny) return '';
   if (isBedroomsSet(filters.bedroomsMin)) return `${filters.bedroomsMin}+ bedroom `;
+  if (!isBedroomsSet(filters.bedrooms)) return '';
   const n = Number(filters.bedrooms);
   if (n === 0) return 'studio ';
   if (Number.isFinite(n)) return `${n}-bedroom `;
@@ -1142,16 +1420,35 @@ function moreMatchesOptions() {
 }
 
 function describeBudgetRange(filters = {}) {
-  const min = Number(filters.budgetMin);
-  const max = Number(filters.budgetMax);
-  const hasMin = Number.isFinite(min);
-  const hasMax = Number.isFinite(max);
+  const min = budgetNumber(filters.budgetMin);
+  const max = budgetNumber(filters.budgetMax);
+  const hasMin = min != null;
+  const hasMax = max != null;
   if (hasMin && hasMax) {
     const maxLabel = formatAed(max).replace(/^AED\s/, '');
     return `within ${formatAed(min)}–${maxLabel}`;
   }
   if (hasMax) return `within ${formatAed(max)}`;
   if (hasMin) return `from ${formatAed(min)}`;
+  return '';
+}
+
+function budgetNumber(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function describeBudgetBare(filters = {}) {
+  const min = budgetNumber(filters.budgetMin);
+  const max = budgetNumber(filters.budgetMax);
+  const hasMin = min != null;
+  const hasMax = max != null;
+  if (hasMin && hasMax) {
+    return `${formatAed(min)}–${formatAed(max).replace(/^AED\s/, '')}`;
+  }
+  if (hasMax) return formatAed(max);
+  if (hasMin) return `${formatAed(min)}+`;
   return '';
 }
 
@@ -1818,7 +2115,7 @@ function parsePropertyTypeChange(text) {
 
   // Explicit change-intent patterns — must appear before the type noun
   const changePrefix =
-    /\b(i\s+(need|want|prefer|would\s+like|('d\s+like)|am\s+looking\s+for)|show\s+(me\s+)?(the\s+)?|give\s+me|find\s+me|search\s+(for\s+)?|change\s+(it\s+)?(to\s+)?|switch\s+(to\s+)?|actually\s+(i\s+(want|prefer|need)|show)|not\s+(villas?|apartments?|townhouses?|penthouses?)[\s,]+|instead[\s,]+show|show.*instead)\b/;
+    /\b(i\s+(need|want|prefer|would\s+like|('d\s+like)|am\s+looking\s+for)|looking\s+for|show\s+(me\s+)?(the\s+)?|give\s+me|find\s+me|search\s+(for\s+)?|change\s+(it\s+)?(to\s+)?|switch\s+(to\s+)?|actually\s+(i\s+(want|prefer|need)|show)|not\s+(villas?|apartments?|townhouses?|penthouses?)[\s,]+|instead[\s,]+show|show.*instead)\b/;
 
   if (!changePrefix.test(lower)) return null;
 
@@ -2102,7 +2399,7 @@ function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
     purpose: last.purpose || null,
   };
   applyTypesToFilters(merged, preservedTypes);
-  return merged;
+  return normalizeSearchProfileAfterPatch(last, merged);
 }
 
 function isAmbiguousListingQuery(text) {
@@ -2546,6 +2843,7 @@ function startFreshIntent(intent, message, currentProfile = {}) {
     slotFlow: { awaiting: null, alternatives: null },
     sellListing: emptySellListing(),
     serviceInquiry: emptyServiceInquiry(),
+    viewingRequest: emptyViewingRequest(),
     leadCaptured: !!currentProfile.leadCaptured,
   };
 
@@ -2684,7 +2982,7 @@ function profilePatchFromPropertyFilters(filters) {
 
 function listingQueryOpts(filters, search) {
   const queryFilters = {};
-  if (!filters.bedroomsAny) {
+  if (requiresBedroomsForSearch(filters) && !filters.bedroomsAny) {
     if (isBedroomsSet(filters.bedroomsMin)) {
       queryFilters.bedroomsMin = filters.bedroomsMin;
     } else if (filters.bedrooms !== undefined && filters.bedrooms !== null && filters.bedrooms !== '') {
@@ -2899,40 +3197,33 @@ function describeBedsAndType(filters = {}, { plural = false } = {}) {
 function budgetTooLowReply(filters = {}, stats = {}) {
   const loc = (filters.location || 'that area').toString().trim() || 'that area';
   const segment = describeBedsAndType(filters, { plural: true });
-  const purposeBit = purposePhrase(filters);
-  const userMax = formatAed(filters.budgetMax);
-  const priceWord = filters.purpose === 'Rent' ? 'rental price' : 'sale price';
-  const beds = describeBedroomPhrase(filters).trim() || '';
+  const budgetLabel = describeBudgetBare(filters);
   const min = stats.minimumPrice != null ? formatAed(stats.minimumPrice) : null;
   const avg = stats.averagePrice != null ? formatAed(stats.averagePrice) : null;
 
   const lines = [
-    `I couldn't find any ${segment} ${purposeBit} in ${loc} within ${userMax}. Current prices are above that budget.`,
+    budgetLabel
+      ? `No ${segment} matched your ${budgetLabel} budget in ${loc}.`
+      : `I couldn't find any ${segment} in ${loc} within the stated budget.`,
   ];
-  if (min) {
-    const minLabel = beds ? `${beds} properties` : 'properties';
-    lines.push(`• Minimum ${priceWord} for ${minLabel}: around ${min}`);
+  if (min && avg) {
+    lines.push(
+      `Current available ${segment} in ${loc} start from around ${min}, with an average asking price of ${avg}.`
+    );
+  } else if (min) {
+    lines.push(`Current available ${segment} in ${loc} start from around ${min}.`);
   }
-  if (avg) {
-    const avgLabel = beds ? `${beds} ${describeTypePhrase(filters, 2)}` : describeTypePhrase(filters, 2);
-    lines.push(`• Average ${priceWord} for ${avgLabel}: about ${avg}`);
-  }
-  lines.push(
-    `If you want to keep the ${userMax} cap, I can look for other areas or smaller unit types such as studios or 1-bedroom apartments.`
-  );
-  lines.push('Would you prefer another area or a smaller unit?');
   return lines.join('\n\n');
 }
 
 function budgetTooLowOptions(filters = {}) {
-  const opts = ['Nearby areas'];
+  const opts = ['Increase budget', 'Any budget', 'Nearby areas'];
   const n = Number(filters.bedrooms);
-  if (Number.isFinite(n) && n >= 2) {
-    opts.push('Studio', '1 BR');
-  } else if (n === 1) {
-    opts.push('Studio');
+  if (requiresBedroomsForSearch(filters) && Number.isFinite(n) && n >= 2) {
+    opts.push('Try 1 BR');
+  } else if (requiresBedroomsForSearch(filters) && n === 1) {
+    opts.push('Try Studio');
   }
-  opts.push('Change budget');
   return opts;
 }
 
@@ -2940,14 +3231,17 @@ function noInventoryReply(filters = {}) {
   const loc = (filters.location || 'that area').toString().trim() || 'that area';
   const segment = describeBedsAndType(filters, { plural: true });
   const purposeBit = purposePhrase(filters);
-  return (
-    `I couldn't find currently available ${segment} ${purposeBit} in ${loc}.\n\n` +
-    'I can broaden the search to nearby areas, another property type, or a different bedroom configuration.'
-  );
+  const broaden = requiresBedroomsForSearch(filters)
+    ? 'I can broaden the search to nearby areas, another property type, or a different bedroom configuration.'
+    : 'I can broaden the search to nearby areas or another property type.';
+  return `I couldn't find currently available ${segment} ${purposeBit} in ${loc}.\n\n${broaden}`;
 }
 
-function noInventoryOptions() {
-  return ['Nearby areas', 'Change bedrooms', 'Property type'];
+function noInventoryOptions(filters = {}) {
+  const opts = ['Nearby areas'];
+  if (requiresBedroomsForSearch(filters)) opts.push('Change bedrooms');
+  opts.push('Property type');
+  return opts;
 }
 
 function userBudgetBelowSegmentMin(filters = {}, stats = {}) {
@@ -3218,11 +3512,12 @@ async function buildAlternativeChips(effectiveFilters, { nearbyOnly = false } = 
 
 async function emptyResultsResult(effectiveFilters) {
   const location = (effectiveFilters.location || '').toString().trim();
-  const hasBudgetCap = Number.isFinite(Number(effectiveFilters.budgetMax));
+  const hasBudgetCap =
+    budgetNumber(effectiveFilters.budgetMax) != null || budgetNumber(effectiveFilters.budgetMin) != null;
 
   if (hasBudgetCap) {
     const stats = await getSegmentMarketStats(effectiveFilters);
-    if (userBudgetBelowSegmentMin(effectiveFilters, stats)) {
+    if ((stats.totalAvailable || 0) > 0) {
       return {
         propertyCards: [],
         sources: [],
@@ -3247,7 +3542,7 @@ async function emptyResultsResult(effectiveFilters) {
           requestedLocation: location || null,
           marketStats: stats,
           instruction:
-            'Exact listings were 0 because the visitor budget is below current inventory. Use the server reply. Do not invent prices, counts, or ROI.',
+            'Exact listings were 0 because the visitor budget is too restrictive for current inventory. Use the server reply. Do not invent prices, counts, or ROI.',
         },
       };
     }
@@ -3267,7 +3562,7 @@ async function emptyResultsResult(effectiveFilters) {
         searchOutcome: SEARCH_OUTCOME.NO_INVENTORY,
         marketStats: { minimumPrice: null, averagePrice: null, maximumPrice: null, totalAvailable: 0 },
         clarificationReply: noInventoryReply(effectiveFilters),
-        options: noInventoryOptions(),
+        options: noInventoryOptions(effectiveFilters),
         ...emptyResultsClarificationFields(),
         modelPayload: {
           count: 0,
@@ -3299,7 +3594,7 @@ async function emptyResultsResult(effectiveFilters) {
       needsEmptyResults: true,
       searchOutcome: SEARCH_OUTCOME.NO_INVENTORY,
       clarificationReply: noInventoryReply(effectiveFilters),
-      options: noInventoryOptions(),
+      options: noInventoryOptions(effectiveFilters),
       ...emptyResultsClarificationFields(),
       modelPayload: {
         count: 0,
@@ -3338,7 +3633,7 @@ async function emptyResultsResult(effectiveFilters) {
     slotAwaiting = 'alternatives';
   } else {
     reply = noInventoryReply(effectiveFilters);
-    options = noInventoryOptions();
+    options = noInventoryOptions(effectiveFilters);
     slotAwaiting = 'emptyResults';
   }
 
@@ -3358,7 +3653,7 @@ async function emptyResultsResult(effectiveFilters) {
     needsEmptyResults: true,
     searchOutcome: SEARCH_OUTCOME.NO_INVENTORY,
     clarificationReply: reply,
-    options: options.length > 0 ? options : noInventoryOptions(),
+    options: options.length > 0 ? options : noInventoryOptions(effectiveFilters),
     ...emptyResultsClarificationFields(),
     modelPayload: {
       count: 0,
@@ -3750,21 +4045,35 @@ async function captureLead({ name, phone, email, intent, whatsapp, emailOptional
     };
   }
 
-  const lead = await Lead.create({
-    name: String(name).trim(),
-    phone: String(contactPhone).trim(),
-    email: hasEmail ? String(email).trim().toLowerCase() : '',
-    intent: String(intent).trim(),
-    sessionId,
-  });
+  try {
+    const lead = await Lead.create({
+      name: String(name).trim(),
+      phone: String(contactPhone).trim(),
+      email: hasEmail ? String(email).trim().toLowerCase() : '',
+      intent: String(intent).trim(),
+      sessionId,
+    });
 
-  return {
-    propertyCards: [],
-    sources: [],
-    leadCaptured: true,
-    profilePatch: { leadCaptured: true },
-    modelPayload: { ok: true, id: String(lead._id) },
-  };
+    return {
+      propertyCards: [],
+      sources: [],
+      leadCaptured: true,
+      profilePatch: { leadCaptured: true },
+      modelPayload: { ok: true, id: String(lead._id) },
+    };
+  } catch (err) {
+    console.error('captureLead failed:', err);
+    return {
+      propertyCards: [],
+      sources: [],
+      leadCaptured: false,
+      profilePatch: {},
+      modelPayload: {
+        ok: false,
+        error: 'Lead capture failed. Do not claim the request was routed or that an agent will contact the visitor.',
+      },
+    };
+  }
 }
 
 async function executeTool(
@@ -3814,6 +4123,8 @@ module.exports = {
   CONVERSATION_INTENTS,
   emptySearchFilters,
   copySearchFilters,
+  emptyViewingRequest,
+  copyViewingRequest,
   emptyServiceInquiry,
   copyServiceInquiry,
   seedServiceInquiry,
@@ -3850,6 +4161,11 @@ module.exports = {
   mergePropertyTypes,
   typesFromFilters,
   applyTypesToFilters,
+  isResidentialPropertyType,
+  isCommercialPropertyType,
+  requiresBedroomsForSearch,
+  normalizeSearchProfileAfterPatch,
+  getRequiredSearchFields,
   isShowMoreRequest,
   hasActiveListingSearch,
   filtersFromRequestBody,
@@ -3872,6 +4188,19 @@ module.exports = {
   emptySellListing,
   copySellListing,
   parseContactDetails,
+  isBookViewingAction,
+  isViewingClosePhrase,
+  isListingSearchOverride,
+  parseViewingPreference,
+  applyViewingRequestFlow,
+  finalizeViewingCapture,
+  viewingSuccessReply,
+  viewingFailureReply,
+  viewingCompleteOptions,
+  viewingCloseReply,
+  viewingContactPrompt,
+  VIEWING_TIME_OPTIONS,
+  buildViewingLeadIntent,
   missingSellContactFields,
   hasSellContact,
   buildSellLeadIntent,

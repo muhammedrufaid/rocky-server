@@ -82,7 +82,19 @@ const {
   moreMatchesOptions,
   exactResultsExhaustedOptions,
   noAdditionalSegmentOptions,
+  isResidentialPropertyType,
+  isCommercialPropertyType,
+  normalizeSearchProfileAfterPatch,
+  getRequiredSearchFields,
+  applyViewingRequestFlow,
+  finalizeViewingCapture,
+  parseContactDetails,
+  isListingSearchOverride,
+  viewingFailureReply,
+  viewingCloseReply,
+  emptyViewingRequest,
 } = require('./chat.tools');
+const { Lead } = require('./chat.models');
 const propertyDbService = require('../services/propertyDbService');
 
 function runSellTurns(messages) {
@@ -887,7 +899,7 @@ test('zero exact results below inventory min is budget-too-low with real stats',
   assert.match(result.clarificationReply, /AED 180K/);
   assert.match(result.clarificationReply, /AED 1\.1M/);
   assert.match(result.clarificationReply, /AED 1\.7M/);
-  assert.deepEqual(result.options, ['Nearby areas', 'Studio', '1 BR', 'Change budget']);
+  assert.deepEqual(result.options, ['Increase budget', 'Any budget', 'Nearby areas', 'Try 1 BR']);
 });
 
 test('no segment inventory does not invent market prices', async (t) => {
@@ -1306,6 +1318,350 @@ test('AED formatter uses compact K/M values', () => {
   assert.equal(formatAed(1800000), 'AED 1.8M');
   assert.equal(formatAed(2000000), 'AED 2M');
   assert.equal(formatAed(12500000), 'AED 12.5M');
+});
+
+function marinaStudioBuyFilters() {
+  let filters = applyMessageToSearchFilters(
+    emptySearchFilters(),
+    'I need a studio room apartment in Dubai Marina to buy'
+  );
+  return applyMessageToSearchFilters(filters, 'AED 1M - 1.5M');
+}
+
+function marinaStudioBuyProfile() {
+  const lastSearchFilters = marinaStudioBuyFilters();
+  return {
+    intent: CONVERSATION_INTENTS.BUY,
+    purpose: 'Buy',
+    bedrooms: 0,
+    lastSearchFilters,
+    lastPropertyCards: [{ id: 'ABC123', title: 'Studio in Dubai Marina' }],
+    shownPropertyIds: ['ABC123'],
+    slotFlow: { awaiting: null },
+    viewingRequest: emptyViewingRequest(),
+  };
+}
+
+test('commercial office search clears studio bedrooms', async (t) => {
+  assert.equal(isResidentialPropertyType('Apartment'), true);
+  assert.equal(isCommercialPropertyType('Office'), true);
+  const previous = marinaStudioBuyFilters();
+  assert.equal(previous.bedrooms, 0);
+  assert.equal(previous.type, 'Apartment');
+
+  const profile = marinaStudioBuyProfile();
+  const qualified = qualifyListingSearch('Looking for an office in Business Bay.', profile);
+  assert.equal(qualified.type, 'continue');
+  const next = qualified.profilePatch.lastSearchFilters;
+  assert.equal(next.type, 'Office');
+  assert.equal(next.location, 'Business Bay');
+  assert.equal(next.purpose, 'Buy');
+  assert.equal(next.bedrooms, null);
+  assert.equal(next.bedroomsResolved, false);
+  assert.equal(next.budgetMin, 1000000);
+  assert.equal(next.budgetMax, 1500000);
+  assert.equal(getRequiredSearchFields(next).includes('bedrooms'), false);
+
+  mockBuyInventory(t, [
+    sampleBuyApartment({ propertyRefNo: 'OFF-1', propertyTitle: 'Office in Business Bay', bedrooms: '' }),
+  ]);
+  const result = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: next,
+      userMessage: 'Looking for an office in Business Bay.',
+      intent: CONVERSATION_INTENTS.BUY,
+    }
+  );
+  assert.equal(result.effectiveFilters.bedrooms, null);
+  assert.equal(result.effectiveFilters.type, 'Office');
+  const text = `${result.replyOverride || ''} ${result.clarificationReply || ''}`;
+  assert.equal(/studio office/i.test(text), false);
+  assert.equal(/\bstudio\b/i.test(text), false);
+});
+
+test('residential to commercial keeps sale budget', () => {
+  const previous = marinaStudioBuyFilters();
+  const next = normalizeSearchProfileAfterPatch(previous, {
+    ...previous,
+    type: 'Office',
+    types: ['Office'],
+    location: 'Business Bay',
+  });
+  assert.equal(next.type, 'Office');
+  assert.equal(next.bedrooms, null);
+  assert.equal(next.budgetProvided, true);
+  assert.equal(next.budgetMin, 1000000);
+  assert.equal(next.budgetMax, 1500000);
+  assert.equal(next.purpose, 'Buy');
+});
+
+test('BUY to RENT clears purchase budget and asks rental budget', () => {
+  const profile = continuationProfile(['A']);
+  const qualified = qualifyListingSearch('Rent instead', profile);
+  assert.equal(qualified.type, 'clarify');
+  assert.equal(qualified.missing, 'budget');
+  const next = qualified.profilePatch.lastSearchFilters;
+  assert.equal(next.purpose, 'Rent');
+  assert.equal(next.budgetProvided, false);
+  assert.equal(next.budgetMin, null);
+  assert.equal(next.budgetMax, null);
+  assert.equal(next.type, 'Apartment');
+  assert.equal(next.bedrooms, 2);
+  assert.equal(next.location, 'Dubai South');
+  assert.match(qualified.reply, /budget/i);
+  assert.deepEqual(qualified.options, RENT_BUDGET_OPTIONS);
+  assert.equal(qualified.reply.includes('1M'), false);
+});
+
+test('Book a viewing starts a deterministic viewing request', () => {
+  const profile = marinaStudioBuyProfile();
+  const flow = applyViewingRequestFlow('Book a viewing', profile, []);
+  assert.equal(flow.type, 'clarify');
+  assert.equal(flow.profilePatch.viewingRequest.active, true);
+  assert.equal(flow.profilePatch.viewingRequest.propertyRefNo, 'ABC123');
+  assert.equal(flow.profilePatch.viewingRequest.submitted, false);
+  assert.match(flow.reply, /name/i);
+  assert.match(flow.reply, /phone|email/i);
+  assert.equal(flow.profilePatch.slotFlow.awaiting, 'viewingContact');
+});
+
+test('multi-field viewing contact is extracted in one message', () => {
+  const profile = marinaStudioBuyProfile();
+  const started = applyViewingRequestFlow('Book a viewing', profile, []);
+  const withViewing = {
+    ...profile,
+    viewingRequest: started.profilePatch.viewingRequest,
+    slotFlow: started.profilePatch.slotFlow,
+  };
+  const details = applyViewingRequestFlow(
+    'Rufaid\nrufaid@example.com\n0501234567',
+    withViewing,
+    []
+  );
+  const vr = details.profilePatch.viewingRequest;
+  assert.equal(vr.name, 'Rufaid');
+  assert.equal(vr.email, 'rufaid@example.com');
+  assert.equal(vr.phone.replace(/\s/g, ''), '0501234567');
+  assert.equal(/name and either/i.test(details.reply || ''), false);
+  assert.equal(/please share your name/i.test(details.reply || ''), false);
+});
+
+test('preferred viewing time completes the flow after captureLead succeeds', async (t) => {
+  t.mock.method(Lead, 'create', async (doc) => ({ _id: 'lead-view-1', ...doc }));
+  const profile = marinaStudioBuyProfile();
+  const started = applyViewingRequestFlow('Book a viewing', profile, []);
+  const afterContact = applyViewingRequestFlow(
+    'Rufaid\nrufaid@example.com\n0501234567',
+    {
+      ...profile,
+      viewingRequest: started.profilePatch.viewingRequest,
+      slotFlow: started.profilePatch.slotFlow,
+    },
+    []
+  );
+  const afterTime = applyViewingRequestFlow(
+    'Sunday morning',
+    {
+      ...profile,
+      viewingRequest: afterContact.profilePatch.viewingRequest,
+      slotFlow: afterContact.profilePatch.slotFlow,
+    },
+    []
+  );
+  assert.equal(afterTime.type, 'submit_viewing');
+  assert.equal(afterTime.profilePatch.viewingRequest.preferredTime, 'Sunday morning');
+  assert.equal(/accessibility/i.test(afterTime.reply || ''), false);
+
+  const captured = await executeTool(
+    'capture_lead',
+    {
+      name: afterTime.profilePatch.viewingRequest.name,
+      phone: afterTime.profilePatch.viewingRequest.phone,
+      email: afterTime.profilePatch.viewingRequest.email,
+      intent: 'Viewing request — ref ABC123',
+      emailOptional: true,
+    },
+    { sessionId: 'view-1' }
+  );
+  const finalized = finalizeViewingCapture(afterTime.profilePatch.viewingRequest, captured);
+  assert.equal(finalized.leadCaptured, true);
+  assert.equal(finalized.viewingRequest.submitted, true);
+  assert.equal(finalized.viewingRequest.active, false);
+  assert.match(finalized.reply, /Sunday morning/);
+  assert.equal(/accessibility/i.test(finalized.reply), false);
+  assert.deepEqual(finalized.options, ['See similar properties', 'New property search']);
+});
+
+test('lead capture failure does not claim an agent will contact the visitor', async (t) => {
+  t.mock.method(Lead, 'create', async () => {
+    throw new Error('db unavailable');
+  });
+  const captured = await executeTool(
+    'capture_lead',
+    {
+      name: 'Rufaid',
+      phone: '0501234567',
+      email: 'rufaid@example.com',
+      intent: 'Viewing request — ref ABC123',
+      emailOptional: true,
+    },
+    { sessionId: 'view-fail' }
+  );
+  assert.equal(captured.leadCaptured, false);
+  assert.equal(captured.modelPayload.ok, false);
+  const finalized = finalizeViewingCapture(
+    {
+      active: true,
+      propertyRefNo: 'ABC123',
+      name: 'Rufaid',
+      email: 'rufaid@example.com',
+      phone: '0501234567',
+      preferredTime: 'Sunday morning',
+    },
+    captured
+  );
+  assert.equal(finalized.leadCaptured, false);
+  assert.equal(finalized.viewingRequest.submitted, false);
+  assert.equal(finalized.viewingRequest.active, true);
+  assert.equal(finalized.reply, viewingFailureReply());
+  assert.equal(/agent will contact/i.test(finalized.reply), false);
+  assert.equal(/routed your request/i.test(finalized.reply), false);
+});
+
+test('nothing else after a completed viewing closes the sub-flow', () => {
+  const profile = {
+    ...marinaStudioBuyProfile(),
+    viewingRequest: {
+      ...emptyViewingRequest(),
+      active: false,
+      submitted: true,
+      propertyRefNo: 'ABC123',
+      name: 'Rufaid',
+      email: 'rufaid@example.com',
+      phone: '0501234567',
+    },
+  };
+  const flow = applyViewingRequestFlow('nothing to share', profile, []);
+  assert.equal(flow.type, 'clarify');
+  assert.equal(flow.reply, viewingCloseReply());
+  assert.equal(flow.profilePatch.viewingRequest.active, false);
+  assert.equal(/preferred|accessibility|phone|email|weekend/i.test(flow.reply), false);
+});
+
+test('new search after viewing exits viewing mode and keeps compatible filters', () => {
+  const profile = {
+    ...marinaStudioBuyProfile(),
+    lastSearchFilters: applyMessageToSearchFilters(
+      applyMessageToSearchFilters(emptySearchFilters(), 'I need a 2 BHK apartment in Dubai South to buy'),
+      'AED 1M - 1.5M'
+    ),
+    viewingRequest: {
+      ...emptyViewingRequest(),
+      active: true,
+      submitted: true,
+      name: 'Rufaid',
+      phone: '0501234567',
+    },
+  };
+  assert.equal(isListingSearchOverride('Show me apartments in Dubai Marina.'), true);
+  const qualified = qualifyListingSearch('Show me apartments in Dubai Marina.', {
+    ...profile,
+    viewingRequest: { ...profile.viewingRequest, active: false },
+  });
+  assert.equal(qualified.type, 'continue');
+  const next = qualified.profilePatch.lastSearchFilters;
+  assert.equal(next.location, 'Dubai Marina');
+  assert.equal(next.type, 'Apartment');
+  assert.equal(next.bedrooms, 2);
+  assert.equal(next.purpose, 'Buy');
+  assert.equal(next.budgetMin, 1000000);
+  assert.equal(next.budgetMax, 1500000);
+});
+
+test('studio follow-up patches bedrooms only and keeps the apartment search', async (t) => {
+  const profile = continuationProfile(['A']);
+  profile.lastSearchFilters = applyMessageToSearchFilters(
+    profile.lastSearchFilters,
+    'Try Dubai Marina.'
+  );
+  const qualified = qualifyListingSearch('I need a studio room.', profile);
+  assert.equal(qualified.type, 'continue');
+  const next = qualified.profilePatch.lastSearchFilters;
+  assert.equal(next.bedrooms, 0);
+  assert.equal(next.type, 'Apartment');
+  assert.equal(next.location, 'Dubai Marina');
+  assert.equal(next.purpose, 'Buy');
+  assert.equal(next.budgetMin, 1000000);
+  assert.equal(next.budgetMax, 1500000);
+
+  mockBuyInventory(t, [
+    sampleBuyApartment({ propertyRefNo: 'ST-1', bedrooms: '0', propertyTitle: 'Studio apartment' }),
+  ]);
+  const result = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: next,
+      userMessage: 'I need a studio room.',
+      intent: CONVERSATION_INTENTS.BUY,
+    }
+  );
+  assert.equal(result.effectiveFilters.bedrooms, 0);
+  assert.equal(result.effectiveFilters.type, 'Apartment');
+});
+
+test('office after studio clears bedrooms and never searches studio offices', () => {
+  const previous = marinaStudioBuyFilters();
+  const afterStudio = applyMessageToSearchFilters(previous, 'I need a studio room.');
+  assert.equal(afterStudio.bedrooms, 0);
+  const afterOffice = applyMessageToSearchFilters(afterStudio, 'Looking for an office in Business Bay.');
+  assert.equal(afterOffice.type, 'Office');
+  assert.equal(afterOffice.location, 'Business Bay');
+  assert.equal(afterOffice.bedrooms, null);
+  assert.equal(afterOffice.purpose, 'Buy');
+  const qualified = qualifyListingSearch('Looking for an office in Business Bay.', {
+    intent: CONVERSATION_INTENTS.BUY,
+    purpose: 'Buy',
+    lastSearchFilters: afterStudio,
+    slotFlow: { awaiting: null },
+  });
+  const reply = `${qualified.reply || ''} ${describeSearchSafe(qualified)}`;
+  assert.equal(/studio office/i.test(reply), false);
+});
+
+function describeSearchSafe(qualified) {
+  const filters = qualified.profilePatch?.lastSearchFilters || {};
+  return `${filters.bedrooms} ${filters.type} ${filters.location}`;
+}
+
+test('zero results with a restrictive budget mention the budget and real stats', async (t) => {
+  t.mock.method(propertyDbService, 'fetchBuyProperties', async () => ({ properties: [], total: 0 }));
+  t.mock.method(propertyDbService, 'getPropertyMarketStats', async () => ({
+    minimumPrice: 2_100_000,
+    averagePrice: 2_800_000,
+    maximumPrice: 3_400_000,
+    totalAvailable: 9,
+  }));
+  const last = applyMessageToSearchFilters(
+    applyMessageToSearchFilters(emptySearchFilters(), 'I need a 2 BHK apartment in Dubai Marina to buy'),
+    'AED 1M - 1.5M'
+  );
+  const result = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: last,
+      userMessage: 'Show me apartments in Dubai Marina.',
+      intent: CONVERSATION_INTENTS.BUY,
+    }
+  );
+  assert.equal(result.searchOutcome, SEARCH_OUTCOME.BUDGET_TOO_LOW);
+  assert.match(result.clarificationReply, /AED 1M–1\.5M/);
+  assert.match(result.clarificationReply, /AED 2\.1M/);
+  assert.match(result.clarificationReply, /AED 2\.8M/);
+  assert.deepEqual(result.options, ['Increase budget', 'Any budget', 'Nearby areas', 'Try 1 BR']);
 });
 
 
