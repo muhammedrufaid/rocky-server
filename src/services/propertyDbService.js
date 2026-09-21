@@ -559,7 +559,7 @@ const getPropertyMarketStats = async ({ search = '', filters = {}, forced = {} }
   const filtersNoPrice = { ...(filters || {}) };
   delete filtersNoPrice.priceMin;
   delete filtersNoPrice.priceMax;
-  delete filtersNoPrice.excludeRefNos;
+  // Keep excludeRefNos / excludePropertyRefNos so "see similar" stats skip already-shown listings.
 
   const pipeline = [
     ...buildCommonPipeline({ search, filters: filtersNoPrice, forced }),

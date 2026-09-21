@@ -80,7 +80,8 @@ const {
   RENT_BUDGET_OPTIONS,
   PROPERTY_TYPE_OPTIONS,
   moreMatchesOptions,
-  noMoreExactOptions,
+  exactResultsExhaustedOptions,
+  noAdditionalSegmentOptions,
 } = require('./chat.tools');
 const propertyDbService = require('../services/propertyDbService');
 
@@ -1063,9 +1064,15 @@ test('Show more uses the same continuation search as See similar properties', as
   assert.deepEqual(result.options, moreMatchesOptions());
 });
 
-test('no additional exact matches returns deterministic refinements, not an LLM skip', async (t) => {
-  const listings = [sampleBuyApartment({ propertyRefNo: 'A' })];
+test('no additional exact matches includes real market min/avg when segment inventory exists', async (t) => {
+  const listings = [sampleBuyApartment({ propertyRefNo: 'A', price: '1200000' })];
   mockBuyInventory(t, listings);
+  t.mock.method(propertyDbService, 'getPropertyMarketStats', async () => ({
+    minimumPrice: 1_650_000,
+    averagePrice: 1_900_000,
+    maximumPrice: 2_100_000,
+    totalAvailable: 4,
+  }));
   const profile = continuationProfile(['A']);
   const result = await executeTool(
     'search_properties',
@@ -1078,15 +1085,48 @@ test('no additional exact matches returns deterministic refinements, not an LLM 
     }
   );
   assert.equal(result.modelPayload?.skipped, undefined);
-  assert.equal(result.searchOutcome, SEARCH_OUTCOME.NO_MORE_MATCHES);
+  assert.equal(result.searchOutcome, SEARCH_OUTCOME.EXACT_RESULTS_EXHAUSTED);
   assert.equal((result.propertyCards || []).length, 0);
-  assert.match(result.clarificationReply, /couldn't find any more 2-bedroom apartments in Dubai South/i);
+  assert.match(result.clarificationReply, /aren't any more 2-bedroom apartments in Dubai South/i);
   assert.match(result.clarificationReply, /AED 1M–1\.5M/);
-  assert.deepEqual(result.options, noMoreExactOptions(profile.lastSearchFilters));
-  assert.equal(result.options.includes('1 BR'), true);
+  assert.match(result.clarificationReply, /AED 1\.65M/);
+  assert.match(result.clarificationReply, /AED 1\.9M/);
+  assert.equal(/already shown/i.test(result.clarificationReply), false);
+  assert.deepEqual(result.options, exactResultsExhaustedOptions(profile.lastSearchFilters));
   assert.equal(result.options.includes('Increase budget'), true);
+  assert.equal(result.options.includes('Try 1 BR'), true);
   assert.equal(result.options.includes('Any budget'), true);
   assert.equal(result.options.includes('Nearby areas'), true);
+});
+
+test('exhausted search with no remaining segment inventory does not invent prices', async (t) => {
+  const listings = [sampleBuyApartment({ propertyRefNo: 'A' })];
+  mockBuyInventory(t, listings);
+  t.mock.method(propertyDbService, 'getPropertyMarketStats', async () => ({
+    minimumPrice: null,
+    averagePrice: null,
+    maximumPrice: null,
+    totalAvailable: 0,
+  }));
+  const profile = continuationProfile(['A']);
+  const result = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: profile.lastSearchFilters,
+      userMessage: 'See similar properties',
+      intent: profile.intent,
+      shownPropertyIds: profile.shownPropertyIds,
+    }
+  );
+  assert.equal(result.searchOutcome, SEARCH_OUTCOME.NO_SEGMENT_INVENTORY);
+  assert.equal((result.propertyCards || []).length, 0);
+  assert.equal(/AED 1\.|minimum|average asking/i.test(result.clarificationReply), false);
+  assert.match(result.clarificationReply, /couldn't find any additional 2-bedroom apartments/i);
+  assert.deepEqual(result.options, noAdditionalSegmentOptions(profile.lastSearchFilters));
+  assert.equal(result.options.includes('Nearby areas'), true);
+  assert.equal(result.options.includes('Try 1 BR'), true);
+  assert.equal(result.options.includes('Change property type'), true);
 });
 
 test('1 BR continuation keeps buy apartment Dubai South budget and searches', async (t) => {
@@ -1150,6 +1190,42 @@ test('Change budget keeps listing criteria and asks budget without searching', a
   assert.equal(propertyDbService.fetchBuyProperties.mock.calls.length, 0);
 });
 
+test('Any budget from an active search clears min/max, stays answered, and searches', async (t) => {
+  mockBuyInventory(t, [
+    sampleBuyApartment({ propertyRefNo: 'A', price: '1200000' }),
+    sampleBuyApartment({ propertyRefNo: 'E', price: '2100000' }),
+  ]);
+  const profile = continuationProfile(['A']);
+  const qualified = qualifyListingSearch('Any budget', profile);
+  assert.equal(qualified.type, 'continue');
+  assert.equal(qualified.profilePatch.lastSearchFilters.budgetProvided, true);
+  assert.equal(qualified.profilePatch.lastSearchFilters.budgetMin, null);
+  assert.equal(qualified.profilePatch.lastSearchFilters.budgetMax, null);
+  assert.equal(qualified.profilePatch.lastSearchFilters.purpose, 'Buy');
+  assert.equal(qualified.profilePatch.lastSearchFilters.bedrooms, 2);
+  assert.equal(qualified.profilePatch.lastSearchFilters.location, 'Dubai South');
+  assert.equal(qualified.profilePatch.lastSearchFilters.type, 'Apartment');
+
+  const result = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: qualified.profilePatch.lastSearchFilters,
+      userMessage: 'Any budget',
+      intent: CONVERSATION_INTENTS.BUY,
+      shownPropertyIds: ['A'],
+      slotFlow: { awaiting: 'emptyResults' },
+    }
+  );
+  assert.equal(result.modelPayload?.skipped, undefined);
+  assert.equal(result.needsBudget, undefined);
+  assert.equal(result.effectiveFilters.budgetProvided, true);
+  assert.equal(result.effectiveFilters.budgetMin, null);
+  assert.equal(result.effectiveFilters.budgetMax, null);
+  assert.equal((result.propertyCards || []).some((c) => c.id === 'A'), false);
+  assert.equal((result.propertyCards || []).map((c) => c.id).includes('E'), true);
+});
+
 test('subsequent show more never returns already shown listing IDs', async (t) => {
   const listings = [
     sampleBuyApartment({ propertyRefNo: 'A' }),
@@ -1157,6 +1233,12 @@ test('subsequent show more never returns already shown listing IDs', async (t) =
     sampleBuyApartment({ propertyRefNo: 'C' }),
   ];
   const seenExcludes = mockBuyInventory(t, listings);
+  t.mock.method(propertyDbService, 'getPropertyMarketStats', async () => ({
+    minimumPrice: null,
+    averagePrice: null,
+    maximumPrice: null,
+    totalAvailable: 0,
+  }));
   const first = await executeTool(
     'search_properties',
     {},
@@ -1183,7 +1265,7 @@ test('subsequent show more never returns already shown listing IDs', async (t) =
   );
   assert.equal((second.propertyCards || []).some((c) => shown.includes(c.id)), false);
   assert.equal(seenExcludes.some((ids) => ids.includes('A') && ids.includes('B') && ids.includes('C')), true);
-  assert.equal(second.searchOutcome, SEARCH_OUTCOME.NO_MORE_MATCHES);
+  assert.equal(second.searchOutcome, SEARCH_OUTCOME.NO_SEGMENT_INVENTORY);
 });
 
 test('view listing UI actions do not restart property qualification', async () => {
@@ -1217,7 +1299,11 @@ test('AED formatter uses compact K/M values', () => {
   assert.equal(formatAed(180000), 'AED 180K');
   assert.equal(formatAed(950000), 'AED 950K');
   assert.equal(formatAed(1100000), 'AED 1.1M');
+  assert.equal(formatAed(1249000), 'AED 1.25M');
+  assert.equal(formatAed(1500000), 'AED 1.5M');
+  assert.equal(formatAed(1650000), 'AED 1.65M');
   assert.equal(formatAed(1700000), 'AED 1.7M');
+  assert.equal(formatAed(1800000), 'AED 1.8M');
   assert.equal(formatAed(2000000), 'AED 2M');
   assert.equal(formatAed(12500000), 'AED 12.5M');
 });

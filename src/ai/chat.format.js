@@ -14,15 +14,12 @@ function parsePriceNumber(value) {
 function formatAed(value) {
   const n = typeof value === 'number' ? value : parsePriceNumber(value);
   if (!Number.isFinite(n) || n < 0) return '';
-  const trim = (x) => String(x).replace(/\.0$/, '');
-  if (n >= 1_000_000) {
-    const m = Math.round((n / 1_000_000) * 10) / 10;
-    return `AED ${trim(m)}M`;
-  }
-  if (n >= 1000) {
-    const k = Math.round((n / 1000) * 10) / 10;
-    return `AED ${trim(k)}K`;
-  }
+  const compact = (raw) => {
+    const rounded = Math.round(raw * 100) / 100;
+    return String(rounded.toFixed(2)).replace(/\.?0+$/, '');
+  };
+  if (n >= 1_000_000) return `AED ${compact(n / 1_000_000)}M`;
+  if (n >= 1000) return `AED ${compact(n / 1000)}K`;
   return `AED ${Math.round(n)}`;
 }
 

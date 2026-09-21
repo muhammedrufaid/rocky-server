@@ -288,9 +288,12 @@ const CONVERSATION_INTENTS = {
 
 const SEARCH_OUTCOME = {
   MATCHES_FOUND: 'MATCHES_FOUND',
+  MORE_EXACT_RESULTS: 'MATCHES_FOUND',
   BUDGET_TOO_LOW: 'BUDGET_TOO_LOW',
+  EXACT_RESULTS_EXHAUSTED: 'EXACT_RESULTS_EXHAUSTED',
   NO_INVENTORY: 'NO_INVENTORY',
-  NO_MORE_MATCHES: 'NO_MORE_MATCHES',
+  NO_SEGMENT_INVENTORY: 'NO_INVENTORY',
+  NO_MORE_MATCHES: 'EXACT_RESULTS_EXHAUSTED',
 };
 
 const LISTING_INTENTS = new Set([
@@ -313,6 +316,38 @@ function emptySearchFilters() {
     types: [],
     purpose: null,
     furnished: null,
+  };
+}
+
+function emptyViewingRequest() {
+  return {
+    active: false,
+    propertyRefNo: null,
+    propertyTitle: null,
+    name: null,
+    email: null,
+    phone: null,
+    preferredDate: null,
+    preferredTime: null,
+    notes: null,
+    submitted: false,
+    askedTimeRefinement: false,
+  };
+}
+
+function copyViewingRequest(vr = {}) {
+  return {
+    active: !!vr.active,
+    propertyRefNo: vr.propertyRefNo || null,
+    propertyTitle: vr.propertyTitle || null,
+    name: vr.name || null,
+    email: vr.email || null,
+    phone: vr.phone || null,
+    preferredDate: vr.preferredDate || null,
+    preferredTime: vr.preferredTime || null,
+    notes: vr.notes || null,
+    submitted: !!vr.submitted,
+    askedTimeRefinement: !!vr.askedTimeRefinement,
   };
 }
 
@@ -544,7 +579,9 @@ function parseContactDetails(text, current = {}) {
         leftover &&
         leftover.split(/\s+/).length <= 4 &&
         /^[A-Za-z][A-Za-z\s.'-]+$/.test(leftover) &&
-        !/\b(villa|apartment|townhouse|barsha|dubai|sell|property|valuation|agent)\b/i.test(leftover)
+        !/\b(villa|apartment|townhouse|barsha|dubai|sell|property|valuation|agent|sunday|saturday|weekend|morning|afternoon|evening|tomorrow|office|shop)\b/i.test(
+          leftover
+        )
       ) {
         name = leftover;
       }
@@ -1092,10 +1129,7 @@ function foundListingsReply(filters = {}, total = 0, { isShowMore = false, newCo
   const area = loc ? ` in ${loc}` : '';
   const purposeSuffix = filters.purpose === 'Off-plan' ? '' : ` ${purposeBit}`;
   if (isShowMore) {
-    const budgetBit =
-      isBudgetProvided(filters) && (filters.budgetMin != null || filters.budgetMax != null)
-        ? ' within your budget'
-        : '';
+    const budgetBit = describeBudgetPossessive(filters);
     return `Here are more ${beds}${type}${area}${budgetBit}.`.replace(/\s+/g, ' ').trim();
   }
   return `I found ${count} ${beds}${type}${area}${purposeSuffix}. Would you like the details?`
@@ -1104,7 +1138,7 @@ function foundListingsReply(filters = {}, total = 0, { isShowMore = false, newCo
 }
 
 function moreMatchesOptions() {
-  return ['See more', 'Change budget', 'Nearby areas'];
+  return ['Show more', 'Change budget', 'Nearby areas'];
 }
 
 function describeBudgetRange(filters = {}) {
@@ -1121,29 +1155,66 @@ function describeBudgetRange(filters = {}) {
   return '';
 }
 
-function noMoreExactMatchesReply(filters = {}) {
+function describeBudgetPossessive(filters = {}) {
+  const range = describeBudgetRange(filters);
+  if (!range) return '';
+  if (range.startsWith('within ')) return ` within your ${range.slice('within '.length)} budget`;
+  if (range.startsWith('from ')) return ` ${range}`;
+  return ` ${range}`;
+}
+
+function exactResultsExhaustedReply(filters = {}, stats = {}) {
   const loc = (filters.location || '').toString().trim();
   const area = loc ? ` in ${loc}` : '';
   const segment = describeBedsAndType(filters, { plural: true });
   const budgetBit = describeBudgetRange(filters);
-  const where = `${segment}${area}${budgetBit ? ` ${budgetBit}` : ''}`;
-  return (
-    `I couldn't find any more ${where}.\n\n` +
-    'Would you like me to broaden the search?'
-  ).replace(/\s+\n/g, '\n');
+  const where = `${segment}${area}${budgetBit ? ` ${budgetBit}` : ''}`.replace(/\s+/g, ' ').trim();
+  const min = stats.minimumPrice != null ? formatAed(stats.minimumPrice) : null;
+  const avg = stats.averagePrice != null ? formatAed(stats.averagePrice) : null;
+  const lines = [`There aren't any more ${where} right now.`];
+  if (min && avg) {
+    lines.push(
+      `Current ${segment}${area} start from around ${min}, with an average asking price of about ${avg}.`
+    );
+  } else if (min) {
+    lines.push(`Current ${segment}${area} start from around ${min}.`);
+  }
+  lines.push(
+    'You can broaden the search by increasing your budget, trying a smaller unit, or checking nearby areas.'
+  );
+  return lines.join('\n\n');
 }
 
-function noMoreExactOptions(filters = {}) {
+function exactResultsExhaustedOptions(filters = {}) {
   const opts = [];
   const capped = isBudgetProvided(filters) && (filters.budgetMin != null || filters.budgetMax != null);
   const anyBudget = isBudgetProvided(filters) && filters.budgetMin == null && filters.budgetMax == null;
   if (capped) opts.push('Increase budget');
-  opts.push('Nearby areas');
   const n = Number(filters.bedrooms);
-  if (Number.isFinite(n) && n >= 2) opts.push('1 BR');
-  else if (n === 1) opts.push('Studio');
+  if (Number.isFinite(n) && n >= 2) opts.push('Try 1 BR');
+  else if (n === 1) opts.push('Try Studio');
+  opts.push('Nearby areas');
   if (!anyBudget) opts.push('Any budget');
   if (!opts.includes('Increase budget') && !opts.includes('Any budget')) opts.push('Change budget');
+  return opts;
+}
+
+function noAdditionalSegmentReply(filters = {}) {
+  const loc = (filters.location || '').toString().trim() || 'that area';
+  const segment = describeBedsAndType(filters, { plural: true });
+  return (
+    `I couldn't find any additional ${segment} currently available in ${loc}.\n\n` +
+    'I can broaden the search by trying nearby areas, another bedroom configuration, or a different property type.'
+  );
+}
+
+function noAdditionalSegmentOptions(filters = {}) {
+  const opts = ['Nearby areas'];
+  const n = Number(filters.bedrooms);
+  if (Number.isFinite(n) && n >= 2) opts.push('Try 1 BR');
+  else if (n === 1) opts.push('Try Studio');
+  else opts.push('Change bedrooms');
+  opts.push('Change property type');
   return opts;
 }
 
@@ -1207,7 +1278,7 @@ function parseEmptyResultChoice(text) {
   if (/^nearby areas$/i.test(raw)) return { nearby: true };
   if (/^(change|increase) budget$/i.test(raw)) return { budget: true };
   if (/^change bedrooms$/i.test(raw)) return { askBedrooms: true };
-  if (/^property type$/i.test(raw)) return { askType: true };
+  if (/^(property type|change property type)$/i.test(raw)) return { askType: true };
   const tryBr = raw.match(/^try\s+(.+)$/i);
   if (tryBr) {
     const choice = parseBedroomChoice(tryBr[1]);
@@ -1347,6 +1418,145 @@ function applyTypesToFilters(filters, types) {
   filters.types = list;
   filters.type = list.length === 1 ? list[0] : list.length ? list.join(', ') : null;
   return filters;
+}
+
+const RESIDENTIAL_PROPERTY_TYPES = new Set([
+  'apartment',
+  'villa',
+  'townhouse',
+  'penthouse',
+  'duplex',
+  'studio',
+  'flat',
+  'house',
+  'hotel apartment',
+  'residential',
+]);
+
+const COMMERCIAL_PROPERTY_TYPES = new Set([
+  'office',
+  'shop',
+  'retail',
+  'warehouse',
+  'commercial',
+  'commercial building',
+  'commercial land',
+  'store',
+  'showroom',
+  'industrial',
+  'land',
+  'plot',
+  'building',
+]);
+
+function normalizeTypeKey(type) {
+  return String(type || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ');
+}
+
+function isResidentialPropertyType(type) {
+  const key = normalizeTypeKey(type);
+  if (!key) return false;
+  if (COMMERCIAL_PROPERTY_TYPES.has(key)) return false;
+  if (RESIDENTIAL_PROPERTY_TYPES.has(key)) return true;
+  const canonical = normalizePropertyType(key);
+  if (!canonical) return false;
+  const canonicalKey = normalizeTypeKey(canonical);
+  return RESIDENTIAL_PROPERTY_TYPES.has(canonicalKey) && !COMMERCIAL_PROPERTY_TYPES.has(canonicalKey);
+}
+
+function isCommercialPropertyType(type) {
+  const key = normalizeTypeKey(type);
+  if (!key) return false;
+  if (RESIDENTIAL_PROPERTY_TYPES.has(key)) return false;
+  if (COMMERCIAL_PROPERTY_TYPES.has(key)) return true;
+  const canonical = normalizePropertyType(key);
+  if (!canonical) return false;
+  const canonicalKey = normalizeTypeKey(canonical);
+  return COMMERCIAL_PROPERTY_TYPES.has(canonicalKey) && !RESIDENTIAL_PROPERTY_TYPES.has(canonicalKey);
+}
+
+function searchTypesAreCommercial(filters = {}) {
+  const types = typesFromFilters(filters);
+  if (!types.length) return false;
+  return types.every(isCommercialPropertyType);
+}
+
+function requiresBedroomsForSearch(filters = {}) {
+  const types = typesFromFilters(filters);
+  if (!types.length) return true;
+  if (searchTypesAreCommercial(filters)) return false;
+  return types.some(isResidentialPropertyType) || !types.some(isCommercialPropertyType);
+}
+
+function clearBedroomFilters(filters) {
+  if (!filters) return filters;
+  filters.bedrooms = null;
+  filters.bedroomsMin = null;
+  filters.bedroomsAny = false;
+  filters.bedroomsResolved = false;
+  return filters;
+}
+
+function clearBudgetFilters(filters) {
+  if (!filters) return filters;
+  filters.budgetMin = null;
+  filters.budgetMax = null;
+  filters.budgetProvided = false;
+  return filters;
+}
+
+function isRentalPurpose(purpose) {
+  return normalizePurpose(purpose) === 'Rent';
+}
+
+function bedroomsCompatibleWithTypes(filters = {}) {
+  if (searchTypesAreCommercial(filters)) return false;
+  const types = typesFromFilters(filters);
+  const n = Number(filters.bedrooms);
+  if (n === 0) {
+    return types.some((t) => /apartment|studio|flat/i.test(String(t || '')));
+  }
+  return true;
+}
+
+function normalizeSearchProfileAfterPatch(previousProfile, patch) {
+  const prev = copySearchFilters(previousProfile || emptySearchFilters());
+  const incoming = patch && typeof patch === 'object' ? patch : {};
+  const next = copySearchFilters({
+    ...prev,
+    ...incoming,
+  });
+  if (incoming.types !== undefined || incoming.type !== undefined) {
+    applyTypesToFilters(next, typesFromFilters(incoming.types !== undefined ? incoming : next));
+  }
+
+  if (!bedroomsCompatibleWithTypes(next)) {
+    clearBedroomFilters(next);
+  }
+
+  const prevPurpose = normalizePurpose(prev.purpose);
+  const nextPurpose = normalizePurpose(next.purpose);
+  if (prevPurpose && nextPurpose && prevPurpose !== nextPurpose) {
+    if (isRentalPurpose(prevPurpose) !== isRentalPurpose(nextPurpose)) {
+      clearBudgetFilters(next);
+    }
+  }
+
+  return next;
+}
+
+function getRequiredSearchFields(profileOrFilters = {}) {
+  const filters = profileOrFilters.lastSearchFilters
+    ? copySearchFilters(profileOrFilters.lastSearchFilters)
+    : copySearchFilters(profileOrFilters);
+  const required = ['intent'];
+  if (requiresBedroomsForSearch(filters)) required.push('bedrooms');
+  required.push('propertyType', 'location', 'budget');
+  return required;
 }
 
 function parsePropertyTypesFromMessage(text) {
@@ -1659,11 +1869,14 @@ function budgetOptionsForPurpose(purpose) {
 }
 
 function nextMissingListingSlot(filters = {}) {
-  if (!normalizePurpose(filters.purpose)) return 'intent';
-  if (!isBedroomsResolved(filters)) return 'bedrooms';
-  if (!typesFromFilters(filters).length) return 'propertyType';
-  if (!String(filters.location || '').trim()) return 'location';
-  if (!isBudgetProvided(filters)) return 'budget';
+  const required = getRequiredSearchFields(filters);
+  for (const field of required) {
+    if (field === 'intent' && !normalizePurpose(filters.purpose)) return 'intent';
+    if (field === 'bedrooms' && !isBedroomsResolved(filters)) return 'bedrooms';
+    if (field === 'propertyType' && !typesFromFilters(filters).length) return 'propertyType';
+    if (field === 'location' && !String(filters.location || '').trim()) return 'location';
+    if (field === 'budget' && !isBudgetProvided(filters)) return 'budget';
+  }
   return null;
 }
 
@@ -1721,7 +1934,7 @@ function qualifyListingSearch(message, profile = {}) {
 
   const awaiting = profile.slotFlow?.awaiting;
   if (
-    ['sell', 'pmNeed', 'pmProperty', 'serviceContact', 'serviceLocation', 'sellServiceLocation'].includes(
+    ['sell', 'pmNeed', 'pmProperty', 'serviceContact', 'serviceLocation', 'sellServiceLocation', 'viewingContact', 'viewingTime'].includes(
       awaiting
     )
   ) {
@@ -1813,7 +2026,9 @@ function qualifyListingSearch(message, profile = {}) {
     purpose: next.purpose || profile.purpose,
     intent: purposeToIntent(next.purpose) || profile.intent,
     preferredAreas: next.location ? [next.location] : undefined,
-    bedrooms: next.bedrooms ?? next.bedroomsMin ?? profile.bedrooms,
+    bedrooms: requiresBedroomsForSearch(next)
+      ? next.bedrooms ?? next.bedroomsMin ?? null
+      : null,
     lastSearchFilters: next,
     slotFlow: question
       ? { awaiting: question.awaiting, alternatives: null }
@@ -1821,6 +2036,8 @@ function qualifyListingSearch(message, profile = {}) {
   };
   if (isBudgetProvided(next)) {
     patch.budget = { min: next.budgetMin ?? null, max: next.budgetMax ?? null };
+  } else {
+    patch.budget = { min: null, max: null };
   }
   if (missing) {
     return {
@@ -2268,7 +2485,7 @@ function applyMessageToSearchFilters(filters, message, { awaiting } = {}) {
   if (budget) applyBudgetChoice(next, budget);
   if (furnished) next.furnished = furnished;
   if (purpose) next.purpose = purpose;
-  return next;
+  return normalizeSearchProfileAfterPatch(filters, next);
 }
 
 function listingIntakeReply(intent) {
@@ -2635,7 +2852,7 @@ function forcedFromPurpose(purpose) {
   return null;
 }
 
-async function getSegmentMarketStats(filters = {}) {
+async function getSegmentMarketStats(filters = {}, { excludeRefNos = [] } = {}) {
   const purpose = normalizePurpose(filters.purpose);
   const forced = forcedFromPurpose(purpose);
   if (!forced) {
@@ -2650,6 +2867,8 @@ async function getSegmentMarketStats(filters = {}) {
   delete queryFilters.priceMin;
   delete queryFilters.priceMax;
   delete queryFilters.excludeRefNos;
+  const exclude = uniqueIdList(excludeRefNos);
+  if (exclude.length) queryFilters.excludeRefNos = exclude;
   if (purpose === 'Buy') queryFilters.offPlan = 'No';
 
   try {
@@ -3153,7 +3372,50 @@ async function emptyResultsResult(effectiveFilters) {
   };
 }
 
-function exhaustedResultsResult(effectiveFilters, shownCount = 0) {
+async function exhaustedResultsResult(effectiveFilters, { shownCount = 0, excludeRefNos = [] } = {}) {
+  const hasBudgetCap =
+    Number.isFinite(Number(effectiveFilters.budgetMax)) || Number.isFinite(Number(effectiveFilters.budgetMin));
+  const stats = await getSegmentMarketStats(effectiveFilters, { excludeRefNos });
+  const additionalInventory = (stats.totalAvailable || 0) > 0;
+  const budgetIsLimiter =
+    hasBudgetCap &&
+    additionalInventory &&
+    Number.isFinite(Number(stats.minimumPrice)) &&
+    Number.isFinite(Number(effectiveFilters.budgetMax)) &&
+    Number(stats.minimumPrice) > Number(effectiveFilters.budgetMax);
+
+  if (additionalInventory && hasBudgetCap) {
+    return {
+      propertyCards: [],
+      sources: [],
+      leadCaptured: false,
+      profilePatch: {
+        ...profilePatchFromPropertyFilters(effectiveFilters),
+        lastSearchFilters: effectiveFilters,
+        slotFlow: { awaiting: 'emptyResults', alternatives: null },
+      },
+      viewAllMatching: null,
+      effectiveFilters,
+      needsEmptyResults: true,
+      searchOutcome: SEARCH_OUTCOME.EXACT_RESULTS_EXHAUSTED,
+      marketStats: stats,
+      clarificationReply: exactResultsExhaustedReply(effectiveFilters, stats),
+      options: exactResultsExhaustedOptions(effectiveFilters),
+      ...emptyResultsClarificationFields(),
+      modelPayload: {
+        count: 0,
+        needsEmptyResults: true,
+        exhausted: true,
+        budgetIsLimiter,
+        searchOutcome: SEARCH_OUTCOME.EXACT_RESULTS_EXHAUSTED,
+        shownCount,
+        marketStats: stats,
+        instruction:
+          'No additional exact listings remain under the current budget. Use the server reply and marketStats. Do not invent prices, counts, or ROI.',
+      },
+    };
+  }
+
   return {
     propertyCards: [],
     sources: [],
@@ -3166,18 +3428,19 @@ function exhaustedResultsResult(effectiveFilters, shownCount = 0) {
     viewAllMatching: null,
     effectiveFilters,
     needsEmptyResults: true,
-    searchOutcome: SEARCH_OUTCOME.NO_MORE_MATCHES,
-    clarificationReply: noMoreExactMatchesReply(effectiveFilters),
-    options: noMoreExactOptions(effectiveFilters),
+    searchOutcome: SEARCH_OUTCOME.NO_SEGMENT_INVENTORY,
+    marketStats: { minimumPrice: null, averagePrice: null, maximumPrice: null, totalAvailable: 0 },
+    clarificationReply: noAdditionalSegmentReply(effectiveFilters),
+    options: noAdditionalSegmentOptions(effectiveFilters),
     ...emptyResultsClarificationFields(),
     modelPayload: {
       count: 0,
       needsEmptyResults: true,
       exhausted: true,
-      searchOutcome: SEARCH_OUTCOME.NO_MORE_MATCHES,
+      searchOutcome: SEARCH_OUTCOME.NO_SEGMENT_INVENTORY,
       shownCount,
       instruction:
-        'All matching listings for this search were already shown. Do not repeat previous property cards. Do not invent new listings. Do not say you cannot pull matches — the server already searched.',
+        'There is no additional inventory in this segment even without a budget filter. Do not invent minimum or average prices. Offer nearby areas, bedroom, or type changes.',
     },
   };
 }
@@ -3318,7 +3581,10 @@ async function searchProperties(
 
   if (propertyCards.length === 0) {
     if (excludeIds.length && total > 0) {
-      return exhaustedResultsResult(effectiveFilters, excludeIds.length);
+      return exhaustedResultsResult(effectiveFilters, {
+        shownCount: excludeIds.length,
+        excludeRefNos: excludeIds,
+      });
     }
     return emptyResultsResult(effectiveFilters);
   }
@@ -3665,6 +3931,9 @@ module.exports = {
   budgetClarificationReply,
   propertyTypeClarificationReply,
   moreMatchesOptions,
-  noMoreExactOptions,
-  noMoreExactMatchesReply,
+  exactResultsExhaustedOptions,
+  exactResultsExhaustedReply,
+  noAdditionalSegmentOptions,
+  noMoreExactOptions: exactResultsExhaustedOptions,
+  noMoreExactMatchesReply: exactResultsExhaustedReply,
 };
