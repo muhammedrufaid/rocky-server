@@ -1577,8 +1577,8 @@ function parsePurposeFromMessage(text) {
     ) ||
       /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+to\s+buy\b/.test(lower) ||
       /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+for\s+(?:a\s+|an\s+)?(?:to\s+)?buy\b/.test(lower) ||
-      /\b(?:want|would\s+like|('d\s+like)|need)\s+to\s+buy\b/.test(lower) ||
-      /\b(?:want|would\s+like|('d\s+like)|need)\s+to\s+purchase\b/.test(lower) ||
+      /\b(?:want|would\s+like|('d\s+like)|need)\s+(?:to\s+)?buy\b/.test(lower) ||
+      /\b(?:want|would\s+like|('d\s+like)|need)\s+(?:to\s+)?purchase\b/.test(lower) ||
       /\bto\s+buy\b/.test(lower) ||
       /\bto\s+purchase\b/.test(lower) ||
       /\bfor\s+sale\b/.test(lower) ||
@@ -1590,13 +1590,13 @@ function parsePurposeFromMessage(text) {
 
   // Rent: same coverage including "I'm looking to rent" / "for rent" / "apartment to rent"
   if (
-    !/\bbuy\b|\bpurchase\b|\bfor\s+sale\b|off[\s-_]*plan/.test(lower) &&
+    !/\bbuy\b|\bpurchase\b|\bfor\s+sale\b|off[\s-_]*plan|\brent\s+collection\b/.test(lower) &&
     (/^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|i'?m\s+(looking\s+to\s+|looking\s+for\s+)?|i\s+am\s+(looking\s+to\s+|looking\s+for\s+)?|looking\s+to\s+|looking\s+for\s+)?(rent|rental|lease|renting|leasing)\b/.test(
       lower
     ) ||
       /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+to\s+rent\b/.test(lower) ||
       /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+for\b.{0,60}\b(to\s+rent|for\s+rent|rental)\b/.test(lower) ||
-      /\b(?:want|would\s+like|('d\s+like)|need)\s+to\s+rent\b/.test(lower) ||
+      /\b(?:want|would\s+like|('d\s+like)|need)\s+(?:to\s+)?(?:rent|rental|lease)\b/.test(lower) ||
       /\bneed\s+a\b.{0,40}\b(for\s+rent|to\s+rent)\b/.test(lower) ||
       /\b(apartment|villa|townhouse|penthouse|studio|flat|property|home)\s+to\s+rent\b/.test(lower) ||
       /\bfor\s+rent\b/.test(lower) ||
@@ -1792,15 +1792,16 @@ function foundListingsReply(filters = {}, total = 0, { isShowMore = false, newCo
   const count = Number.isFinite(Number(total)) ? Number(total) : 0;
   const shownNow = Number.isFinite(Number(newCount)) && newCount > 0 ? newCount : count;
   const type = describeTypePhrase(filters, isShowMore ? shownNow : count);
+  const purpose = normalizePurpose(filters.purpose);
   let purposeBit = 'for sale';
-  if (filters.purpose === 'Rent') purposeBit = 'to rent';
-  if (filters.purpose === 'Off-plan') purposeBit = 'off-plan';
-  const purposeSuffix = filters.purpose === 'Off-plan' ? '' : ` ${purposeBit}`;
+  if (purpose === 'Rent') purposeBit = 'for rent';
+  if (purpose === 'Off-plan') purposeBit = 'off-plan';
+  const purposeSuffix = purpose === 'Off-plan' ? '' : ` ${purposeBit}`;
   if (isShowMore) {
     const budgetBit = describeBudgetPossessive(filters);
     return `Here are more ${beds}${type}${area}${budgetBit}.`.replace(/\s+/g, ' ').trim();
   }
-  return `I found ${count} ${beds}${type}${area}${purposeSuffix}. Would you like the details?`
+  return `I found ${count} ${beds}${type}${purposeSuffix}${area}. Would you like the details?`
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -2423,7 +2424,7 @@ function isUnrestrictedLocationPhrase(text) {
   if (/\bno\s+preference\s+(on|for|about)\s+(the\s+)?(location|area|community|where)\b/.test(raw)) return true;
   if (/\b(all\s+over\s+dubai|across\s+dubai|dubai[\s-]*wide)\b/.test(raw)) return true;
   if (/\bwherever(\s+(in\s+dubai|is\s+fine|you\s+(have|can)))\b/.test(raw)) return true;
-  if (/^(any|anywhere|all areas|all locations)$/.test(raw)) return true;
+  if (/^(anywhere|all areas|all locations)$/.test(raw)) return true;
   if (/\bany\s+area\s+is\s+fine\b/.test(raw)) return true;
   return false;
 }
@@ -2702,7 +2703,8 @@ function locationClarificationReply() {
   return 'Which area or community are you interested in?';
 }
 
-function budgetClarificationReply() {
+function budgetClarificationReply(filters = {}) {
+  if (isRentalPurpose(filters.purpose)) return 'What is your rental budget?';
   return 'What is your budget range?';
 }
 
@@ -2763,7 +2765,7 @@ function listingSlotQuestion(slot, filters = {}) {
   }
   if (slot === 'budget') {
     return {
-      reply: budgetClarificationReply(),
+      reply: budgetClarificationReply(filters),
       options: budgetOptionsForPurpose(filters.purpose),
       awaiting: 'budget',
     };
@@ -2905,6 +2907,18 @@ function qualifyListingSearch(message, profile = {}) {
   } else {
     patch.budget = { min: null, max: null };
   }
+  Object.assign(patch, listingSearchResetPatch(last, next));
+  console.log(
+    'LISTING_PROFILE_STATE',
+    JSON.stringify({
+      userMessage: String(message || ''),
+      intent: patch.intent,
+      purpose: next.purpose || null,
+      budgetProvided: next.budgetProvided === true,
+      pendingSlot: patch.slotFlow?.awaiting || null,
+      missing: missing || null,
+    })
+  );
   if (missing) {
     return {
       type: 'clarify',
@@ -2914,12 +2928,6 @@ function qualifyListingSearch(message, profile = {}) {
       missing,
     };
   }
-  const locationChanged =
-    !!last.location &&
-    !!next.location &&
-    last.location.trim().toLowerCase() !== next.location.trim().toLowerCase();
-  const locationCleared = !!last.location && !next.location;
-  if (locationChanged || locationCleared) patch.resetShownPropertyIds = true;
   return { type: 'continue', profilePatch: patch, missing: null };
 }
 
@@ -3332,15 +3340,60 @@ function parseFurnishedFromMessage(text) {
   return null;
 }
 
+function isStandaloneAnyBudgetReply(text) {
+  return /^(any|any budget|no budget|no limit)$/i.test(String(text || '').trim());
+}
+
+function shouldTreatMessageAsAnyBudget(filters = {}, message, awaiting) {
+  const raw = String(message || '').trim();
+  if (!isStandaloneAnyBudgetReply(raw)) return false;
+  if (awaiting === 'budget' || /^any budget$/i.test(raw)) return true;
+  if (['location', 'nearbyArea', 'bedrooms', 'propertyType', 'purpose'].includes(awaiting)) {
+    return false;
+  }
+  return (
+    !isBudgetProvided(filters) &&
+    !!normalizePurpose(filters.purpose) &&
+    (!!String(filters.location || '').trim() || filters.locationAny === true)
+  );
+}
+
+function listingSearchResetPatch(previous = {}, next = {}) {
+  const prevPurpose = normalizePurpose(previous.purpose);
+  const nextPurpose = normalizePurpose(next.purpose);
+  const purposeChanged = !!prevPurpose && !!nextPurpose && prevPurpose !== nextPurpose;
+  const locationChanged =
+    !!previous.location &&
+    !!next.location &&
+    previous.location.trim().toLowerCase() !== next.location.trim().toLowerCase();
+  const locationCleared = !!previous.location && !next.location;
+  if (!purposeChanged && !locationChanged && !locationCleared) return {};
+  return {
+    resetShownPropertyIds: true,
+    lastPropertyCards: [],
+    shownPropertyIds: [],
+  };
+}
+
 function applyMessageToSearchFilters(filters, message, { awaiting } = {}) {
   const next = copySearchFilters(filters);
   const raw = String(message || '').trim();
-  const awaitingBudget = awaiting === 'budget' || /^any budget$/i.test(raw);
 
-  if (awaitingBudget && /^(any|any budget|no budget|no limit)$/i.test(raw)) {
+  if (shouldTreatMessageAsAnyBudget(filters, message, awaiting)) {
     applyBudgetChoice(next, { any: true });
     const purposeOnly = parsePurposeFromMessage(message);
     if (purposeOnly) next.purpose = purposeOnly;
+    console.log(
+      'LISTING_PROFILE_STATE',
+      JSON.stringify({
+        userMessage: raw,
+        intent: purposeToIntent(next.purpose) || null,
+        purpose: next.purpose || null,
+        budgetProvided: next.budgetProvided === true,
+        pendingSlot: null,
+        applied: 'any-budget',
+      })
+    );
     return normalizeSearchProfileAfterPatch(filters, next, {
       explicitPurpose: !!purposeOnly || isPurposeChipReply(message),
     });
@@ -3357,7 +3410,11 @@ function applyMessageToSearchFilters(filters, message, { awaiting } = {}) {
   }
   const skipBedsForLocationAny =
     unrestrictedLocation && !/\b(studio|bed|br|bhk|bedroom)s?\b/i.test(raw);
-  const beds = awaiting === 'budget' || skipBedsForLocationAny ? null : parseBedroomChoice(message);
+  const skipBedsForAnyReply = awaiting !== 'bedrooms' && isStandaloneAnyBudgetReply(raw);
+  const beds =
+    awaiting === 'budget' || skipBedsForLocationAny || skipBedsForAnyReply
+      ? null
+      : parseBedroomChoice(message);
   const budget = parseBudgetFromMessage(message, { requireBudgetContext: awaiting === 'budget' });
   const furnished = parseFurnishedFromMessage(message);
   const purpose = parsePurposeFromMessage(message);
@@ -3530,9 +3587,19 @@ function trustedPurpose({ lastSearchFilters = {}, userMessage, slotFlow, intent,
 
   const next = effectiveFilters || lastSearchFilters;
   if (isPropertyCategoryChange(lastSearchFilters, next)) return null;
-  if (searchTypesAreCommercial(next) && !normalizePurpose(lastSearchFilters?.purpose)) return null;
+  if (
+    searchTypesAreCommercial(next) &&
+    !normalizePurpose(next.purpose) &&
+    !normalizePurpose(lastSearchFilters?.purpose)
+  ) {
+    return null;
+  }
 
-  const locked = intentToPurpose(intent) || normalizePurpose(lastSearchFilters?.purpose);
+  // Current-turn overlay / persisted filters win over a stale conversation intent.
+  const locked =
+    normalizePurpose(next.purpose) ||
+    normalizePurpose(lastSearchFilters?.purpose) ||
+    intentToPurpose(intent);
   if (!locked) return null;
 
   if (slotFlow?.awaiting === 'bedrooms' || slotFlow?.awaiting === 'listingIntake') return locked;
@@ -3604,9 +3671,20 @@ function listingQueryOpts(filters, search) {
 }
 
 async function fetchByPurpose(purpose, opts) {
-  if (purpose === 'Rent') return propertyDbService.fetchRentProperties(opts);
-  if (purpose === 'Off-plan') return propertyDbService.fetchOffPlanProperties(opts);
-  if (purpose === 'Buy') {
+  const requested = normalizePurpose(purpose);
+  console.log(
+    'PROPERTY_DB_QUERY',
+    JSON.stringify({
+      purpose: requested,
+      propertyPurpose: requested === 'Off-plan' ? undefined : requested,
+      offPlan: requested === 'Off-plan' ? 'Yes' : requested === 'Buy' ? 'No' : undefined,
+      search: opts?.search || null,
+      filters: opts?.filters || {},
+    })
+  );
+  if (requested === 'Rent') return propertyDbService.fetchRentProperties(opts);
+  if (requested === 'Off-plan') return propertyDbService.fetchOffPlanProperties(opts);
+  if (requested === 'Buy') {
     const filters = { ...(opts.filters || {}), offPlan: 'No' };
     return propertyDbService.fetchBuyProperties({ ...opts, filters });
   }
@@ -3816,8 +3894,9 @@ async function getSegmentMarketStats(filters = {}, { excludeRefNos = [] } = {}) 
 }
 
 function purposePhrase(filters = {}) {
-  if (filters.purpose === 'Rent') return 'to rent';
-  if (filters.purpose === 'Off-plan') return 'off-plan';
+  const purpose = normalizePurpose(filters.purpose);
+  if (purpose === 'Rent') return 'for rent';
+  if (purpose === 'Off-plan') return 'off-plan';
   return 'for sale';
 }
 
@@ -4988,6 +5067,7 @@ module.exports = {
   nextMissingListingSlot,
   isBudgetProvided,
   listingSlotQuestion,
+  listingSearchResetPatch,
   qualifyListingSearch,
   BUY_BUDGET_OPTIONS,
   RENT_BUDGET_OPTIONS,
