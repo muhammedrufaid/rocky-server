@@ -18,6 +18,7 @@ const {
   normalizeSearchProfileAfterPatch,
   requiresBedroomsForSearch,
   buildViewingLeadIntent,
+  logViewingDebug,
 } = require('./chat.tools');
 const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion } = require('./chat.tools');
 
@@ -1363,6 +1364,31 @@ async function maybeCaptureSellLead(sessionId, profile, message) {
 
 async function maybeCaptureViewingLead(sessionId, profile) {
   const vr = copyViewingRequest(profile.viewingRequest || {});
+  if (vr.submitted) {
+    logViewingDebug('VIEWING_LEAD_CREATE', {
+      sessionId,
+      skipped: true,
+      reason: 'already_submitted',
+      propertyRefNo: vr.propertyRefNo || null,
+    });
+    return {
+      profile,
+      leadCaptured: true,
+      result: {
+        leadCaptured: true,
+        modelPayload: { ok: true, alreadyCaptured: true },
+      },
+    };
+  }
+  logViewingDebug('VIEWING_LEAD_CREATE', {
+    sessionId,
+    skipped: false,
+    reason: 'attempt',
+    propertyRefNo: vr.propertyRefNo || null,
+    name: vr.name || null,
+    email: vr.email || null,
+    phone: vr.phone || null,
+  });
   const result = await executeTool(
     'capture_lead',
     {

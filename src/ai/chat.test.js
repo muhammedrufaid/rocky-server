@@ -98,6 +98,8 @@ const {
   applyViewingRequestFlow,
   finalizeViewingCapture,
   parseContactDetails,
+  parseViewingContactDetails,
+  viewingMissingContactFields,
   isListingSearchOverride,
   viewingFailureReply,
   viewingCloseReply,
@@ -1473,6 +1475,168 @@ test('multi-field viewing contact is extracted in one message', () => {
   assert.equal(vr.phone.replace(/\s/g, ''), '0501234567');
   assert.equal(/name and either/i.test(details.reply || ''), false);
   assert.equal(/please share your name/i.test(details.reply || ''), false);
+});
+
+function viewingSession(profile = marinaStudioBuyProfile()) {
+  const started = applyViewingRequestFlow('Book a viewing', profile, []);
+  return {
+    ...profile,
+    viewingRequest: started.profilePatch.viewingRequest,
+    slotFlow: started.profilePatch.slotFlow,
+  };
+}
+
+test('viewing contact asks only for name after email and phone', () => {
+  const afterContact = applyViewingRequestFlow(
+    'john@gmail.com\n0501234567',
+    viewingSession(),
+    []
+  );
+  const vr = afterContact.profilePatch.viewingRequest;
+  assert.equal(vr.email, 'john@gmail.com');
+  assert.equal(vr.phone.replace(/\s/g, ''), '0501234567');
+  assert.equal(vr.name, null);
+  assert.match(afterContact.reply, /please share your name as well/i);
+  assert.equal(/phone number or email/i.test(afterContact.reply), false);
+
+  const afterName = applyViewingRequestFlow(
+    'John Smith',
+    {
+      ...marinaStudioBuyProfile(),
+      viewingRequest: vr,
+      slotFlow: afterContact.profilePatch.slotFlow,
+    },
+    []
+  );
+  assert.equal(afterName.profilePatch.viewingRequest.name, 'John Smith');
+  assert.equal(afterName.profilePatch.viewingRequest.email, 'john@gmail.com');
+  assert.equal(afterName.profilePatch.viewingRequest.phone.replace(/\s/g, ''), '0501234567');
+  assert.equal(/please share your name/i.test(afterName.reply || ''), false);
+  assert.ok(
+    afterName.type === 'submit_viewing' ||
+      /preferred weekend time|agent coordinate/i.test(afterName.reply || '')
+  );
+});
+
+test('labeled viewing name is extracted and not asked again', () => {
+  const withReachable = applyViewingRequestFlow('john@gmail.com\n0501234567', viewingSession(), []);
+  const afterName = applyViewingRequestFlow(
+    'name : ruftest',
+    {
+      ...marinaStudioBuyProfile(),
+      viewingRequest: withReachable.profilePatch.viewingRequest,
+      slotFlow: withReachable.profilePatch.slotFlow,
+    },
+    []
+  );
+  assert.equal(afterName.profilePatch.viewingRequest.name, 'ruftest');
+  assert.equal(/please share your name/i.test(afterName.reply || ''), false);
+});
+
+test('prefixed viewing names are extracted', () => {
+  const withReachable = applyViewingRequestFlow('john@gmail.com\n0501234567', viewingSession(), []);
+  const afterName = applyViewingRequestFlow(
+    'my name is Ali',
+    {
+      ...marinaStudioBuyProfile(),
+      viewingRequest: withReachable.profilePatch.viewingRequest,
+      slotFlow: withReachable.profilePatch.slotFlow,
+    },
+    []
+  );
+  assert.equal(afterName.profilePatch.viewingRequest.name, 'Ali');
+  assert.equal(/please share your name/i.test(afterName.reply || ''), false);
+});
+
+test('short standalone viewing names are accepted', () => {
+  const withReachable = applyViewingRequestFlow('john@gmail.com\n0501234567', viewingSession(), []);
+  for (const name of ['Ali', 'John', 'Rufd']) {
+    const parsed = parseViewingContactDetails(name, withReachable.profilePatch.viewingRequest);
+    assert.equal(parsed.name, name, name);
+    assert.equal(parsed.email, 'john@gmail.com');
+    assert.equal(parsed.phone.replace(/\s/g, ''), '0501234567');
+  }
+});
+
+test('email-only viewing contact asks for name not phone', () => {
+  const afterEmail = applyViewingRequestFlow('john@gmail.com', viewingSession(), []);
+  assert.equal(afterEmail.profilePatch.viewingRequest.email, 'john@gmail.com');
+  assert.match(afterEmail.reply, /please share your name as well/i);
+  assert.equal(/phone number/i.test(afterEmail.reply), false);
+  assert.deepEqual(viewingMissingContactFields(afterEmail.profilePatch.viewingRequest), [
+    'name',
+    'phone',
+  ]);
+});
+
+test('labeled comma-separated viewing contact extracts all fields', () => {
+  const details = applyViewingRequestFlow(
+    'name: John Smith, email: john@gmail.com, phone: 0501234567',
+    viewingSession(),
+    []
+  );
+  const vr = details.profilePatch.viewingRequest;
+  assert.equal(vr.name, 'John Smith');
+  assert.equal(vr.email, 'john@gmail.com');
+  assert.equal(vr.phone.replace(/\s/g, ''), '0501234567');
+  assert.equal(/please share your name/i.test(details.reply || ''), false);
+  assert.equal(/name and either/i.test(details.reply || ''), false);
+});
+
+test('generic parser does not treat a location reply as a name', () => {
+  const parsed = parseContactDetails('Al Barsha', {});
+  assert.equal(parsed.name, null);
+});
+
+test('extra messages after a submitted viewing do not resubmit', () => {
+  const profile = {
+    ...marinaStudioBuyProfile(),
+    viewingRequest: {
+      ...emptyViewingRequest(),
+      active: false,
+      submitted: true,
+      propertyRefNo: 'ABC123',
+      name: 'John Smith',
+      email: 'john@gmail.com',
+      phone: '0501234567',
+      preferredTime: 'Agent can coordinate',
+    },
+    slotFlow: { awaiting: null },
+  };
+  assert.equal(applyViewingRequestFlow('thanks', profile, []), null);
+
+  const stuck = applyViewingRequestFlow(
+    'please book it again',
+    {
+      ...profile,
+      viewingRequest: { ...profile.viewingRequest, active: true },
+      slotFlow: { awaiting: 'viewingTime' },
+    },
+    []
+  );
+  assert.notEqual(stuck?.type, 'submit_viewing');
+  assert.equal(stuck.profilePatch.viewingRequest.submitted, true);
+  assert.equal(stuck.profilePatch.viewingRequest.active, false);
+});
+
+test('Agent can coordinate submits the viewing once after contact is complete', () => {
+  const withContact = applyViewingRequestFlow(
+    'John Smith\njohn@gmail.com\n0501234567',
+    viewingSession(),
+    []
+  );
+  const afterTime = applyViewingRequestFlow(
+    'Agent can coordinate',
+    {
+      ...marinaStudioBuyProfile(),
+      viewingRequest: withContact.profilePatch.viewingRequest,
+      slotFlow: withContact.profilePatch.slotFlow,
+    },
+    []
+  );
+  assert.equal(afterTime.type, 'submit_viewing');
+  assert.equal(afterTime.profilePatch.viewingRequest.preferredTime, 'Agent can coordinate');
+  assert.equal(afterTime.profilePatch.viewingRequest.name, 'John Smith');
 });
 
 test('preferred viewing time completes the flow after captureLead succeeds', async (t) => {

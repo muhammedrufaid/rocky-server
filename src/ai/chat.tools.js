@@ -568,9 +568,47 @@ function copySellListing(listing = {}) {
   };
 }
 
+function normalizePersonName(value) {
+  return String(value || '')
+    .replace(/[,.;:]+$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isLikelyNonNamePhrase(value) {
+  return /\b(villa|apartments?|townhouses?|penthouses?|studios?|offices?|shops?|flats?|houses?|properties|property|sell|selling|buy|rent|valuation|agent|sunday|saturday|weekend|morning|afternoon|evening|tomorrow|barsha|dubai|marina|hello|thanks?|please|yes|yeah|yep|nope|okay|ok)\b/i.test(
+    String(value || '')
+  );
+}
+
+function isPlausiblePersonName(value) {
+  const leftover = normalizePersonName(value);
+  if (!leftover || leftover.length < 2 || leftover.length > 80) return false;
+  const words = leftover.split(' ');
+  if (words.length > 4) return false;
+  if (!/^[A-Za-z][A-Za-z\s.'-]*$/.test(leftover)) return false;
+  if (isLikelyNonNamePhrase(leftover)) return false;
+  if (/^(hi|hey|yo|sup)$/i.test(leftover)) return false;
+  return true;
+}
+
+function extractStandalonePersonName(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  if (/@/.test(raw) || /(?:\+|00)?\d[\d\s\-()]{5,}\d/.test(raw)) return null;
+  const candidate = normalizePersonName(
+    raw
+      .replace(/^\s*(?:my name is|i am|i'm)\s+/i, '')
+      .replace(/^\s*name\s*[:\-]\s*/i, '')
+  );
+  return isPlausiblePersonName(candidate) ? candidate : null;
+}
+
 function parseContactDetails(text, current = {}) {
   const raw = String(text || '');
-  const labeledName = raw.match(/\bname\s*[:\-]\s*([A-Za-z][A-Za-z\s.'-]{1,60}?)(?=\s*(?:email|phone|tel|whatsapp|,|$))/i);
+  const labeledName = raw.match(
+    /\bname\s*[:\-]\s*([A-Za-z][A-Za-z\s.'-]{0,80}?)(?=\s*(?:,|;|(?:e-?mail|phone|tel|mobile|whatsapp)\b|$))/i
+  );
   const labeledEmail = raw.match(/\b(?:e-?mail)\s*[:\-]\s*([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/i);
   const labeledWhatsapp = raw.match(/\bwhatsapp\s*[:\-]\s*((?:\+|00)?\d[\d\s\-()]{6,}\d)/i);
   const labeledPhone = raw.match(/\b(?:phone|tel|mobile)\s*[:\-]\s*((?:\+|00)?\d[\d\s\-()]{6,}\d)/i);
@@ -584,28 +622,25 @@ function parseContactDetails(text, current = {}) {
     bareNumber;
   let name = current.name || null;
   if (labeledName) {
-    name = labeledName[1].trim();
+    const labeled = normalizePersonName(labeledName[1]);
+    if (labeled) name = labeled;
   } else {
-    const nameMatch = raw.match(/\b(?:my name is|i am|i'm)\s+([A-Za-z][A-Za-z\s.'-]{1,50})/i);
+    const nameMatch = raw.match(/\b(?:my name is|i am|i'm)\s+([A-Za-z][A-Za-z\s.'-]{0,80})/i);
     if (nameMatch) {
-      name = nameMatch[1].replace(/\s+(and|my|email|phone|whatsapp).*$/i, '').trim();
+      const prefixed = normalizePersonName(
+        nameMatch[1].replace(/\s+(and|my|email|phone|whatsapp).*$/i, '')
+      );
+      if (prefixed) name = prefixed;
     } else if (emailMatch || phoneMatch || whatsappMatch) {
-      const leftover = raw
-        .replace(emailMatch ? emailMatch[0] : '', ' ')
-        .replace(phoneMatch ? phoneMatch[0] : '', ' ')
-        .replace(whatsappMatch ? whatsappMatch[0] : '', ' ')
-        .replace(/\b(?:name|email|e-?mail|phone|tel|mobile|whatsapp)\s*[:\-]?\s*/gi, ' ')
-        .replace(/[,]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (
-        leftover &&
-        leftover.split(/\s+/).length <= 4 &&
-        /^[A-Za-z][A-Za-z\s.'-]+$/.test(leftover) &&
-        !/\b(villa|apartment|townhouse|barsha|dubai|sell|property|valuation|agent|sunday|saturday|weekend|morning|afternoon|evening|tomorrow|office|shop)\b/i.test(
-          leftover
-        )
-      ) {
+      const leftover = normalizePersonName(
+        raw
+          .replace(emailMatch ? emailMatch[0] : '', ' ')
+          .replace(phoneMatch ? phoneMatch[0] : '', ' ')
+          .replace(whatsappMatch ? whatsappMatch[0] : '', ' ')
+          .replace(/\b(?:name|email|e-?mail|phone|tel|mobile|whatsapp)\s*[:\-]?\s*/gi, ' ')
+          .replace(/[,]/g, ' ')
+      );
+      if (isPlausiblePersonName(leftover)) {
         name = leftover;
       }
     }
@@ -618,6 +653,22 @@ function parseContactDetails(text, current = {}) {
       : current.whatsapp || null,
     email: emailMatch ? String(emailMatch[1] || emailMatch[0]) : current.email || null,
   };
+}
+
+function parseViewingContactDetails(text, current = {}) {
+  const parsed = parseContactDetails(text, current);
+  if (looksCollected(parsed.name)) return parsed;
+  if (
+    parseViewingPreference(text) ||
+    isViewingClosePhrase(text) ||
+    isBookViewingAction(text) ||
+    isPropertyUiAction(text)
+  ) {
+    return parsed;
+  }
+  const standalone = extractStandalonePersonName(text);
+  if (standalone) return { ...parsed, name: standalone };
+  return parsed;
 }
 
 const VIEWING_TIME_OPTIONS = [
@@ -688,21 +739,51 @@ function parseViewingPreference(text) {
   return null;
 }
 
+function viewingMissingContactFields(vr = {}) {
+  const missing = [];
+  if (!looksCollected(vr.name)) missing.push('name');
+  if (!looksCollected(vr.phone) && !looksCollected(vr.email)) {
+    missing.push('phoneOrEmail');
+  } else if (!looksCollected(vr.phone)) {
+    // Lead records still require a phone number even if an email is already present.
+    missing.push('phone');
+  }
+  return missing;
+}
+
 function viewingHasRequiredContact(vr = {}) {
   return looksCollected(vr.name) && looksCollected(vr.phone);
 }
 
 function viewingContactPrompt(vr = {}) {
-  if (looksCollected(vr.name) && !looksCollected(vr.phone) && !looksCollected(vr.email)) {
+  const missing = viewingMissingContactFields(vr);
+  if (!missing.includes('name') && missing.includes('phoneOrEmail')) {
     return 'Please share a phone number or email so the agent can reach you.';
   }
-  if (looksCollected(vr.name) && looksCollected(vr.email) && !looksCollected(vr.phone)) {
+  if (!missing.includes('name') && missing.includes('phone')) {
     return 'I also need a phone number so the agent can reach you.';
   }
-  if (!looksCollected(vr.name) && (looksCollected(vr.phone) || looksCollected(vr.email))) {
+  if (missing.includes('name') && !missing.includes('phoneOrEmail')) {
     return 'Please share your name as well.';
   }
   return 'I can arrange a viewing for this property. Please share your name and either your phone number or email.';
+}
+
+function viewingNextStep(vr = {}, message = '') {
+  if (vr.submitted && !isBookViewingAction(message)) return 'already_submitted';
+  const missing = viewingMissingContactFields(vr);
+  if (missing.length) return 'collect_contact';
+  const hasSpecificTime = !!(vr.preferredTime || (vr.preferredDate && vr.preferredDate !== 'weekends'));
+  const weekendsOnly = vr.preferredDate === 'weekends' && !vr.preferredTime;
+  if ((weekendsOnly || !hasSpecificTime) && !vr.askedTimeRefinement && !isViewingClosePhrase(message)) {
+    return 'collect_time';
+  }
+  return 'submit_viewing';
+}
+
+function logViewingDebug(label, payload) {
+  if (process.env.NODE_TEST_CONTEXT || process.env.NODE_ENV === 'test') return;
+  console.log(label, JSON.stringify(payload));
 }
 
 function viewingTimePrompt() {
@@ -807,6 +888,7 @@ function applyViewingRequestFlow(message, profile = {}, history = []) {
   if (isListingSearchOverride(message)) return null;
 
   const vr = copyViewingRequest(previous);
+  let extracted = { name: previous.name, email: previous.email, phone: previous.phone };
 
   if (isBookViewingAction(message)) {
     const selected = selectedViewingProperty(profile);
@@ -821,6 +903,7 @@ function applyViewingRequestFlow(message, profile = {}, history = []) {
     vr.name = seeded.name;
     vr.email = seeded.email;
     vr.phone = seeded.phone;
+    extracted = { name: seeded.name, email: seeded.email, phone: seeded.phone };
   } else if (previous.submitted && isViewingClosePhrase(message)) {
     vr.active = false;
     return {
@@ -831,10 +914,34 @@ function applyViewingRequestFlow(message, profile = {}, history = []) {
       },
       reply: viewingCloseReply(),
     };
+  } else if (previous.submitted) {
+    logViewingDebug('VIEWING_STATE', {
+      rawMessage: message,
+      previousState: previous,
+      extracted,
+      mergedState: previous,
+      missingFields: viewingMissingContactFields(previous),
+      nextStep: 'already_submitted',
+    });
+    logViewingDebug('VIEWING_LEAD_CREATE', {
+      skipped: true,
+      reason: 'already_submitted',
+      propertyRefNo: previous.propertyRefNo || null,
+    });
+    return {
+      type: 'clarify',
+      profilePatch: {
+        viewingRequest: { ...previous, active: false },
+        slotFlow: { awaiting: null, alternatives: null },
+      },
+      reply: viewingSuccessReply(previous),
+      options: viewingCompleteOptions(),
+    };
   }
 
   if (!isBookViewingAction(message)) {
-    const contact = parseContactDetails(message, vr);
+    const contact = parseViewingContactDetails(message, vr);
+    extracted = { name: contact.name, email: contact.email, phone: contact.phone || contact.whatsapp || null };
     vr.name = contact.name || vr.name;
     vr.email = contact.email || vr.email;
     vr.phone = contact.phone || contact.whatsapp || vr.phone;
@@ -848,15 +955,38 @@ function applyViewingRequestFlow(message, profile = {}, history = []) {
     }
   }
 
+  const missingFields = viewingMissingContactFields(vr);
+  const nextStep = viewingNextStep(vr, message);
+  logViewingDebug('VIEWING_STATE', {
+    rawMessage: message,
+    previousState: previous,
+    extracted,
+    mergedState: vr,
+    missingFields,
+    nextStep,
+  });
+
   if (!viewingHasRequiredContact(vr)) {
-    return {
-      type: 'clarify',
-      profilePatch: {
-        viewingRequest: vr,
-        slotFlow: { awaiting: 'viewingContact', alternatives: null },
-      },
-      reply: viewingContactPrompt(vr),
-    };
+    let reply = viewingContactPrompt(vr);
+    if (looksCollected(vr.name) && /please share your name as well/i.test(reply)) {
+      if (!looksCollected(vr.phone) && !looksCollected(vr.email)) {
+        reply = 'Please share a phone number or email so the agent can reach you.';
+      } else if (!looksCollected(vr.phone)) {
+        reply = 'I also need a phone number so the agent can reach you.';
+      } else {
+        reply = null;
+      }
+    }
+    if (reply) {
+      return {
+        type: 'clarify',
+        profilePatch: {
+          viewingRequest: vr,
+          slotFlow: { awaiting: 'viewingContact', alternatives: null },
+        },
+        reply,
+      };
+    }
   }
 
   const hasSpecificTime = !!(vr.preferredTime || (vr.preferredDate && vr.preferredDate !== 'weekends'));
@@ -887,6 +1017,15 @@ function applyViewingRequestFlow(message, profile = {}, history = []) {
       options: VIEWING_TIME_OPTIONS.slice(),
     };
   }
+
+  logViewingDebug('VIEWING_LEAD_CREATE', {
+    skipped: false,
+    reason: 'submit_viewing',
+    propertyRefNo: vr.propertyRefNo || null,
+    name: vr.name || null,
+    email: vr.email || null,
+    phone: vr.phone || null,
+  });
 
   return {
     type: 'submit_viewing',
@@ -4358,7 +4497,7 @@ function looksCollected(value) {
   const v = String(value || '').trim();
   if (!v) return false;
   const lower = v.toLowerCase();
-  if (['n/a', 'na', 'unknown', 'none', 'test', 'asdf'].includes(lower)) return false;
+  if (['n/a', 'na', 'unknown', 'none', '-', '--', 'null', 'undefined'].includes(lower)) return false;
   if (lower.includes('example')) return false;
   return true;
 }
@@ -4541,6 +4680,8 @@ module.exports = {
   emptySellListing,
   copySellListing,
   parseContactDetails,
+  parseViewingContactDetails,
+  viewingMissingContactFields,
   isBookViewingAction,
   isViewingClosePhrase,
   isListingSearchOverride,
@@ -4552,6 +4693,7 @@ module.exports = {
   viewingCompleteOptions,
   viewingCloseReply,
   viewingContactPrompt,
+  logViewingDebug,
   VIEWING_TIME_OPTIONS,
   buildViewingLeadIntent,
   missingSellContactFields,
