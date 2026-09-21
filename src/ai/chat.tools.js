@@ -264,13 +264,21 @@ const PROPERTY_TYPE_CHANGE_OPTIONS = [
 const BEDROOM_OPTIONS = ['Studio', '1 BR', '2 BR', '3 BR', '4+ BR', 'Any'];
 const PROPERTY_TYPE_OPTIONS = ['Apartment', 'Villa', 'Townhouse', 'Penthouse'];
 const BUY_BUDGET_OPTIONS = [
-  'Up to AED 1M',
-  'AED 1M - 1.5M',
-  'AED 1.5M - 2M',
-  'AED 2M - 3M',
-  'AED 3M+',
+  'Below AED 1M',
+  'Below AED 1.5M',
+  'Below AED 2M',
+  'Below AED 3M',
+  'Above AED 3M',
   'Any budget',
 ];
+const BUY_BUDGET_CHIP_MAP = {
+  'below aed 1m': { budgetMax: 1_000_000 },
+  'below aed 1.5m': { budgetMax: 1_500_000 },
+  'below aed 2m': { budgetMax: 2_000_000 },
+  'below aed 3m': { budgetMax: 3_000_000 },
+  'above aed 3m': { budgetMin: 3_000_000 },
+  'any budget': { any: true },
+};
 const RENT_BUDGET_OPTIONS = [
   'Up to AED 60K/year',
   'AED 60K - 100K/year',
@@ -1673,6 +1681,7 @@ function parseBudgetFromMessage(text, { requireBudgetContext = false } = {}) {
   if (/^any budget$/.test(raw) || /^no budget$/.test(raw) || /^no limit$/.test(raw)) {
     return { any: true };
   }
+  if (BUY_BUDGET_CHIP_MAP[raw]) return { ...BUY_BUDGET_CHIP_MAP[raw] };
   if (/^(any|skip|none|no preference|doesn'?t matter)$/.test(raw)) {
     return requireBudgetContext ? { any: true } : null;
   }

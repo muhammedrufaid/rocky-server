@@ -785,6 +785,58 @@ test('Any budget counts as answered and allows search', async (t) => {
   assert.equal((search.propertyCards || []).length > 0, true);
 });
 
+test('buy budget chips are below/above ceilings, not ranges', () => {
+  assert.deepEqual(BUY_BUDGET_OPTIONS, [
+    'Below AED 1M',
+    'Below AED 1.5M',
+    'Below AED 2M',
+    'Below AED 3M',
+    'Above AED 3M',
+    'Any budget',
+  ]);
+  assert.equal(BUY_BUDGET_OPTIONS.some((option) => / - /.test(option)), false);
+
+  const first = qualifyListingSearch('I need a 2 BHK apartment in Dubai South to buy', {});
+  assert.deepEqual(first.options, BUY_BUDGET_OPTIONS);
+
+  const expected = [
+    ['Below AED 1M', { budgetMin: null, budgetMax: 1000000 }],
+    ['Below AED 1.5M', { budgetMin: null, budgetMax: 1500000 }],
+    ['Below AED 2M', { budgetMin: null, budgetMax: 2000000 }],
+    ['Below AED 3M', { budgetMin: null, budgetMax: 3000000 }],
+    ['Above AED 3M', { budgetMin: 3000000, budgetMax: null }],
+    ['Any budget', { budgetMin: null, budgetMax: null }],
+  ];
+  for (const [label, bounds] of expected) {
+    const parsed = parseBudgetFromMessage(label);
+    if (label === 'Any budget') {
+      assert.equal(parsed.any, true, label);
+    } else if (bounds.budgetMax != null) {
+      assert.equal(parsed.budgetMax, bounds.budgetMax, label);
+      assert.equal(parsed.budgetMin, undefined, label);
+    } else {
+      assert.equal(parsed.budgetMin, bounds.budgetMin, label);
+      assert.equal(parsed.budgetMax, undefined, label);
+    }
+    const applied = qualifyListingSearch(label, profileFromQualify(first));
+    const filters = applied.profilePatch.lastSearchFilters;
+    assert.equal(applied.type, 'continue', label);
+    assert.equal(filters.budgetProvided, true, label);
+    assert.equal(filters.budgetMin, bounds.budgetMin, label);
+    assert.equal(filters.budgetMax, bounds.budgetMax, label);
+  }
+
+  assert.equal(parseBudgetFromMessage('below 1m').budgetMax, 1000000);
+  assert.equal(parseBudgetFromMessage('under 1m').budgetMax, 1000000);
+  assert.equal(parseBudgetFromMessage('up to 1m').budgetMax, 1000000);
+  assert.equal(parseBudgetFromMessage('max 1m').budgetMax, 1000000);
+  assert.equal(parseBudgetFromMessage('below 1.5m').budgetMax, 1500000);
+  assert.equal(parseBudgetFromMessage('under 1.5m').budgetMax, 1500000);
+  assert.equal(parseBudgetFromMessage('above 3m').budgetMin, 3000000);
+  assert.equal(parseBudgetFromMessage('over 3m').budgetMin, 3000000);
+  assert.equal(parseBudgetFromMessage('3m+').budgetMin, 3000000);
+});
+
 test('AED 1M - 1.5M stores min and max and marks budget provided', () => {
   const parsed = parseBudgetFromMessage('AED 1M - 1.5M');
   assert.equal(parsed.budgetMin, 1000000);
