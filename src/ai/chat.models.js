@@ -33,6 +33,7 @@ const conversationSchema = new mongoose.Schema(
         type: [
           {
             id: { type: String, default: '' },
+            propertyRefNo: { type: String, default: null, trim: true },
             title: { type: String, default: '' },
             price: { type: mongoose.Schema.Types.Mixed, default: '' },
             beds: { type: mongoose.Schema.Types.Mixed, default: '' },
@@ -92,12 +93,14 @@ const conversationSchema = new mongoose.Schema(
       viewingRequest: {
         active: { type: Boolean, default: false },
         propertyRefNo: { type: String, default: null, trim: true },
+        propertyId: { type: String, default: null, trim: true },
         propertyTitle: { type: String, default: null, trim: true },
         name: { type: String, default: null, trim: true },
         email: { type: String, default: null, trim: true },
         phone: { type: String, default: null, trim: true },
         preferredDate: { type: String, default: null, trim: true },
         preferredTime: { type: String, default: null, trim: true },
+        schedulingMode: { type: String, default: null, trim: true },
         notes: { type: String, default: null, trim: true },
         submitted: { type: Boolean, default: false },
         askedTimeRefinement: { type: Boolean, default: false },
@@ -110,7 +113,7 @@ const conversationSchema = new mongoose.Schema(
 const leadSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
-    phone: { type: String, required: true, trim: true },
+    phone: { type: String, default: '', trim: true },
     email: {
       type: String,
       default: '',

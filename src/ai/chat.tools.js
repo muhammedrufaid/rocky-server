@@ -238,6 +238,7 @@ function toPropertyCard(property) {
   const unit = (property.propertySizeUnit || '').toString().trim();
   return {
     id: property.propertyRefNo,
+    propertyRefNo: property.propertyRefNo,
     title: property.propertyTitle || '',
     price: property.price || '',
     beds: property.bedrooms || '',
@@ -334,12 +335,14 @@ function emptyViewingRequest() {
   return {
     active: false,
     propertyRefNo: null,
+    propertyId: null,
     propertyTitle: null,
     name: null,
     email: null,
     phone: null,
     preferredDate: null,
     preferredTime: null,
+    schedulingMode: null,
     notes: null,
     submitted: false,
     askedTimeRefinement: false,
@@ -350,12 +353,14 @@ function copyViewingRequest(vr = {}) {
   return {
     active: !!vr.active,
     propertyRefNo: vr.propertyRefNo || null,
+    propertyId: vr.propertyId || vr.propertyRefNo || null,
     propertyTitle: vr.propertyTitle || null,
     name: vr.name || null,
     email: vr.email || null,
     phone: vr.phone || null,
     preferredDate: vr.preferredDate || null,
     preferredTime: vr.preferredTime || null,
+    schedulingMode: vr.schedulingMode || null,
     notes: vr.notes || null,
     submitted: !!vr.submitted,
     askedTimeRefinement: !!vr.askedTimeRefinement,
@@ -671,13 +676,16 @@ function parseViewingContactDetails(text, current = {}) {
   return parsed;
 }
 
-const VIEWING_TIME_OPTIONS = [
+const VIEWING_NEUTRAL_OPTIONS = ['Tomorrow', 'This weekend', 'Next week', 'Agent can coordinate'];
+const VIEWING_WEEKEND_OPTIONS = [
   'Saturday morning',
   'Saturday afternoon',
   'Sunday morning',
   'Sunday afternoon',
   'Agent can coordinate',
 ];
+const VIEWING_TIME_OPTIONS = VIEWING_WEEKEND_OPTIONS;
+const VIEWING_AWAITING = ['viewingContact', 'viewingTime', 'viewingProperty'];
 
 function isBookViewingAction(text) {
   const raw = String(text || '')
@@ -685,6 +693,87 @@ function isBookViewingAction(text) {
     .toLowerCase()
     .replace(/[.!?]/g, '');
   return raw === 'book a viewing';
+}
+
+function isBookViewingRequest(message, selection = {}) {
+  const action = String(selection.action || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[\s-]+/g, '_');
+  if (action === 'BOOK_VIEWING' || action === 'BOOK_A_VIEWING') return true;
+  return isBookViewingAction(message);
+}
+
+function viewingPropertyChoiceLabel(card = {}) {
+  const title = String(card.title || '').trim();
+  const id = String(card.id || card.propertyRefNo || '').trim();
+  if (title && id) return `${title} [${id}]`;
+  return title || id || 'This listing';
+}
+
+function parseViewingPropertyChoice(text, cards = []) {
+  const raw = String(text || '').trim();
+  if (!raw || !cards.length) return null;
+  const bracket = raw.match(/\[([^\]]+)\]\s*$/);
+  const token = (bracket ? bracket[1] : raw).trim();
+  const byRef = cards.find((card) => {
+    const id = String(card.id || card.propertyRefNo || '').trim();
+    return id && (token === id || raw === id);
+  });
+  if (byRef) return byRef;
+  const lower = raw.toLowerCase();
+  const titleHits = cards.filter(
+    (card) => card.title && String(card.title).trim().toLowerCase() === lower
+  );
+  if (titleHits.length === 1) return titleHits[0];
+  return null;
+}
+
+function resolveSelectedViewingProperty(profile = {}, selection = {}) {
+  const cards = profile.lastPropertyCards || [];
+  const explicit = String(selection.propertyRefNo || selection.propertyId || '').trim();
+  if (explicit) {
+    const card =
+      cards.find((item) => String(item.id || item.propertyRefNo || '').trim() === explicit) || {};
+    return {
+      propertyRefNo: explicit,
+      propertyId: card.id || explicit,
+      propertyTitle: card.title || selection.propertyTitle || null,
+      ambiguous: false,
+    };
+  }
+  if (cards.length === 1) {
+    const card = cards[0] || {};
+    return {
+      propertyRefNo: card.id || card.propertyRefNo || null,
+      propertyId: card.id || card.propertyRefNo || null,
+      propertyTitle: card.title || null,
+      ambiguous: false,
+    };
+  }
+  if (cards.length > 1) {
+    return {
+      propertyRefNo: null,
+      propertyId: null,
+      propertyTitle: null,
+      ambiguous: true,
+      cards,
+    };
+  }
+  return {
+    propertyRefNo: null,
+    propertyId: null,
+    propertyTitle: null,
+    ambiguous: false,
+    missing: true,
+  };
+}
+
+function viewingPropertyPrompt(cards = []) {
+  return {
+    reply: 'Which property would you like to view?',
+    options: (cards || []).map(viewingPropertyChoiceLabel),
+  };
 }
 
 function isViewingClosePhrase(text) {
@@ -718,41 +807,80 @@ function parseViewingPreference(text) {
     .toLowerCase()
     .replace(/[.!?]/g, '');
   if (!raw) return null;
-  if (/^agent can coordinate$/.test(raw) || /\bagent can coordinate\b/.test(raw) || /\byou can coordinate\b/.test(raw)) {
-    return { date: null, time: 'Agent can coordinate' };
+  if (
+    /^agent can coordinate$/.test(raw) ||
+    /\bagent can coordinate\b/.test(raw) ||
+    /\byou can coordinate\b/.test(raw) ||
+    /^(any time|anytime|whenever|flexible|no preference)$/.test(raw) ||
+    /\bany time\b/.test(raw)
+  ) {
+    return {
+      date: null,
+      time: 'Agent can coordinate',
+      schedulingMode: 'AGENT_COORDINATE',
+      refine: null,
+    };
   }
-  if (/^weekends?$/.test(raw) || /\bweekends?\b/.test(raw) && !/\b(saturday|sunday|morning|afternoon|evening)\b/.test(raw)) {
-    return { date: 'weekends', time: null };
+  if (
+    /^(this\s+)?weekends?$/.test(raw) ||
+    (/\b(this\s+)?weekends?\b/.test(raw) && !/\b(saturday|sunday|morning|afternoon|evening)\b/.test(raw))
+  ) {
+    return { date: 'weekends', time: null, schedulingMode: null, refine: 'weekend' };
   }
-  const dayTime = raw.match(
-    /\b(saturday|sunday|tomorrow)\b(?:\s+(morning|afternoon|evening))?\b/
-  );
+  if (/^next week$/.test(raw) || /\bnext week\b/.test(raw)) {
+    return { date: 'next week', time: 'Next week', schedulingMode: 'USER_PREFERENCE', refine: null };
+  }
+  if (/\bafter\s+\d{1,2}(?::\d{2})?\s*(am|pm)?\b/.test(raw)) {
+    return { date: null, time: String(text).trim(), schedulingMode: 'USER_PREFERENCE', refine: null };
+  }
+  const dayTime = raw.match(/\b(saturday|sunday|tomorrow)\b(?:\s+(morning|afternoon|evening))?\b/);
   if (dayTime) {
     const day = dayTime[1].replace(/^\w/, (c) => c.toUpperCase());
-    const slot = dayTime[2] ? dayTime[2] : null;
-    if (slot) return { date: day, time: `${day} ${slot}` };
-    return { date: day, time: null };
+    const slot = dayTime[2] || null;
+    if (slot) {
+      return {
+        date: day,
+        time: `${day} ${slot}`,
+        schedulingMode: 'USER_PREFERENCE',
+        refine: null,
+      };
+    }
+    if (day === 'Tomorrow') {
+      return { date: 'Tomorrow', time: 'Tomorrow', schedulingMode: 'USER_PREFERENCE', refine: null };
+    }
+    return { date: day, time: null, schedulingMode: null, refine: 'daypart' };
   }
   if (/^(morning|afternoon|evening)$/.test(raw)) {
-    return { date: null, time: raw };
+    return { date: null, time: raw, schedulingMode: 'USER_PREFERENCE', refine: null };
   }
   return null;
+}
+
+function applyViewingPreference(vr, pref) {
+  if (!pref) return vr;
+  if (pref.date !== undefined && pref.date !== null) vr.preferredDate = pref.date;
+  if (pref.time) vr.preferredTime = pref.time;
+  if (pref.schedulingMode) vr.schedulingMode = pref.schedulingMode;
+  if (pref.refine === 'weekend') {
+    vr.preferredTime = null;
+    vr.schedulingMode = null;
+  }
+  if (pref.refine === 'daypart') {
+    vr.preferredTime = null;
+    vr.schedulingMode = null;
+  }
+  return vr;
 }
 
 function viewingMissingContactFields(vr = {}) {
   const missing = [];
   if (!looksCollected(vr.name)) missing.push('name');
-  if (!looksCollected(vr.phone) && !looksCollected(vr.email)) {
-    missing.push('phoneOrEmail');
-  } else if (!looksCollected(vr.phone)) {
-    // Lead records still require a phone number even if an email is already present.
-    missing.push('phone');
-  }
+  if (!looksCollected(vr.phone) && !looksCollected(vr.email)) missing.push('phoneOrEmail');
   return missing;
 }
 
 function viewingHasRequiredContact(vr = {}) {
-  return looksCollected(vr.name) && looksCollected(vr.phone);
+  return looksCollected(vr.name) && (looksCollected(vr.phone) || looksCollected(vr.email));
 }
 
 function viewingContactPrompt(vr = {}) {
@@ -760,24 +888,39 @@ function viewingContactPrompt(vr = {}) {
   if (!missing.includes('name') && missing.includes('phoneOrEmail')) {
     return 'Please share a phone number or email so the agent can reach you.';
   }
-  if (!missing.includes('name') && missing.includes('phone')) {
-    return 'I also need a phone number so the agent can reach you.';
-  }
   if (missing.includes('name') && !missing.includes('phoneOrEmail')) {
     return 'Please share your name as well.';
   }
   return 'I can arrange a viewing for this property. Please share your name and either your phone number or email.';
 }
 
-function viewingNextStep(vr = {}, message = '') {
-  if (vr.submitted && !isBookViewingAction(message)) return 'already_submitted';
+function viewingHasSchedulingPreference(vr = {}) {
+  if (vr.schedulingMode === 'AGENT_COORDINATE') return true;
+  if (vr.preferredDate === 'weekends' && !looksCollected(vr.preferredTime)) return false;
+  if (/^(Saturday|Sunday)$/.test(String(vr.preferredDate || '')) && !looksCollected(vr.preferredTime)) {
+    return false;
+  }
+  if (vr.schedulingMode === 'USER_PREFERENCE' && (looksCollected(vr.preferredTime) || looksCollected(vr.preferredDate))) {
+    return true;
+  }
+  return looksCollected(vr.preferredTime);
+}
+
+function viewingNeedsWeekendRefinement(vr = {}) {
+  return vr.preferredDate === 'weekends' && !looksCollected(vr.preferredTime);
+}
+
+function viewingNeedsDaypartRefinement(vr = {}) {
+  return /^(Saturday|Sunday)$/.test(String(vr.preferredDate || '')) && !looksCollected(vr.preferredTime);
+}
+
+function viewingNextStep(vr = {}, message = '', selection = {}) {
+  if (vr.submitted && !isBookViewingRequest(message, selection)) return 'already_submitted';
+  if (!vr.propertyRefNo) return 'select_property';
   const missing = viewingMissingContactFields(vr);
   if (missing.length) return 'collect_contact';
-  const hasSpecificTime = !!(vr.preferredTime || (vr.preferredDate && vr.preferredDate !== 'weekends'));
-  const weekendsOnly = vr.preferredDate === 'weekends' && !vr.preferredTime;
-  if ((weekendsOnly || !hasSpecificTime) && !vr.askedTimeRefinement && !isViewingClosePhrase(message)) {
-    return 'collect_time';
-  }
+  if (viewingNeedsWeekendRefinement(vr) || viewingNeedsDaypartRefinement(vr)) return 'collect_time';
+  if (!viewingHasSchedulingPreference(vr)) return 'collect_time';
   return 'submit_viewing';
 }
 
@@ -787,15 +930,37 @@ function logViewingDebug(label, payload) {
 }
 
 function viewingTimePrompt() {
-  return 'Do you have a preferred weekend time, or should the agent coordinate a suitable slot with you?';
+  return 'Do you have a preferred date or time for the viewing, or should the agent coordinate a suitable slot with you?';
+}
+
+function viewingSchedulingPrompt(vr = {}) {
+  if (viewingNeedsWeekendRefinement(vr)) {
+    return {
+      reply: 'Do you have a preferred weekend time?',
+      options: VIEWING_WEEKEND_OPTIONS.slice(),
+    };
+  }
+  const day = String(vr.preferredDate || '');
+  if (viewingNeedsDaypartRefinement(vr)) {
+    return {
+      reply: `Do you have a preferred time on ${day}?`,
+      options: [`${day} morning`, `${day} afternoon`, `${day} evening`, 'Agent can coordinate'],
+    };
+  }
+  return {
+    reply: viewingTimePrompt(),
+    options: VIEWING_NEUTRAL_OPTIONS.slice(),
+  };
 }
 
 function viewingSuccessReply(vr = {}) {
   const when = vr.preferredTime || vr.preferredDate;
-  if (when && !/^agent can coordinate$/i.test(String(when))) {
-    return `Your viewing request has been recorded for ${when}. A Rocky Real Estate specialist will contact you using the details you provided.`;
+  const agent =
+    vr.schedulingMode === 'AGENT_COORDINATE' || /^agent can coordinate$/i.test(String(when || ''));
+  if (when && !agent) {
+    return `Your viewing request has been recorded for ${when}. A Rocky Real Estate specialist will contact you using the details you provided to coordinate the viewing.`;
   }
-  return 'Your viewing request has been recorded. A Rocky Real Estate specialist will contact you using the details you provided.';
+  return 'Your viewing request has been recorded. A Rocky Real Estate specialist will contact you using the details you provided to coordinate the viewing.';
 }
 
 function viewingFailureReply() {
@@ -810,22 +975,25 @@ function viewingCloseReply() {
   return "You're all set. The team will contact you about the viewing.";
 }
 
-function buildViewingLeadIntent(vr = {}) {
-  const bits = ['Viewing request'];
+function buildViewingLeadIntent(vr = {}, profile = {}) {
+  const bits = ['property viewing', 'source: website chatbot'];
   if (vr.propertyRefNo) bits.push(`ref ${vr.propertyRefNo}`);
   if (vr.propertyTitle) bits.push(vr.propertyTitle);
+  const filters = profile.lastSearchFilters || {};
+  if (filters.purpose) bits.push(String(filters.purpose));
+  if (filters.location) bits.push(filters.location);
+  if (filters.bedrooms != null && filters.bedrooms !== '') bits.push(`${filters.bedrooms} BR`);
+  if (filters.budgetMin != null || filters.budgetMax != null) {
+    bits.push(`budget ${filters.budgetMin || ''}-${filters.budgetMax || ''}`.replace(/-$/, '').trim());
+  }
+  if (vr.schedulingMode) bits.push(vr.schedulingMode);
   const when = vr.preferredTime || vr.preferredDate;
   if (when) bits.push(when);
-  return bits.join(' — ').slice(0, 200);
+  return bits.join(' — ').slice(0, 400);
 }
 
-function selectedViewingProperty(profile = {}) {
-  const cards = profile.lastPropertyCards || [];
-  const first = cards[0] || {};
-  return {
-    propertyRefNo: first.id || null,
-    propertyTitle: first.title || null,
-  };
+function selectedViewingProperty(profile = {}, selection = {}) {
+  return resolveSelectedViewingProperty(profile, selection);
 }
 
 function seedViewingContact(profile = {}, history = []) {
@@ -838,6 +1006,23 @@ function seedViewingContact(profile = {}, history = []) {
     email: vr.email || sell.email || service.email || fromHistory.email || null,
     phone: vr.phone || sell.phone || service.phone || fromHistory.phone || fromHistory.whatsapp || null,
   };
+}
+
+function resetViewingSchedule(vr) {
+  vr.preferredDate = null;
+  vr.preferredTime = null;
+  vr.schedulingMode = null;
+  vr.askedTimeRefinement = false;
+  vr.notes = null;
+  vr.submitted = false;
+  return vr;
+}
+
+function assignViewingProperty(vr, selected = {}) {
+  vr.propertyRefNo = selected.propertyRefNo || null;
+  vr.propertyId = selected.propertyId || selected.propertyRefNo || null;
+  vr.propertyTitle = selected.propertyTitle || null;
+  return vr;
 }
 
 function finalizeViewingCapture(viewingRequest, captureResult) {
@@ -863,14 +1048,14 @@ function finalizeViewingCapture(viewingRequest, captureResult) {
   };
 }
 
-function applyViewingRequestFlow(message, profile = {}, history = []) {
+function applyViewingRequestFlow(message, profile = {}, history = [], selection = {}) {
   const awaiting = profile.slotFlow?.awaiting;
   const previous = copyViewingRequest(profile.viewingRequest || {});
+  const booking = isBookViewingRequest(message, selection);
   const inViewing =
     previous.active ||
-    awaiting === 'viewingContact' ||
-    awaiting === 'viewingTime' ||
-    isBookViewingAction(message);
+    VIEWING_AWAITING.includes(awaiting) ||
+    booking;
 
   if (!inViewing && previous.submitted && isViewingClosePhrase(message)) {
     return {
@@ -885,25 +1070,42 @@ function applyViewingRequestFlow(message, profile = {}, history = []) {
   }
 
   if (!inViewing) return null;
-  if (isListingSearchOverride(message)) return null;
+  if (isListingSearchOverride(message) && !booking) return null;
 
   const vr = copyViewingRequest(previous);
   let extracted = { name: previous.name, email: previous.email, phone: previous.phone };
 
-  if (isBookViewingAction(message)) {
-    const selected = selectedViewingProperty(profile);
+  if (booking) {
+    const selected = resolveSelectedViewingProperty(profile, selection);
     vr.active = true;
-    vr.submitted = false;
-    vr.askedTimeRefinement = false;
-    vr.preferredDate = null;
-    vr.preferredTime = null;
-    vr.propertyRefNo = selected.propertyRefNo || vr.propertyRefNo;
-    vr.propertyTitle = selected.propertyTitle || vr.propertyTitle;
-    const seeded = seedViewingContact({ ...profile, viewingRequest: vr }, history);
+    resetViewingSchedule(vr);
+    const seeded = seedViewingContact({ ...profile, viewingRequest: previous }, history);
     vr.name = seeded.name;
     vr.email = seeded.email;
     vr.phone = seeded.phone;
     extracted = { name: seeded.name, email: seeded.email, phone: seeded.phone };
+    if (selected.ambiguous) {
+      assignViewingProperty(vr, {});
+      const prompt = viewingPropertyPrompt(selected.cards || profile.lastPropertyCards || []);
+      logViewingDebug('VIEWING_STATE', {
+        rawMessage: message,
+        previousState: previous,
+        extracted,
+        mergedState: vr,
+        missingFields: viewingMissingContactFields(vr),
+        nextStep: 'select_property',
+      });
+      return {
+        type: 'clarify',
+        profilePatch: {
+          viewingRequest: vr,
+          slotFlow: { awaiting: 'viewingProperty', alternatives: null },
+        },
+        reply: prompt.reply,
+        options: prompt.options,
+      };
+    }
+    assignViewingProperty(vr, selected);
   } else if (previous.submitted && isViewingClosePhrase(message)) {
     vr.active = false;
     return {
@@ -937,26 +1139,61 @@ function applyViewingRequestFlow(message, profile = {}, history = []) {
       reply: viewingSuccessReply(previous),
       options: viewingCompleteOptions(),
     };
-  }
-
-  if (!isBookViewingAction(message)) {
+  } else if (awaiting === 'viewingProperty' || !vr.propertyRefNo) {
+    const chosen =
+      parseViewingPropertyChoice(message, profile.lastPropertyCards || []) ||
+      (resolveSelectedViewingProperty(profile, selection).propertyRefNo
+        ? resolveSelectedViewingProperty(profile, selection)
+        : null);
+    if (!chosen || (!chosen.id && !chosen.propertyRefNo)) {
+      const prompt = viewingPropertyPrompt(profile.lastPropertyCards || []);
+      return {
+        type: 'clarify',
+        profilePatch: {
+          viewingRequest: vr,
+          slotFlow: { awaiting: 'viewingProperty', alternatives: null },
+        },
+        reply: prompt.reply,
+        options: prompt.options.length ? prompt.options : undefined,
+      };
+    }
+    assignViewingProperty(vr, {
+      propertyRefNo: chosen.id || chosen.propertyRefNo,
+      propertyId: chosen.id || chosen.propertyRefNo,
+      propertyTitle: chosen.title || chosen.propertyTitle || null,
+    });
+  } else {
     const contact = parseViewingContactDetails(message, vr);
-    extracted = { name: contact.name, email: contact.email, phone: contact.phone || contact.whatsapp || null };
+    extracted = {
+      name: contact.name,
+      email: contact.email,
+      phone: contact.phone || contact.whatsapp || null,
+    };
     vr.name = contact.name || vr.name;
     vr.email = contact.email || vr.email;
     vr.phone = contact.phone || contact.whatsapp || vr.phone;
-    const pref = parseViewingPreference(message);
-    if (pref) {
-      if (pref.date) vr.preferredDate = pref.date;
-      if (pref.time) vr.preferredTime = pref.time;
-    }
+    applyViewingPreference(vr, parseViewingPreference(message));
     if (isViewingClosePhrase(message) && viewingHasRequiredContact(vr)) {
       vr.preferredTime = vr.preferredTime || 'Agent can coordinate';
+      vr.schedulingMode = vr.schedulingMode || 'AGENT_COORDINATE';
     }
   }
 
+  if (!vr.propertyRefNo && (profile.lastPropertyCards || []).length > 1) {
+    const prompt = viewingPropertyPrompt(profile.lastPropertyCards || []);
+    return {
+      type: 'clarify',
+      profilePatch: {
+        viewingRequest: vr,
+        slotFlow: { awaiting: 'viewingProperty', alternatives: null },
+      },
+      reply: prompt.reply,
+      options: prompt.options,
+    };
+  }
+
   const missingFields = viewingMissingContactFields(vr);
-  const nextStep = viewingNextStep(vr, message);
+  const nextStep = viewingNextStep(vr, message, selection);
   logViewingDebug('VIEWING_STATE', {
     rawMessage: message,
     previousState: previous,
@@ -967,54 +1204,27 @@ function applyViewingRequestFlow(message, profile = {}, history = []) {
   });
 
   if (!viewingHasRequiredContact(vr)) {
-    let reply = viewingContactPrompt(vr);
-    if (looksCollected(vr.name) && /please share your name as well/i.test(reply)) {
-      if (!looksCollected(vr.phone) && !looksCollected(vr.email)) {
-        reply = 'Please share a phone number or email so the agent can reach you.';
-      } else if (!looksCollected(vr.phone)) {
-        reply = 'I also need a phone number so the agent can reach you.';
-      } else {
-        reply = null;
-      }
-    }
-    if (reply) {
-      return {
-        type: 'clarify',
-        profilePatch: {
-          viewingRequest: vr,
-          slotFlow: { awaiting: 'viewingContact', alternatives: null },
-        },
-        reply,
-      };
-    }
-  }
-
-  const hasSpecificTime = !!(vr.preferredTime || (vr.preferredDate && vr.preferredDate !== 'weekends'));
-  const weekendsOnly = vr.preferredDate === 'weekends' && !vr.preferredTime;
-
-  if (weekendsOnly && !vr.askedTimeRefinement) {
-    vr.askedTimeRefinement = true;
     return {
       type: 'clarify',
       profilePatch: {
         viewingRequest: vr,
-        slotFlow: { awaiting: 'viewingTime', alternatives: null },
+        slotFlow: { awaiting: 'viewingContact', alternatives: null },
       },
-      reply: viewingTimePrompt(),
-      options: VIEWING_TIME_OPTIONS.slice(),
+      reply: viewingContactPrompt(vr),
     };
   }
 
-  if (!hasSpecificTime && !vr.askedTimeRefinement && !isViewingClosePhrase(message)) {
+  if (!viewingHasSchedulingPreference(vr)) {
     vr.askedTimeRefinement = true;
+    const prompt = viewingSchedulingPrompt(vr);
     return {
       type: 'clarify',
       profilePatch: {
         viewingRequest: vr,
         slotFlow: { awaiting: 'viewingTime', alternatives: null },
       },
-      reply: viewingTimePrompt(),
-      options: VIEWING_TIME_OPTIONS.slice(),
+      reply: prompt.reply,
+      options: prompt.options,
     };
   }
 
@@ -1025,6 +1235,7 @@ function applyViewingRequestFlow(message, profile = {}, history = []) {
     name: vr.name || null,
     email: vr.email || null,
     phone: vr.phone || null,
+    schedulingMode: vr.schedulingMode || null,
   });
 
   return {
@@ -2557,7 +2768,7 @@ function qualifyListingSearch(message, profile = {}) {
 
   const awaiting = profile.slotFlow?.awaiting;
   if (
-    ['sell', 'pmNeed', 'pmProperty', 'serviceContact', 'serviceLocation', 'sellServiceLocation', 'viewingContact', 'viewingTime'].includes(
+    ['sell', 'pmNeed', 'pmProperty', 'serviceContact', 'serviceLocation', 'sellServiceLocation', 'viewingContact', 'viewingTime', 'viewingProperty'].includes(
       awaiting
     )
   ) {
@@ -4502,14 +4713,17 @@ function looksCollected(value) {
   return true;
 }
 
-async function captureLead({ name, phone, email, intent, whatsapp, emailOptional }, sessionId, { leadAlreadyCaptured } = {}) {
+async function captureLead({ name, phone, email, intent, whatsapp, emailOptional, phoneOptional }, sessionId, { leadAlreadyCaptured } = {}) {
   const contactPhone = looksCollected(phone) ? phone : whatsapp;
   const hasEmail = looksCollected(email);
+  const hasPhone = looksCollected(contactPhone);
+  const hasContactMethod = hasPhone || hasEmail;
   const hasFullDetails =
     looksCollected(name) &&
-    looksCollected(contactPhone) &&
     looksCollected(intent) &&
-    (emailOptional || hasEmail);
+    hasContactMethod &&
+    (emailOptional || hasEmail) &&
+    (phoneOptional || hasPhone);
 
   if (leadAlreadyCaptured) {
     return {
@@ -4537,7 +4751,7 @@ async function captureLead({ name, phone, email, intent, whatsapp, emailOptional
   try {
     const lead = await Lead.create({
       name: String(name).trim(),
-      phone: String(contactPhone).trim(),
+      phone: hasPhone ? String(contactPhone).trim() : '',
       email: hasEmail ? String(email).trim().toLowerCase() : '',
       intent: String(intent).trim(),
       sessionId,
@@ -4583,8 +4797,10 @@ async function executeTool(
   if (name === 'capture_lead') {
     const argsCopy = { ...(args || {}) };
     const emailOptional = !!argsCopy.emailOptional;
+    const phoneOptional = !!argsCopy.phoneOptional;
     delete argsCopy.emailOptional;
-    return captureLead({ ...argsCopy, emailOptional }, sessionId, { leadAlreadyCaptured });
+    delete argsCopy.phoneOptional;
+    return captureLead({ ...argsCopy, emailOptional, phoneOptional }, sessionId, { leadAlreadyCaptured });
   }
   return {
     propertyCards: [],
@@ -4683,6 +4899,7 @@ module.exports = {
   parseViewingContactDetails,
   viewingMissingContactFields,
   isBookViewingAction,
+  isBookViewingRequest,
   isViewingClosePhrase,
   isListingSearchOverride,
   parseViewingPreference,
@@ -4695,6 +4912,9 @@ module.exports = {
   viewingContactPrompt,
   logViewingDebug,
   VIEWING_TIME_OPTIONS,
+  VIEWING_NEUTRAL_OPTIONS,
+  VIEWING_WEEKEND_OPTIONS,
+  resolveSelectedViewingProperty,
   buildViewingLeadIntent,
   missingSellContactFields,
   hasSellContact,

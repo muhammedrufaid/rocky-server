@@ -158,7 +158,8 @@ async function accumulateChatStream(stream, { onContentDelta, abortSignal } = {}
 
 function toStoredPropertyCards(cards = []) {
   return (cards || []).slice(0, 10).map((card) => ({
-    id: card.id || '',
+    id: card.id || card.propertyRefNo || '',
+    propertyRefNo: card.propertyRefNo || card.id || '',
     title: card.title || '',
     price: card.price ?? '',
     beds: card.beds ?? '',
@@ -894,11 +895,11 @@ function applyConversationIntent(message, profile, explicitIntent = null) {
   };
 }
 
-function resolvePendingSlots(message, profile, history = [], explicitIntent = null) {
-  if (isListingSearchOverride(message) && profile.viewingRequest?.active) {
+function resolvePendingSlots(message, profile, history = [], explicitIntent = null, viewingSelection = {}) {
+  if (isListingSearchOverride(message) && profile.viewingRequest?.active && !isBookViewingAction(message)) {
     profile = mergeProfile(profile, {
       viewingRequest: { ...copyViewingRequest(profile.viewingRequest), active: false },
-      slotFlow: ['viewingContact', 'viewingTime'].includes(profile.slotFlow?.awaiting)
+      slotFlow: ['viewingContact', 'viewingTime', 'viewingProperty'].includes(profile.slotFlow?.awaiting)
         ? { awaiting: null, alternatives: null }
         : profile.slotFlow,
     });
@@ -915,7 +916,7 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
   const sellFlow = applySellFlow(message, profile, history);
   if (sellFlow) return sellFlow;
 
-  const viewingFlow = applyViewingRequestFlow(message, profile, history);
+  const viewingFlow = applyViewingRequestFlow(message, profile, history, viewingSelection);
   if (viewingFlow) {
     return {
       type: viewingFlow.type,
@@ -1292,7 +1293,7 @@ function applyListingFilterUpdate(message, profile) {
 
 function bedroomClarifyIfNeeded(message, profile) {
   if (isPropertyUiAction(message) || isBookViewingAction(message)) return null;
-  if (['viewingContact', 'viewingTime'].includes(profile.slotFlow?.awaiting)) return null;
+  if (['viewingContact', 'viewingTime', 'viewingProperty'].includes(profile.slotFlow?.awaiting)) return null;
   if (profile.viewingRequest?.active) return null;
   if (
     parseSellIntent(message) ||
@@ -1395,8 +1396,9 @@ async function maybeCaptureViewingLead(sessionId, profile) {
       name: vr.name,
       phone: vr.phone,
       email: vr.email || '',
-      intent: buildViewingLeadIntent(vr),
+      intent: buildViewingLeadIntent(vr, profile),
       emailOptional: true,
+      phoneOptional: true,
     },
     { sessionId, leadAlreadyCaptured: false }
   );
@@ -1876,7 +1878,15 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
 
 const chat = async (req, res) => {
   try {
-    const { sessionId, message, intent: bodyIntent } = req.body;
+    const {
+      sessionId,
+      message,
+      intent: bodyIntent,
+      action,
+      propertyRefNo,
+      propertyId,
+      propertyTitle,
+    } = req.body;
     const conversation = await loadConversation(sessionId);
     let profile = conversation.userProfile || {};
     const requestTypes = filtersFromRequestBody(req.body);
@@ -1889,7 +1899,8 @@ const chat = async (req, res) => {
       message,
       profile,
       conversation.messages || [],
-      bodyIntent
+      bodyIntent,
+      { action, propertyRefNo, propertyId, propertyTitle }
     );
 
     if (slotResult?.type === 'submit_viewing') {

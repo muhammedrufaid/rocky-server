@@ -57,6 +57,21 @@ function validateChat(req, res, next) {
   if (typeof message === 'string' && message.trim()) {
     req.body.message = message.trim();
   }
+  const action = req.body?.action;
+  if (action != null && action !== '') {
+    if (typeof action !== 'string') {
+      return res.status(400).json({ success: false, message: 'action must be a string' });
+    }
+    req.body.action = action.trim();
+  }
+  for (const key of ['propertyRefNo', 'propertyId', 'propertyTitle']) {
+    const value = req.body?.[key];
+    if (value == null || value === '') continue;
+    if (typeof value !== 'string') {
+      return res.status(400).json({ success: false, message: `${key} must be a string` });
+    }
+    req.body[key] = value.trim();
+  }
   const intent = req.body?.intent;
   if (intent != null && intent !== '') {
     if (typeof intent !== 'string') {

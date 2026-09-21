@@ -104,6 +104,8 @@ const {
   viewingFailureReply,
   viewingCloseReply,
   emptyViewingRequest,
+  VIEWING_NEUTRAL_OPTIONS,
+  VIEWING_WEEKEND_OPTIONS,
 } = require('./chat.tools');
 const { Lead } = require('./chat.models');
 const propertyDbService = require('../services/propertyDbService');
@@ -1350,7 +1352,7 @@ function marinaStudioBuyProfile() {
     purpose: 'Buy',
     bedrooms: 0,
     lastSearchFilters,
-    lastPropertyCards: [{ id: 'ABC123', title: 'Studio in Dubai Marina' }],
+    lastPropertyCards: [{ id: 'ABC123', propertyRefNo: 'ABC123', title: 'Studio in Dubai Marina' }],
     shownPropertyIds: ['ABC123'],
     slotFlow: { awaiting: null },
     viewingRequest: emptyViewingRequest(),
@@ -1475,6 +1477,8 @@ test('multi-field viewing contact is extracted in one message', () => {
   assert.equal(vr.phone.replace(/\s/g, ''), '0501234567');
   assert.equal(/name and either/i.test(details.reply || ''), false);
   assert.equal(/please share your name/i.test(details.reply || ''), false);
+  assert.equal(/saturday|sunday|weekend/i.test(details.reply || ''), false);
+  assert.deepEqual(details.options, VIEWING_NEUTRAL_OPTIONS);
 });
 
 function viewingSession(profile = marinaStudioBuyProfile()) {
@@ -1514,8 +1518,9 @@ test('viewing contact asks only for name after email and phone', () => {
   assert.equal(/please share your name/i.test(afterName.reply || ''), false);
   assert.ok(
     afterName.type === 'submit_viewing' ||
-      /preferred weekend time|agent coordinate/i.test(afterName.reply || '')
+      /preferred date or time|agent coordinate/i.test(afterName.reply || '')
   );
+  assert.equal(/saturday|sunday|weekend/i.test(afterName.reply || ''), false);
 });
 
 test('labeled viewing name is extracted and not asked again', () => {
@@ -1565,7 +1570,6 @@ test('email-only viewing contact asks for name not phone', () => {
   assert.equal(/phone number/i.test(afterEmail.reply), false);
   assert.deepEqual(viewingMissingContactFields(afterEmail.profilePatch.viewingRequest), [
     'name',
-    'phone',
   ]);
 });
 
@@ -1636,7 +1640,199 @@ test('Agent can coordinate submits the viewing once after contact is complete', 
   );
   assert.equal(afterTime.type, 'submit_viewing');
   assert.equal(afterTime.profilePatch.viewingRequest.preferredTime, 'Agent can coordinate');
+  assert.equal(afterTime.profilePatch.viewingRequest.schedulingMode, 'AGENT_COORDINATE');
   assert.equal(afterTime.profilePatch.viewingRequest.name, 'John Smith');
+});
+
+function twoPropertyProfile() {
+  const base = marinaStudioBuyProfile();
+  return {
+    ...base,
+    lastPropertyCards: [
+      { id: 'RO-S-00001', propertyRefNo: 'RO-S-00001', title: 'Contemporary | Prime Community | Tenanted' },
+      { id: 'RO-S-00002', propertyRefNo: 'RO-S-00002', title: 'Refined Comfort | Prime | Exclusive' },
+    ],
+  };
+}
+
+test('BOOK_VIEWING with property B ref does not select property A', () => {
+  const flow = applyViewingRequestFlow(
+    'Book a viewing',
+    twoPropertyProfile(),
+    [],
+    { action: 'BOOK_VIEWING', propertyRefNo: 'RO-S-00002' }
+  );
+  assert.equal(flow.profilePatch.viewingRequest.propertyRefNo, 'RO-S-00002');
+  assert.equal(flow.profilePatch.viewingRequest.propertyId, 'RO-S-00002');
+  assert.match(flow.profilePatch.viewingRequest.propertyTitle, /Refined Comfort/i);
+  assert.equal(flow.profilePatch.viewingRequest.propertyRefNo === 'RO-S-00001', false);
+});
+
+test('generic Book a viewing is ambiguous when multiple properties are shown', () => {
+  const flow = applyViewingRequestFlow('Book a viewing', twoPropertyProfile(), []);
+  assert.equal(flow.type, 'clarify');
+  assert.match(flow.reply, /which property/i);
+  assert.equal(flow.profilePatch.viewingRequest.propertyRefNo, null);
+  assert.ok(flow.options.some((item) => /RO-S-00002/.test(item)));
+  assert.ok(flow.options.some((item) => /RO-S-00001/.test(item)));
+});
+
+test('viewing contact extracts name email and phone in one message', () => {
+  const details = applyViewingRequestFlow(
+    'sha\nsha@gmail.com\n1234567842',
+    viewingSession(),
+    []
+  );
+  const vr = details.profilePatch.viewingRequest;
+  assert.equal(vr.name, 'sha');
+  assert.equal(vr.email, 'sha@gmail.com');
+  assert.equal(vr.phone.replace(/\s/g, ''), '1234567842');
+  assert.equal(/please share your name|phone number or email/i.test(details.reply || ''), false);
+  assert.equal(/saturday|sunday|weekend/i.test(details.reply || ''), false);
+  assert.match(details.reply, /preferred date or time/i);
+  assert.deepEqual(details.options, VIEWING_NEUTRAL_OPTIONS);
+});
+
+test('viewing does not invent weekend options after contact', () => {
+  const details = applyViewingRequestFlow(
+    'sha\nsha@gmail.com\n1234567842',
+    viewingSession(),
+    []
+  );
+  assert.equal(/saturday|sunday|weekend/i.test(details.reply || ''), false);
+  assert.equal((details.options || []).some((item) => /saturday|sunday/i.test(item)), false);
+});
+
+test('explicit weekend after contact shows weekend options', () => {
+  const afterContact = applyViewingRequestFlow(
+    'sha\nsha@gmail.com\n1234567842',
+    viewingSession(),
+    []
+  );
+  const weekend = applyViewingRequestFlow(
+    'weekend',
+    {
+      ...marinaStudioBuyProfile(),
+      viewingRequest: afterContact.profilePatch.viewingRequest,
+      slotFlow: afterContact.profilePatch.slotFlow,
+    },
+    []
+  );
+  assert.equal(weekend.type, 'clarify');
+  assert.match(weekend.reply, /preferred weekend time/i);
+  assert.deepEqual(weekend.options, VIEWING_WEEKEND_OPTIONS);
+  assert.notEqual(weekend.type, 'submit_viewing');
+});
+
+test('Agent can coordinate completes scheduling and does not ask another time', () => {
+  const afterContact = applyViewingRequestFlow(
+    'sha\nsha@gmail.com\n1234567842',
+    viewingSession(),
+    []
+  );
+  const done = applyViewingRequestFlow(
+    'Agent can coordinate',
+    {
+      ...marinaStudioBuyProfile(),
+      viewingRequest: afterContact.profilePatch.viewingRequest,
+      slotFlow: afterContact.profilePatch.slotFlow,
+    },
+    []
+  );
+  assert.equal(done.type, 'submit_viewing');
+  assert.equal(done.profilePatch.viewingRequest.schedulingMode, 'AGENT_COORDINATE');
+  assert.equal(/preferred date or time|weekend time/i.test(done.reply || ''), false);
+});
+
+test('successful viewing lead closes viewingRequest', async (t) => {
+  t.mock.method(Lead, 'create', async (doc) => ({ _id: 'lead-view-ok', ...doc }));
+  const afterContact = applyViewingRequestFlow(
+    'sha\nsha@gmail.com\n1234567842',
+    viewingSession(),
+    []
+  );
+  const afterTime = applyViewingRequestFlow(
+    'Agent can coordinate',
+    {
+      ...marinaStudioBuyProfile(),
+      viewingRequest: afterContact.profilePatch.viewingRequest,
+      slotFlow: afterContact.profilePatch.slotFlow,
+    },
+    []
+  );
+  const captured = await executeTool(
+    'capture_lead',
+    {
+      name: afterTime.profilePatch.viewingRequest.name,
+      phone: afterTime.profilePatch.viewingRequest.phone,
+      email: afterTime.profilePatch.viewingRequest.email,
+      intent: 'property viewing — ref ABC123',
+      emailOptional: true,
+      phoneOptional: true,
+    },
+    { sessionId: 'view-ok' }
+  );
+  const finalized = finalizeViewingCapture(afterTime.profilePatch.viewingRequest, captured);
+  assert.equal(captured.leadCaptured, true);
+  assert.match(finalized.reply, /viewing request has been recorded/i);
+  assert.equal(finalized.viewingRequest.active, false);
+  assert.equal(finalized.viewingRequest.submitted, true);
+});
+
+test('new viewing for property B clears old schedule and stores B', () => {
+  const completedA = {
+    ...twoPropertyProfile(),
+    viewingRequest: {
+      ...emptyViewingRequest(),
+      active: false,
+      submitted: true,
+      propertyRefNo: 'RO-S-00001',
+      propertyId: 'RO-S-00001',
+      propertyTitle: 'Contemporary | Prime Community | Tenanted',
+      name: 'sha',
+      email: 'sha@gmail.com',
+      phone: '1234567842',
+      preferredDate: 'Sunday',
+      preferredTime: 'Sunday morning',
+      schedulingMode: 'USER_PREFERENCE',
+    },
+  };
+  const next = applyViewingRequestFlow(
+    'Book a viewing',
+    completedA,
+    [],
+    { action: 'BOOK_VIEWING', propertyRefNo: 'RO-S-00002' }
+  );
+  const vr = next.profilePatch.viewingRequest;
+  assert.equal(vr.propertyRefNo, 'RO-S-00002');
+  assert.equal(vr.submitted, false);
+  assert.equal(vr.active, true);
+  assert.equal(vr.preferredDate, null);
+  assert.equal(vr.preferredTime, null);
+  assert.equal(vr.schedulingMode, null);
+  assert.equal(vr.name, 'sha');
+  assert.equal(vr.email, 'sha@gmail.com');
+});
+
+test('property search after a completed viewing is not treated as a viewing note', () => {
+  const profile = {
+    ...marinaStudioBuyProfile(),
+    viewingRequest: {
+      ...emptyViewingRequest(),
+      active: false,
+      submitted: true,
+      propertyRefNo: 'ABC123',
+      name: 'sha',
+      email: 'sha@gmail.com',
+      phone: '1234567842',
+      preferredTime: 'Agent can coordinate',
+      schedulingMode: 'AGENT_COORDINATE',
+    },
+    slotFlow: { awaiting: null },
+  };
+  const query = 'Show me apartments in Dubai Marina.';
+  assert.equal(isListingSearchOverride(query), true);
+  assert.equal(applyViewingRequestFlow(query, profile, []), null);
 });
 
 test('preferred viewing time completes the flow after captureLead succeeds', async (t) => {
