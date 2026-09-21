@@ -249,7 +249,17 @@ function toPropertyCard(property) {
 }
 
 const PURPOSE_OPTIONS = ['Buy', 'Rent', 'Off-plan'];
+const COMMERCIAL_PURPOSE_OPTIONS = ['Buy', 'Rent'];
 const PURPOSE_SELECT = 'single';
+const PROPERTY_TYPE_CHANGE_OPTIONS = [
+  'Apartment',
+  'Villa',
+  'Townhouse',
+  'Penthouse',
+  'Office',
+  'Shop',
+  'Warehouse',
+];
 const BEDROOM_OPTIONS = ['Studio', '1 BR', '2 BR', '3 BR', '4+ BR', 'Any'];
 const PROPERTY_TYPE_OPTIONS = ['Apartment', 'Villa', 'Townhouse', 'Penthouse'];
 const BUY_BUDGET_OPTIONS = [
@@ -1820,7 +1830,30 @@ function bedroomsCompatibleWithTypes(filters = {}) {
   return true;
 }
 
-function normalizeSearchProfileAfterPatch(previousProfile, patch) {
+function searchCategory(filters = {}) {
+  if (searchTypesAreCommercial(filters)) return 'commercial';
+  if (typesFromFilters(filters).some(isResidentialPropertyType)) return 'residential';
+  return 'unknown';
+}
+
+function isPropertyCategoryChange(previous = {}, next = {}) {
+  const from = searchCategory(previous);
+  const to = searchCategory(next);
+  if (from === 'unknown' || to === 'unknown') return false;
+  return from !== to;
+}
+
+function isExplicitListingPurpose(text) {
+  return !!parsePurposeFromMessage(text) || isPurposeChipReply(text);
+}
+
+function clearPurposeFilters(filters) {
+  if (!filters) return filters;
+  filters.purpose = null;
+  return filters;
+}
+
+function normalizeSearchProfileAfterPatch(previousProfile, patch, { explicitPurpose = false } = {}) {
   const prev = copySearchFilters(previousProfile || emptySearchFilters());
   const incoming = patch && typeof patch === 'object' ? patch : {};
   const next = copySearchFilters({
@@ -1835,9 +1868,19 @@ function normalizeSearchProfileAfterPatch(previousProfile, patch) {
     clearBedroomFilters(next);
   }
 
+  const categoryChanged = isPropertyCategoryChange(prev, next);
   const prevPurpose = normalizePurpose(prev.purpose);
-  const nextPurpose = normalizePurpose(next.purpose);
-  if (prevPurpose && nextPurpose && prevPurpose !== nextPurpose) {
+  let nextPurpose = normalizePurpose(next.purpose);
+
+  if (categoryChanged && !explicitPurpose) {
+    clearPurposeFilters(next);
+    clearBudgetFilters(next);
+    nextPurpose = null;
+  } else if (prevPurpose && nextPurpose && prevPurpose !== nextPurpose) {
+    if (isRentalPurpose(prevPurpose) !== isRentalPurpose(nextPurpose)) {
+      clearBudgetFilters(next);
+    }
+  } else if (categoryChanged && explicitPurpose && prevPurpose && nextPurpose) {
     if (isRentalPurpose(prevPurpose) !== isRentalPurpose(nextPurpose)) {
       clearBudgetFilters(next);
     }
@@ -1882,6 +1925,12 @@ function mergePropertyTypes(current = [], incoming = [], message = '') {
   }
   if (parsePropertyTypeChange(raw) && parsePropertyTypesFromMessage(raw).length === 1) return next;
   if (/^(apartments?|villas?|townhouses?|penthouses?|duplexes?|offices?|studios?)$/i.test(raw)) return next;
+  if (next.length === 1) {
+    const incomingCommercial = isCommercialPropertyType(next[0]);
+    const incomingResidential = isResidentialPropertyType(next[0]);
+    if (incomingCommercial && cur.some(isResidentialPropertyType)) return next;
+    if (incomingResidential && cur.some(isCommercialPropertyType)) return next;
+  }
   return uniqueTypes([...cur, ...next]);
 }
 
@@ -2108,10 +2157,10 @@ function parsePropertyTypeChange(text) {
   if (!raw) return null;
   const lower = raw.toLowerCase().replace(/[.!?]/g, '').trim();
 
-  // Reject pure bedroom/purpose/vague-confirm phrases that happen to contain a type word
-  if (parseBedroomChoice(raw)) return null;
-  if (parsePurposeFromMessage(raw)) return null;
   if (isVagueConfirm(raw)) return null;
+
+  const types = parsePropertyTypesFromMessage(raw);
+  if (!types.length) return null;
 
   // Explicit change-intent patterns — must appear before the type noun
   const changePrefix =
@@ -2119,7 +2168,7 @@ function parsePropertyTypeChange(text) {
 
   if (!changePrefix.test(lower)) return null;
 
-  return parseDesiredPropertyType(raw);
+  return parseDesiredPropertyType(raw) || types[0];
 }
 
 function isBedroomSkip(text) {
@@ -2133,7 +2182,24 @@ function isBedroomSkip(text) {
   );
 }
 
-function purposeClarificationReply() {
+function indefiniteArticle(word) {
+  return /^[aeiou]/i.test(String(word || '').trim()) ? 'an' : 'a';
+}
+
+function purposeOptionsForFilters(filters = {}) {
+  if (searchTypesAreCommercial(filters)) return COMMERCIAL_PURPOSE_OPTIONS.slice();
+  return PURPOSE_OPTIONS.slice();
+}
+
+function purposeClarificationReply(filters = {}) {
+  if (searchTypesAreCommercial(filters)) {
+    const type = describeTypeSingular(filters).toLowerCase();
+    const loc = String(filters.location || '').trim();
+    if (type && type !== 'property' && loc) {
+      return `Are you looking to buy or rent ${indefiniteArticle(type)} ${type} in ${loc}?`;
+    }
+    return 'Are you looking to buy or rent this commercial property?';
+  }
   return 'Are you looking to buy, rent, or explore off-plan properties?';
 }
 
@@ -2180,8 +2246,8 @@ function nextMissingListingSlot(filters = {}) {
 function listingSlotQuestion(slot, filters = {}) {
   if (slot === 'intent') {
     return {
-      reply: purposeClarificationReply(),
-      options: PURPOSE_OPTIONS.slice(),
+      reply: purposeClarificationReply(filters),
+      options: purposeOptionsForFilters(filters),
       awaiting: 'purpose',
     };
   }
@@ -2258,7 +2324,7 @@ function qualifyListingSearch(message, profile = {}) {
     last.purpose = profile.purpose || intentToPurpose(profile.intent) || null;
   }
   const next = applyMessageToSearchFilters(last, message, { awaiting });
-  if (!next.purpose) {
+  if (!next.purpose && !isPropertyCategoryChange(last, next) && !isExplicitListingPurpose(message)) {
     next.purpose = last.purpose || profile.purpose || intentToPurpose(profile.intent) || null;
   }
 
@@ -2302,6 +2368,20 @@ function qualifyListingSearch(message, profile = {}) {
       options: budgetQuestion.options,
     };
   }
+  if ((hasListingContext || extracted) && emptyChoice?.askType) {
+    return {
+      type: 'clarify',
+      missing: 'propertyType',
+      profilePatch: {
+        purpose: next.purpose || null,
+        intent: purposeToIntent(next.purpose) || null,
+        lastSearchFilters: next,
+        slotFlow: { awaiting: 'propertyType', alternatives: null },
+      },
+      reply: 'What type of property would you like instead?',
+      options: PROPERTY_TYPE_CHANGE_OPTIONS.slice(),
+    };
+  }
   if ((hasListingContext || extracted) && emptyChoice?.nearby) {
     return {
       type: 'clarify',
@@ -2320,8 +2400,8 @@ function qualifyListingSearch(message, profile = {}) {
   const missing = nextMissingListingSlot(next);
   const question = missing ? listingSlotQuestion(missing, next) : null;
   const patch = {
-    purpose: next.purpose || profile.purpose,
-    intent: purposeToIntent(next.purpose) || profile.intent,
+    purpose: next.purpose || null,
+    intent: purposeToIntent(next.purpose) || null,
     preferredAreas: next.location ? [next.location] : undefined,
     bedrooms: requiresBedroomsForSearch(next)
       ? next.bedrooms ?? next.bedroomsMin ?? null
@@ -2764,7 +2844,9 @@ function applyMessageToSearchFilters(filters, message, { awaiting } = {}) {
     applyBudgetChoice(next, { any: true });
     const purposeOnly = parsePurposeFromMessage(message);
     if (purposeOnly) next.purpose = purposeOnly;
-    return next;
+    return normalizeSearchProfileAfterPatch(filters, next, {
+      explicitPurpose: !!purposeOnly || isPurposeChipReply(message),
+    });
   }
 
   const types = parsePropertyTypesFromMessage(message);
@@ -2782,7 +2864,9 @@ function applyMessageToSearchFilters(filters, message, { awaiting } = {}) {
   if (budget) applyBudgetChoice(next, budget);
   if (furnished) next.furnished = furnished;
   if (purpose) next.purpose = purpose;
-  return normalizeSearchProfileAfterPatch(filters, next);
+  return normalizeSearchProfileAfterPatch(filters, next, {
+    explicitPurpose: !!purpose || isPurposeChipReply(message),
+  });
 }
 
 function listingIntakeReply(intent) {
@@ -2930,11 +3014,15 @@ function shouldSkipPropertySearch(text) {
   return isGeneralKnowledgeQuery(text);
 }
 
-function trustedPurpose({ lastSearchFilters = {}, userMessage, slotFlow, intent } = {}) {
+function trustedPurpose({ lastSearchFilters = {}, userMessage, slotFlow, intent, effectiveFilters } = {}) {
   if (parseSellIntent(userMessage) || isServiceInquiryMessage(userMessage)) return null;
 
   const fromMessage = parsePurposeFromMessage(userMessage);
   if (fromMessage) return fromMessage;
+
+  const next = effectiveFilters || lastSearchFilters;
+  if (isPropertyCategoryChange(lastSearchFilters, next)) return null;
+  if (searchTypesAreCommercial(next) && !normalizePurpose(lastSearchFilters?.purpose)) return null;
 
   const locked = intentToPurpose(intent) || normalizePurpose(lastSearchFilters?.purpose);
   if (!locked) return null;
@@ -2976,6 +3064,9 @@ function profilePatchFromPropertyFilters(filters) {
   if (purpose) {
     patch.purpose = purpose;
     patch.intent = purposeToIntent(purpose);
+  } else {
+    patch.purpose = null;
+    patch.intent = null;
   }
   return patch;
 }
@@ -3810,8 +3901,18 @@ async function searchProperties(
     Object.assign(effectiveFilters, overlaid);
   }
 
-  const purpose = trustedPurpose({ lastSearchFilters, userMessage, slotFlow, intent: lockedIntent });
-  effectiveFilters.purpose = purpose || effectiveFilters.purpose;
+  const purpose = trustedPurpose({
+    lastSearchFilters,
+    userMessage,
+    slotFlow,
+    intent: lockedIntent,
+    effectiveFilters,
+  });
+  if (purpose) {
+    effectiveFilters.purpose = purpose;
+  } else if (isPropertyCategoryChange(lastSearchFilters, effectiveFilters)) {
+    effectiveFilters.purpose = null;
+  }
 
   const previousLocation = lastSearchFilters?.location || null;
   const locationChanged =
@@ -4111,6 +4212,7 @@ module.exports = {
   TOOL_DEFINITIONS,
   executeTool,
   PURPOSE_OPTIONS,
+  COMMERCIAL_PURPOSE_OPTIONS,
   PURPOSE_SELECT,
   BEDROOM_OPTIONS,
   PROPERTY_TYPE_OPTIONS,
@@ -4166,6 +4268,8 @@ module.exports = {
   requiresBedroomsForSearch,
   normalizeSearchProfileAfterPatch,
   getRequiredSearchFields,
+  isPropertyCategoryChange,
+  purposeOptionsForFilters,
   isShowMoreRequest,
   hasActiveListingSearch,
   filtersFromRequestBody,

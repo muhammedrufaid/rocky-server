@@ -86,6 +86,8 @@ const {
   isCommercialPropertyType,
   normalizeSearchProfileAfterPatch,
   getRequiredSearchFields,
+  purposeOptionsForFilters,
+  COMMERCIAL_PURPOSE_OPTIONS,
   applyViewingRequestFlow,
   finalizeViewingCapture,
   parseContactDetails,
@@ -1342,29 +1344,42 @@ function marinaStudioBuyProfile() {
   };
 }
 
-test('commercial office search clears studio bedrooms', async (t) => {
+test('commercial office search without buy/rent clears intent and asks Buy/Rent', async (t) => {
   assert.equal(isResidentialPropertyType('Apartment'), true);
   assert.equal(isCommercialPropertyType('Office'), true);
   const previous = marinaStudioBuyFilters();
   assert.equal(previous.bedrooms, 0);
   assert.equal(previous.type, 'Apartment');
 
-  const profile = marinaStudioBuyProfile();
+  const profile = {
+    ...marinaStudioBuyProfile(),
+    lastSearchFilters: applyMessageToSearchFilters(
+      applyMessageToSearchFilters(emptySearchFilters(), 'I need a 2 BHK apartment in Dubai Marina to buy'),
+      'AED 1M - 1.5M'
+    ),
+    bedrooms: 2,
+  };
   const qualified = qualifyListingSearch('Looking for an office in Business Bay.', profile);
-  assert.equal(qualified.type, 'continue');
+  assert.equal(qualified.type, 'clarify');
+  assert.equal(qualified.missing, 'intent');
   const next = qualified.profilePatch.lastSearchFilters;
   assert.equal(next.type, 'Office');
   assert.equal(next.location, 'Business Bay');
-  assert.equal(next.purpose, 'Buy');
+  assert.equal(next.purpose, null);
+  assert.equal(qualified.profilePatch.intent, null);
   assert.equal(next.bedrooms, null);
   assert.equal(next.bedroomsResolved, false);
-  assert.equal(next.budgetMin, 1000000);
-  assert.equal(next.budgetMax, 1500000);
+  assert.equal(next.budgetProvided, false);
+  assert.equal(next.budgetMin, null);
+  assert.equal(next.budgetMax, null);
   assert.equal(getRequiredSearchFields(next).includes('bedrooms'), false);
+  assert.match(qualified.reply, /buy or rent an office in Business Bay/i);
+  assert.deepEqual(qualified.options, ['Buy', 'Rent']);
+  assert.equal(qualified.options.includes('Off-plan'), false);
 
-  mockBuyInventory(t, [
-    sampleBuyApartment({ propertyRefNo: 'OFF-1', propertyTitle: 'Office in Business Bay', bedrooms: '' }),
-  ]);
+  t.mock.method(propertyDbService, 'fetchBuyProperties', async () => {
+    throw new Error('search must not run until buy/rent is chosen');
+  });
   const result = await executeTool(
     'search_properties',
     {},
@@ -1374,14 +1389,15 @@ test('commercial office search clears studio bedrooms', async (t) => {
       intent: CONVERSATION_INTENTS.BUY,
     }
   );
+  assert.equal(result.needsPurpose, true);
+  assert.equal((result.propertyCards || []).length, 0);
+  assert.equal(propertyDbService.fetchBuyProperties.mock.calls.length, 0);
   assert.equal(result.effectiveFilters.bedrooms, null);
   assert.equal(result.effectiveFilters.type, 'Office');
-  const text = `${result.replyOverride || ''} ${result.clarificationReply || ''}`;
-  assert.equal(/studio office/i.test(text), false);
-  assert.equal(/\bstudio\b/i.test(text), false);
+  assert.equal(/studio office/i.test(result.clarificationReply || ''), false);
 });
 
-test('residential to commercial keeps sale budget', () => {
+test('residential to commercial without explicit intent clears sale budget', () => {
   const previous = marinaStudioBuyFilters();
   const next = normalizeSearchProfileAfterPatch(previous, {
     ...previous,
@@ -1391,10 +1407,10 @@ test('residential to commercial keeps sale budget', () => {
   });
   assert.equal(next.type, 'Office');
   assert.equal(next.bedrooms, null);
-  assert.equal(next.budgetProvided, true);
-  assert.equal(next.budgetMin, 1000000);
-  assert.equal(next.budgetMax, 1500000);
-  assert.equal(next.purpose, 'Buy');
+  assert.equal(next.purpose, null);
+  assert.equal(next.budgetProvided, false);
+  assert.equal(next.budgetMin, null);
+  assert.equal(next.budgetMax, null);
 });
 
 test('BUY to RENT clears purchase budget and asks rental budget', () => {
@@ -1620,7 +1636,7 @@ test('office after studio clears bedrooms and never searches studio offices', ()
   assert.equal(afterOffice.type, 'Office');
   assert.equal(afterOffice.location, 'Business Bay');
   assert.equal(afterOffice.bedrooms, null);
-  assert.equal(afterOffice.purpose, 'Buy');
+  assert.equal(afterOffice.purpose, null);
   const qualified = qualifyListingSearch('Looking for an office in Business Bay.', {
     intent: CONVERSATION_INTENTS.BUY,
     purpose: 'Buy',
@@ -1662,6 +1678,103 @@ test('zero results with a restrictive budget mention the budget and real stats',
   assert.match(result.clarificationReply, /AED 2\.1M/);
   assert.match(result.clarificationReply, /AED 2\.8M/);
   assert.deepEqual(result.options, ['Increase budget', 'Any budget', 'Nearby areas', 'Try 1 BR']);
+});
+
+test('explicit buy office keeps BUY and asks budget if missing', () => {
+  const profile = {
+    intent: CONVERSATION_INTENTS.BUY,
+    purpose: 'Buy',
+    lastSearchFilters: applyMessageToSearchFilters(
+      emptySearchFilters(),
+      'I need a 2 BHK apartment in Dubai Marina to buy'
+    ),
+    slotFlow: { awaiting: null },
+  };
+  const qualified = qualifyListingSearch('I want to buy an office in Business Bay.', profile);
+  assert.equal(qualified.type, 'clarify');
+  assert.equal(qualified.missing, 'budget');
+  const next = qualified.profilePatch.lastSearchFilters;
+  assert.equal(next.type, 'Office');
+  assert.equal(next.purpose, 'Buy');
+  assert.equal(qualified.profilePatch.intent, CONVERSATION_INTENTS.BUY);
+  assert.equal(next.location, 'Business Bay');
+  assert.equal(next.bedrooms, null);
+  assert.equal(/buy or rent/i.test(qualified.reply), false);
+  assert.deepEqual(qualified.options, BUY_BUDGET_OPTIONS);
+});
+
+test('explicit rent office keeps RENT and does not re-ask intent', () => {
+  const profile = marinaStudioBuyProfile();
+  const qualified = qualifyListingSearch('I want to rent an office in Business Bay.', profile);
+  assert.equal(qualified.profilePatch.lastSearchFilters.purpose, 'Rent');
+  assert.equal(qualified.profilePatch.intent, CONVERSATION_INTENTS.RENT);
+  assert.equal(qualified.profilePatch.lastSearchFilters.type, 'Office');
+  assert.equal(qualified.profilePatch.lastSearchFilters.location, 'Business Bay');
+  assert.notEqual(qualified.missing, 'intent');
+  assert.equal(/buy or rent/i.test(qualified.reply || ''), false);
+});
+
+test('change property type to Office clears old BUY intent and sale budget', () => {
+  const profile = continuationProfile(['A']);
+  const askType = qualifyListingSearch('Change property type', profile);
+  assert.equal(askType.type, 'clarify');
+  assert.equal(askType.missing, 'propertyType');
+  assert.match(askType.reply, /what type of property would you like instead/i);
+
+  const afterOffice = qualifyListingSearch('Office', {
+    ...profile,
+    lastSearchFilters: askType.profilePatch.lastSearchFilters,
+    slotFlow: askType.profilePatch.slotFlow,
+  });
+  assert.equal(afterOffice.type, 'clarify');
+  assert.equal(afterOffice.missing, 'intent');
+  const next = afterOffice.profilePatch.lastSearchFilters;
+  assert.equal(next.type, 'Office');
+  assert.equal(next.purpose, null);
+  assert.equal(afterOffice.profilePatch.intent, null);
+  assert.equal(next.bedrooms, null);
+  assert.equal(next.budgetProvided, false);
+  assert.equal(next.budgetMin, null);
+  assert.equal(next.budgetMax, null);
+  assert.match(afterOffice.reply, /buy or rent/i);
+  assert.deepEqual(afterOffice.options, ['Buy', 'Rent']);
+  assert.equal(afterOffice.options.includes('Off-plan'), false);
+});
+
+test('Rent after commercial type change asks rental budget and does not reuse sale budget', () => {
+  const profile = continuationProfile(['A']);
+  const afterOffice = qualifyListingSearch('Office', profile);
+  const afterRent = qualifyListingSearch('Rent', {
+    intent: null,
+    purpose: null,
+    lastSearchFilters: afterOffice.profilePatch.lastSearchFilters,
+    slotFlow: afterOffice.profilePatch.slotFlow,
+  });
+  assert.equal(afterRent.type, 'clarify');
+  assert.equal(afterRent.missing, 'budget');
+  const next = afterRent.profilePatch.lastSearchFilters;
+  assert.equal(next.purpose, 'Rent');
+  assert.equal(afterRent.profilePatch.intent, CONVERSATION_INTENTS.RENT);
+  assert.equal(next.budgetProvided, false);
+  assert.equal(next.budgetMin, null);
+  assert.equal(next.budgetMax, null);
+  assert.deepEqual(afterRent.options, RENT_BUDGET_OPTIONS);
+  assert.equal(afterRent.options.some((opt) => /1M|1\.5M/.test(opt)), false);
+});
+
+test('commercial intent options are Buy and Rent only', () => {
+  const officeFilters = applyMessageToSearchFilters(
+    emptySearchFilters(),
+    'Looking for an office in Business Bay.'
+  );
+  assert.deepEqual(purposeOptionsForFilters(officeFilters), COMMERCIAL_PURPOSE_OPTIONS);
+  assert.deepEqual(purposeOptionsForFilters(officeFilters), ['Buy', 'Rent']);
+  assert.equal(purposeOptionsForFilters(officeFilters).includes('Off-plan'), false);
+  const apartmentFilters = applyMessageToSearchFilters(
+    emptySearchFilters(),
+    'I need a 2 BHK apartment in Dubai Marina to buy'
+  );
+  assert.deepEqual(purposeOptionsForFilters(apartmentFilters), ['Buy', 'Rent', 'Off-plan']);
 });
 
 

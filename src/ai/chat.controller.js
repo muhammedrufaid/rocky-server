@@ -195,8 +195,8 @@ function mergeProfile(current, patch) {
     if (patch.budget.max !== undefined) next.budget.max = patch.budget.max;
   }
   if (patch.bedrooms !== undefined) next.bedrooms = patch.bedrooms;
-  if (patch.purpose) next.purpose = patch.purpose;
-  if (patch.intent) next.intent = patch.intent;
+  if (patch.purpose !== undefined) next.purpose = patch.purpose;
+  if (patch.intent !== undefined) next.intent = patch.intent;
   if (Array.isArray(patch.lastPropertyCards)) {
     next.lastPropertyCards = toStoredPropertyCards(patch.lastPropertyCards);
   }
@@ -299,14 +299,17 @@ function emptyClarificationPayload() {
 
 function listingSlotResponse(profile, filters, extraPatch = {}) {
   const previous = profile.lastSearchFilters || emptySearchFilters();
-  const next = normalizeSearchProfileAfterPatch(previous, filters || emptySearchFilters());
-  const missing = nextMissingListingSlot(next);
-  const question = missing ? listingSlotQuestion(missing, next) : null;
   const {
     slotFlow: _ignoredSlotFlow,
     lastSearchFilters: _ignoredFilters,
+    explicitPurpose: explicitPurposeFlag,
     ...rest
   } = extraPatch || {};
+  const next = normalizeSearchProfileAfterPatch(previous, filters || emptySearchFilters(), {
+    explicitPurpose: explicitPurposeFlag === true,
+  });
+  const missing = nextMissingListingSlot(next);
+  const question = missing ? listingSlotQuestion(missing, next) : null;
   const patch = {
     ...rest,
     lastSearchFilters: next,
@@ -314,10 +317,8 @@ function listingSlotResponse(profile, filters, extraPatch = {}) {
       ? { awaiting: question.awaiting, alternatives: null }
       : { awaiting: null, alternatives: null },
   };
-  if (next.purpose) {
-    patch.purpose = next.purpose;
-    patch.intent = purposeToIntent(next.purpose) || rest.intent || profile.intent;
-  }
+  patch.purpose = next.purpose || null;
+  patch.intent = purposeToIntent(next.purpose) || null;
   if (next.location) patch.preferredAreas = rest.preferredAreas || [next.location];
   if (requiresBedroomsForSearch(next)) {
     if (next.bedrooms != null) patch.bedrooms = next.bedrooms;
@@ -759,16 +760,16 @@ function applyPropertyTypeChange(message, profile) {
 
   if (incoming.length > 1) {
     applyTypesToFilters(last, mergePropertyTypes(typesFromFilters(last), incoming, message));
-    const resolvedPurpose = last.purpose || profile.purpose || null;
-    if (resolvedPurpose) last.purpose = resolvedPurpose;
+    const explicitPurpose = parsePurposeFromMessage(message);
+    if (explicitPurpose) last.purpose = explicitPurpose;
     if (mentionedLocation && !last.location) last.location = mentionedLocation;
     const beds = parseBedroomChoice(message);
     if (beds) applyBedroomChoice(last, beds);
     const budget = parseBudgetFromMessage(message);
     if (budget) applyBudgetChoice(last, budget);
     return listingSlotResponse(profile, last, {
-      purpose: resolvedPurpose || profile.purpose,
       preferredAreas: last.location ? [last.location] : undefined,
+      explicitPurpose: !!explicitPurpose,
     });
   }
 
@@ -780,19 +781,20 @@ function applyPropertyTypeChange(message, profile) {
     return null;
   }
 
-  const resolvedPurpose = last.purpose || profile.purpose || null;
+  const explicitPurpose = parsePurposeFromMessage(message);
   applyTypesToFilters(last, mergePropertyTypes(currentTypes, [newType], message));
-  last.purpose = resolvedPurpose;
+  if (explicitPurpose) last.purpose = explicitPurpose;
 
   if (mentionedLocation && !last.location) {
     last.location = mentionedLocation;
     return listingSlotResponse(profile, last, {
       preferredAreas: [mentionedLocation],
+      explicitPurpose: !!explicitPurpose,
     });
   }
 
   if (!last.location) {
-    const normalized = listingSlotResponse(profile, last, {});
+    const normalized = listingSlotResponse(profile, last, { explicitPurpose: !!explicitPurpose });
     if (normalized.type === 'clarify') return normalized;
     return {
       type: 'clarify',
@@ -805,7 +807,7 @@ function applyPropertyTypeChange(message, profile) {
     };
   }
 
-  return listingSlotResponse(profile, last, {});
+  return listingSlotResponse(profile, last, { explicitPurpose: !!explicitPurpose });
 }
 
 function applyShowMore(message, profile) {
@@ -845,6 +847,9 @@ function applyConversationIntent(message, profile, explicitIntent = null) {
     !starter &&
     !requestedIntent
   ) {
+    if (parsePropertyTypesFromMessage(message).length || parseLocationFromMessage(message)) {
+      return null;
+    }
     const previous = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
     if (!previous.purpose) previous.purpose = intentToPurpose(current);
     const patched = copySearchFilters(previous);
@@ -853,6 +858,7 @@ function applyConversationIntent(message, profile, explicitIntent = null) {
       intent: detected,
       purpose: patched.purpose,
       resetShownPropertyIds: true,
+      explicitPurpose: true,
     });
   }
 
@@ -999,9 +1005,8 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
           lastSearchFilters: last,
           slotFlow: { awaiting: 'listingIntake', alternatives: null },
         }),
-        reply:
-          'What property type should I search for — apartment, villa, townhouse, penthouse, or another type?',
-        options: ['Apartment', 'Villa', 'Townhouse', 'Penthouse'],
+        reply: 'What type of property would you like instead?',
+        options: ['Apartment', 'Villa', 'Townhouse', 'Penthouse', 'Office', 'Shop', 'Warehouse'],
       };
     }
     if (emptyChoice?.location) {
@@ -1240,12 +1245,9 @@ function applyNewLocationSearch(message, profile) {
   const resolvedLocation = mentionedLocation || last.location;
   if (!resolvedLocation) return null;
 
-  // Resolve purpose: explicit in message > stored purpose (existing rule: persist across location change)
-  const resolvedPurpose = purposeFromMsg || last.purpose || profile.purpose || null;
-
   const newFilters = copySearchFilters(last);
   newFilters.location = resolvedLocation;
-  newFilters.purpose = resolvedPurpose;
+  if (purposeFromMsg) newFilters.purpose = purposeFromMsg;
   if (mentionedTypes.length) applyTypesToFilters(newFilters, mentionedTypes);
 
   if (bedsFromMsg) {
@@ -1259,11 +1261,8 @@ function applyNewLocationSearch(message, profile) {
     lastSearchFilters: newFilters,
     slotFlow: { awaiting: null, alternatives: null },
     resetShownPropertyIds: locDiffers,
+    explicitPurpose: !!purposeFromMsg,
   };
-  if (resolvedPurpose) {
-    patch.purpose = resolvedPurpose;
-    patch.intent = purposeToIntent(resolvedPurpose);
-  }
   if (resolvedLocation) patch.preferredAreas = [resolvedLocation];
 
   return listingSlotResponse(profile, newFilters, patch);
