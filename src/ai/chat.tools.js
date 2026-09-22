@@ -2381,6 +2381,28 @@ function hasActiveListingSearch(profile = {}) {
   return false;
 }
 
+function hasInProgressListingSearch(profile = {}) {
+  const last = profile.lastSearchFilters || emptySearchFilters();
+  const awaiting = profile.slotFlow?.awaiting;
+  return (
+    isBedroomsResolved(last) ||
+    typesFromFilters(last).length > 0 ||
+    !!String(last.location || '').trim() ||
+    last.locationAny === true ||
+    LISTING_SLOT_AWAITING.has(awaiting)
+  );
+}
+
+/** True when a listing intent must wipe prior filters (menu starter), not merge. */
+function shouldResetOnListingIntent(message, profile = {}, explicitIntent = null) {
+  const requestedIntent = normalizeIntentValue(explicitIntent);
+  const detected = requestedIntent || parseConversationIntent(message);
+  if (!detected || !isListingIntent(detected)) return false;
+  if (isExplicitIntentStarter(message)) return true;
+  if (hasInProgressListingSearch(profile) || isPurposeChipReply(message)) return false;
+  return !!requestedIntent;
+}
+
 function filtersFromRequestBody(body = {}) {
   const typeRaw = body.property_type ?? body.propertyType ?? body.type;
   const typesRaw = body.property_types ?? body.propertyTypes ?? body.types;
@@ -4987,6 +5009,8 @@ module.exports = {
   purposeOptionsForFilters,
   isShowMoreRequest,
   hasActiveListingSearch,
+  hasInProgressListingSearch,
+  shouldResetOnListingIntent,
   filtersFromRequestBody,
   uniqueIdList,
   listingQueryOpts,

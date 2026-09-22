@@ -47,6 +47,8 @@ const {
   parseConversationIntent,
   isExplicitIntentStarter,
   startFreshIntent,
+  shouldResetOnListingIntent,
+  hasInProgressListingSearch,
   listingStartReply,
   pmNeedReply,
   PM_NEED_OPTIONS,
@@ -2280,6 +2282,22 @@ test('studio room without intent asks buy/rent and keeps bedrooms 0', () => {
   assert.equal(/how many bedrooms/i.test(turn2.reply || ''), false);
   assert.equal((turn2.options || []).includes('Studio'), false);
   assert.equal((turn2.options || []).includes('1 BR'), false);
+
+  assert.equal(hasInProgressListingSearch(profileFromQualify(turn1)), true);
+  assert.equal(shouldResetOnListingIntent('Rent', profileFromQualify(turn1), 'RENT'), false);
+  assert.equal(shouldResetOnListingIntent('Rent a Property', profileFromQualify(turn1)), true);
+
+  const persisted = {
+    ...profileFromQualify(turn1),
+    lastSearchFilters: {
+      ...turn1.profilePatch.lastSearchFilters,
+      bedroomsResolved: false,
+    },
+  };
+  const afterPersist = qualifyListingSearch('Rent', persisted);
+  assert.equal(afterPersist.missing, 'location');
+  assert.equal(afterPersist.profilePatch.lastSearchFilters.bedrooms, 0);
+  assert.equal(/how many bedrooms/i.test(afterPersist.reply || ''), false);
 });
 
 test('studio for rent in Dubai Marina asks budget only', () => {
