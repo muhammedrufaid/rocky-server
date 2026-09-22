@@ -99,6 +99,12 @@ function attachPropertySearchMeta(payload, source = {}) {
   if (source.nextCursor !== undefined) payload.nextCursor = source.nextCursor;
   if (source.presentation) payload.presentation = source.presentation;
   if (source.intent) payload.intent = source.intent;
+  if (source.searchState) payload.searchState = source.searchState;
+  if (source.resultCount !== undefined) payload.resultCount = source.resultCount;
+  if (source.marketStats) payload.marketStats = source.marketStats;
+  if (source.overallMarketStats) payload.overallMarketStats = source.overallMarketStats;
+  if (source.marketStatsScope) payload.marketStatsScope = source.marketStatsScope;
+  if (Array.isArray(source.suggestedActions)) payload.suggestedActions = source.suggestedActions;
   if (source.alternativeInventory) payload.alternativeInventory = source.alternativeInventory;
   if (source.inventoryCounts) payload.inventoryCounts = source.inventoryCounts;
   return payload;
@@ -1572,6 +1578,12 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage, previo
     viewAllMatching: result.viewAllMatching || null,
     presentation: result.presentation || null,
     intent: result.intent || null,
+    searchState: result.searchState || null,
+    resultCount: result.resultCount ?? result.total ?? 0,
+    marketStats: result.marketStats || null,
+    overallMarketStats: result.overallMarketStats || null,
+    marketStatsScope: result.marketStatsScope || null,
+    suggestedActions: result.suggestedActions || result.options || null,
     alternativeInventory: result.alternativeInventory || null,
     inventoryCounts: result.inventoryCounts || null,
     hasMore: !!result.hasMore,
@@ -2073,6 +2085,12 @@ const chat = async (req, res) => {
         viewAllMatching: forced.viewAllMatching || null,
         presentation: forced.presentation || null,
         intent: forced.intent || null,
+        searchState: forced.searchState || null,
+        resultCount: forced.resultCount ?? forced.total ?? 0,
+        marketStats: forced.marketStats || null,
+        overallMarketStats: forced.overallMarketStats || null,
+        marketStatsScope: forced.marketStatsScope || null,
+        suggestedActions: forced.suggestedActions || forced.options || null,
         alternativeInventory: forced.alternativeInventory || null,
         inventoryCounts: forced.inventoryCounts || null,
       };
