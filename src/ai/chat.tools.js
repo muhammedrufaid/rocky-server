@@ -241,7 +241,7 @@ function toPropertyCard(property) {
     propertyRefNo: property.propertyRefNo,
     title: property.propertyTitle || '',
     price: property.price || '',
-    beds: property.bedrooms || '',
+    beds: property.bedrooms != null && property.bedrooms !== '' ? property.bedrooms : '',
     baths: property.bathrooms || '',
     area: [size, unit].filter(Boolean).join(' '),
     imageUrl: Array.isArray(property.images) && property.images[0] ? property.images[0] : '',
@@ -421,7 +421,11 @@ function copySearchFilters(filters = {}) {
     bedrooms: filters.bedrooms ?? null,
     bedroomsMin: filters.bedroomsMin ?? null,
     bedroomsAny: !!filters.bedroomsAny,
-    bedroomsResolved: !!filters.bedroomsResolved,
+    bedroomsResolved:
+      !!filters.bedroomsResolved ||
+      !!filters.bedroomsAny ||
+      isBedroomsSet(filters.bedrooms) ||
+      isBedroomsSet(filters.bedroomsMin),
     budgetMin: filters.budgetMin ?? null,
     budgetMax: filters.budgetMax ?? null,
     budgetProvided: filters.budgetProvided === true,
@@ -1618,6 +1622,8 @@ function isBedroomsSet(value) {
 function isBedroomsResolved(filters = {}) {
   if (filters.bedroomsResolved === true) return true;
   if (filters.bedroomsAny === true) return true;
+  if (isBedroomsSet(filters.bedrooms)) return true;
+  if (isBedroomsSet(filters.bedroomsMin)) return true;
   return false;
 }
 
@@ -1643,7 +1649,10 @@ function applyBedroomChoice(filters, choice) {
 
 function clearUntrustedBedrooms(filters) {
   if (!filters) return filters;
-  if (filters.bedroomsResolved === true || filters.bedroomsAny === true) return filters;
+  if (isBedroomsResolved(filters)) {
+    filters.bedroomsResolved = true;
+    return filters;
+  }
   filters.bedrooms = null;
   filters.bedroomsMin = null;
   filters.bedroomsAny = false;
@@ -2075,12 +2084,15 @@ function parseBedroomsFromMessage(text) {
 }
 
 const PROPERTY_TYPE_MAP = [
-  { canonical: 'Apartment', patterns: /\b(apartment|apartments|flat|flats|condo|condos|unit|units)\b/ },
+  {
+    canonical: 'Apartment',
+    patterns:
+      /\b(apartment|apartments|flat|flats|condo|condos|unit|units|studio apartment|studio unit|studio room|studio flat|studios?)\b/,
+  },
   { canonical: 'Villa', patterns: /\b(villa|villas)\b/ },
   { canonical: 'Townhouse', patterns: /\b(townhouse|townhouses|town house|town houses)\b/ },
   { canonical: 'Penthouse', patterns: /\b(penthouse|penthouses)\b/ },
   { canonical: 'Duplex', patterns: /\b(duplex|duplexes)\b/ },
-  { canonical: 'Studio', patterns: /\b(studio apartment|studio unit)\b/ },
   { canonical: 'Office', patterns: /\b(office|offices|commercial)\b/ },
   { canonical: 'Shop', patterns: /\b(shop|shops|retail)\b/ },
   { canonical: 'Warehouse', patterns: /\b(warehouse|warehouses)\b/ },
@@ -2232,13 +2244,9 @@ function isRentalPurpose(purpose) {
 }
 
 function bedroomsCompatibleWithTypes(filters = {}) {
-  if (searchTypesAreCommercial(filters)) return false;
-  const types = typesFromFilters(filters);
-  const n = Number(filters.bedrooms);
-  if (n === 0) {
-    return types.some((t) => /apartment|studio|flat/i.test(String(t || '')));
-  }
-  return true;
+  // Studio (bedrooms = 0) is valid on residential/unknown types. Only commercial
+  // searches drop the bedroom filter.
+  return !searchTypesAreCommercial(filters);
 }
 
 function searchCategory(filters = {}) {
@@ -2974,7 +2982,7 @@ function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
     bedrooms: last.bedrooms ?? null,
     bedroomsMin: last.bedroomsMin ?? null,
     bedroomsAny: last.bedroomsAny === true,
-    bedroomsResolved: last.bedroomsResolved === true,
+    bedroomsResolved: isBedroomsResolved(last),
     budgetMin: last.budgetMin ?? null,
     budgetMax: last.budgetMax ?? null,
     budgetProvided: last.budgetProvided === true,
@@ -3426,6 +3434,12 @@ function applyMessageToSearchFilters(filters, message, { awaiting } = {}) {
     next.locationAny = false;
   }
   if (beds) applyBedroomChoice(next, beds);
+  if (beds && beds.exact === 0 && !searchTypesAreCommercial(next)) {
+    const currentTypes = typesFromFilters(next);
+    if (!currentTypes.length || currentTypes.every((t) => /apartment|studio|flat/i.test(String(t || '')))) {
+      applyTypesToFilters(next, ['Apartment']);
+    }
+  }
   if (budget) applyBudgetChoice(next, budget);
   if (furnished) next.furnished = furnished;
   if (purpose) next.purpose = purpose;
@@ -3651,8 +3665,8 @@ function listingQueryOpts(filters, search) {
   if (requiresBedroomsForSearch(filters) && !filters.bedroomsAny) {
     if (isBedroomsSet(filters.bedroomsMin)) {
       queryFilters.bedroomsMin = filters.bedroomsMin;
-    } else if (filters.bedrooms !== undefined && filters.bedrooms !== null && filters.bedrooms !== '') {
-      queryFilters.bedrooms = filters.bedrooms;
+    } else if (isBedroomsSet(filters.bedrooms)) {
+      queryFilters.bedrooms = Number(filters.bedrooms);
     }
   }
   if (filters.budgetMin !== undefined && filters.budgetMin !== null && filters.budgetMin !== '') {
