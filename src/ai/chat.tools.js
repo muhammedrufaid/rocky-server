@@ -4048,6 +4048,16 @@ function dedupePropertyCards(cards = []) {
   return out;
 }
 
+function resolveMatchingTotal(result = {}, { previewLimited = true } = {}) {
+  const candidates = [result.total, result.totalCount, result.pagination?.total, result.meta?.total];
+  for (const value of candidates) {
+    const n = Number(value);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  if (!previewLimited && Array.isArray(result.properties)) return result.properties.length;
+  return null;
+}
+
 async function fetchPropertyCards(filters, search) {
   const opts = listingQueryOpts(filters, search);
   const requested = normalizePurpose(filters.purpose);
@@ -4065,8 +4075,10 @@ async function fetchPropertyCards(filters, search) {
     ? await fetchByPurpose(requested, unfilteredOpts)
     : null;
   const result = await fetchByPurpose(requested, opts);
-  const remainingAfterExclude = result.total || 0;
-  const total = exclude.length ? unfiltered.total || 0 : remainingAfterExclude;
+  const remainingAfterExclude = resolveMatchingTotal(result, { previewLimited: true }) ?? 0;
+  const total = exclude.length
+    ? resolveMatchingTotal(unfiltered, { previewLimited: true }) ?? remainingAfterExclude
+    : remainingAfterExclude;
   return {
     propertyCards: dedupePropertyCards((result.properties || []).map(toPropertyCard)),
     usedPurpose: requested,
@@ -4117,7 +4129,8 @@ function propertySearchResult(propertyCards, filters, extraPayload = {}, viewAll
     profilePatch: profilePatchFromPropertyFilters(filters),
     viewAllMatching,
     modelPayload: {
-      count: propertyCards.length,
+      count: Number.isFinite(Number(extraPayload.total)) ? Number(extraPayload.total) : undefined,
+      previewCount: propertyCards.length,
       properties: propertyCards.map((card) => ({
         id: card.id,
         title: card.title,
@@ -4731,10 +4744,8 @@ function formatSearchSnapshotLines(stats = {}, filters = {}) {
 
 function matchingCountSummary(count) {
   const n = Number(count);
-  if (Number.isFinite(n) && n > 0) {
-    return `I found ${n} matching ${n === 1 ? 'property' : 'properties'}.`;
-  }
-  return 'I found matching properties.';
+  if (!Number.isFinite(n) || n <= 0) return '';
+  return `I found ${n} matching ${n === 1 ? 'property' : 'properties'}.`;
 }
 
 function refinementPromptFor(filters = {}, outcome) {
@@ -4753,7 +4764,10 @@ function buildSearchPresentation(ctx = {}) {
   return {
     acknowledgement: String(ctx.acknowledgement || '').trim() || null,
     resultSummary:
-      ctx.outcome === SEARCH_OUTCOME.MATCHES_FOUND ? matchingCountSummary(count) : null,
+      ctx.outcome === SEARCH_OUTCOME.MATCHES_FOUND ? matchingCountSummary(count) || null : null,
+    matchingCount: ctx.outcome === SEARCH_OUTCOME.MATCHES_FOUND && Number.isFinite(Number(count))
+      ? Number(count)
+      : null,
     marketSnapshot: Object.keys(snapshot).length ? snapshot : null,
     viewAll: viewAll
       ? { label: String(viewAll.label || '').replace(/\s*→\s*$/, ''), url: viewAll.url }
@@ -4799,11 +4813,12 @@ function composeSearchReply(ctx = {}) {
   }
 
   if (ctx.outcome === SEARCH_OUTCOME.MATCHES_FOUND) {
-    const count = ctx.exactMatchCount || (ctx.exactListings || []).length || 0;
+    const count = Number(ctx.exactMatchCount);
     if (!/you're looking for/i.test(ack)) {
       lines.push(`Here are ${segment} ${purposeBit}${area}.`.replace(/\s+/g, ' ').trim());
     }
-    lines.push(matchingCountSummary(count));
+    const summary = matchingCountSummary(count);
+    if (summary) lines.push(summary);
     const snapshot = formatSearchSnapshotLines(ctx.marketStats || {}, filters);
     if (snapshot.length) lines.push(snapshot.join('\n'));
     const refine = refinementPromptFor(filters, ctx.outcome);
@@ -4963,7 +4978,7 @@ async function buildSearchResponseContext(effectiveFilters, {
       filters: copySearchFilters(effectiveFilters),
       changes,
       acknowledgement,
-      exactMatchCount: total,
+      exactMatchCount: Number.isFinite(Number(total)) ? Number(total) : 0,
       exactListings: propertyCards.slice(0, 3),
       marketStats,
       nearbyInventory,

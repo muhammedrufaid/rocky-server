@@ -723,6 +723,63 @@ test('2 BHK apartment in Dubai South to buy acknowledges search and does not ope
   assert.match(search.viewAllMatching.label, /View all 2-bedroom apartments in Dubai South/);
 });
 
+test('matching count uses search total not preview card length', async (t) => {
+  t.mock.method(propertyDbService, 'fetchBuyProperties', async () => ({
+    properties: [
+      sampleBuyApartment({ propertyRefNo: 'RO-B-1' }),
+      sampleBuyApartment({ propertyRefNo: 'RO-B-2' }),
+    ],
+    total: 17,
+    pagination: { page: 1, limit: 6, totalPages: 3, hasNextPage: true, hasPrevPage: false },
+  }));
+  t.mock.method(propertyDbService, 'getPropertyMarketStats', async () => ({
+    minimumPrice: 1_250_000,
+    averagePrice: 1_510_000,
+    totalAvailable: 17,
+  }));
+
+  const msg = 'I need a 2 BHK apartment in Dubai South to buy.';
+  const qualified = qualifyListingSearch(msg, {});
+  const search = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: qualified.profilePatch.lastSearchFilters,
+      userMessage: msg,
+      intent: CONVERSATION_INTENTS.BUY,
+      previousSearch: emptySearchFilters(),
+    }
+  );
+
+  assert.equal(search.searchOutcome, SEARCH_OUTCOME.MATCHES_FOUND);
+  assert.equal(search.total, 17);
+  assert.equal((search.propertyCards || []).length, 2);
+  assert.match(search.replyOverride, /I found 17 matching properties/);
+  assert.equal(/I found 2 matching properties/i.test(search.replyOverride), false);
+  assert.equal(search.presentation.resultSummary, 'I found 17 matching properties.');
+  assert.equal(search.presentation.matchingCount, 17);
+  assert.equal(search.modelPayload.count, 17);
+  assert.equal(search.modelPayload.previewCount, 2);
+  assert.equal(search.responseContext.exactMatchCount, 17);
+
+  t.mock.method(propertyDbService, 'fetchBuyProperties', async () => ({
+    properties: [sampleBuyApartment({ propertyRefNo: 'RO-ONE' })],
+    total: 1,
+  }));
+  const one = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: qualified.profilePatch.lastSearchFilters,
+      userMessage: msg,
+      intent: CONVERSATION_INTENTS.BUY,
+      previousSearch: emptySearchFilters(),
+    }
+  );
+  assert.match(one.replyOverride, /I found 1 matching property\./);
+  assert.equal(/I found 1 matching properties/i.test(one.replyOverride), false);
+});
+
 test('location change acknowledges the patch and does not re-ask known filters', () => {
   const first = qualifyListingSearch('I need a 2 BHK apartment in Dubai South to buy', {});
   const second = qualifyListingSearch('Show me apartments in Dubai Marina.', profileFromQualify(first));
