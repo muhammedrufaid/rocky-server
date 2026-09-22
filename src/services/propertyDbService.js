@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const Property = require('../models/Property');
 
 // Stored on Mongo docs for AI/semantic search only — never expose via frontend APIs.
@@ -555,7 +556,21 @@ const fetchSearchByAreaSuggestions = async (opts = {}) => {
  * Ignores the visitor's budget so we can explain a budget-too-low miss.
  * Uses the same match/normalization pipeline as paginated listing search.
  */
+const emptyMarketStats = () => ({
+  minimumPrice: null,
+  averagePrice: null,
+  maximumPrice: null,
+  medianPrice: null,
+  averagePricePerSqft: null,
+  totalAvailable: 0,
+  readyCount: 0,
+  offPlanCount: 0,
+});
+
 const getPropertyMarketStats = async ({ search = '', filters = {}, forced = {} } = {}) => {
+  if (mongoose.connection.readyState !== 1) {
+    return emptyMarketStats();
+  }
   const filtersNoPrice = { ...(filters || {}) };
   delete filtersNoPrice.priceMin;
   delete filtersNoPrice.priceMax;
@@ -563,29 +578,74 @@ const getPropertyMarketStats = async ({ search = '', filters = {}, forced = {} }
 
   const pipeline = [
     ...buildCommonPipeline({ search, filters: filtersNoPrice, forced }),
-    { $addFields: { __priceNum: numberExprFromStringField('price') } },
+    {
+      $addFields: {
+        __priceNum: numberExprFromStringField('price'),
+        __sizeNum: numberExprFromStringField('propertySize'),
+        __offPlanNorm: {
+          $toLower: { $trim: { input: { $ifNull: ['$offPlan', ''] } } },
+        },
+      },
+    },
     { $match: { __priceNum: { $ne: null, $gt: 0 } } },
+    { $sort: { __priceNum: 1 } },
     {
       $group: {
         _id: null,
+        prices: { $push: '$__priceNum' },
         minimumPrice: { $min: '$__priceNum' },
         averagePrice: { $avg: '$__priceNum' },
         maximumPrice: { $max: '$__priceNum' },
         totalAvailable: { $sum: 1 },
+        averagePricePerSqft: {
+          $avg: {
+            $cond: [{ $gt: ['$__sizeNum', 0] }, { $divide: ['$__priceNum', '$__sizeNum'] }, null],
+          },
+        },
+        readyCount: {
+          $sum: { $cond: [{ $eq: ['$__offPlanNorm', 'no'] }, 1, 0] },
+        },
+        offPlanCount: {
+          $sum: { $cond: [{ $eq: ['$__offPlanNorm', 'yes'] }, 1, 0] },
+        },
       },
     },
   ];
 
   const [row] = await Property.aggregate(pipeline).allowDiskUse(true);
-  if (!row) {
-    return { minimumPrice: null, averagePrice: null, maximumPrice: null, totalAvailable: 0 };
-  }
+  if (!row) return emptyMarketStats();
+  const prices = Array.isArray(row.prices) ? row.prices.filter((n) => Number.isFinite(n)) : [];
+  const mid = prices.length ? prices[Math.floor((prices.length - 1) / 2)] : null;
   return {
     minimumPrice: Number.isFinite(row.minimumPrice) ? row.minimumPrice : null,
     averagePrice: Number.isFinite(row.averagePrice) ? row.averagePrice : null,
     maximumPrice: Number.isFinite(row.maximumPrice) ? row.maximumPrice : null,
+    medianPrice: Number.isFinite(mid) ? mid : null,
+    averagePricePerSqft: Number.isFinite(row.averagePricePerSqft) ? row.averagePricePerSqft : null,
     totalAvailable: row.totalAvailable || 0,
+    readyCount: row.readyCount || 0,
+    offPlanCount: row.offPlanCount || 0,
   };
+};
+
+const countProperties = async ({ search = '', filters = {}, forced = {} } = {}) => {
+  if (mongoose.connection.readyState !== 1) return 0;
+  const { mongoMatch, addFields, numericMatch, hasNumericFilters } = buildListQuery({
+    search,
+    filters,
+    forced,
+  });
+  if (!hasNumericFilters) {
+    return Property.countDocuments(mongoMatch);
+  }
+  const pipeline = [
+    ...(Object.keys(mongoMatch).length ? [{ $match: mongoMatch }] : []),
+    { $addFields: addFields },
+    { $match: numericMatch },
+    { $count: 'total' },
+  ];
+  const [row] = await Property.aggregate(pipeline).allowDiskUse(true);
+  return row?.total || 0;
 };
 
 module.exports = {
@@ -601,5 +661,6 @@ module.exports = {
   fetchUniquePropertyTypes,
   fetchUniquePropertyTypesInOrder,
   getPropertyMarketStats,
+  countProperties,
 };
 

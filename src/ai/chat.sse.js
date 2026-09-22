@@ -63,6 +63,7 @@ function createSseSession(res, abortSignal) {
         propertyCards: meta.propertyCards,
         sources: meta.sources,
         viewAllMatching: meta.viewAllMatching ?? null,
+        presentation: meta.presentation ?? null,
       });
       metaWritten = true;
     },

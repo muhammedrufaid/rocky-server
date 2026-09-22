@@ -1,6 +1,6 @@
 const OpenAI = require('openai');
 const { Conversation } = require('./chat.models');
-const { getSystemPrompt } = require('./chat.prompt');
+const { getSystemPrompt, getListingReplyPrompt } = require('./chat.prompt');
 const {
   shouldUseSse,
   isResponseOpen,
@@ -20,7 +20,7 @@ const {
   buildViewingLeadIntent,
   logViewingDebug,
 } = require('./chat.tools');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, shouldResetOnListingIntent, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion, listingSearchResetPatch } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, shouldResetOnListingIntent, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion, listingSearchResetPatch, isExplicitSearchReset, hasInProgressListingSearch, isCurrentListingReference, buildSearchAcknowledgement, joinAckAndQuestion, stripExposedUrlsFromReply } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -97,14 +97,16 @@ function attachPropertySearchMeta(payload, source = {}) {
   if (source.returnedCount !== undefined) payload.returnedCount = source.returnedCount;
   if (source.remaining !== undefined) payload.remaining = source.remaining;
   if (source.nextCursor !== undefined) payload.nextCursor = source.nextCursor;
+  if (source.presentation) payload.presentation = source.presentation;
   return payload;
 }
 
-function metaFromLoopState(propertyCards, sources, viewAllMatching) {
+function metaFromLoopState(propertyCards, sources, viewAllMatching, presentation) {
   return {
     propertyCards: uniqueBy(propertyCards, (c) => c.id),
     sources: uniqueBy(sources, (s) => s.url || s.title),
     viewAllMatching: viewAllMatching || null,
+    presentation: presentation || null,
   };
 }
 
@@ -322,6 +324,7 @@ function listingSlotResponse(profile, filters, extraPatch = {}) {
   });
   const missing = nextMissingListingSlot(next);
   const question = missing ? listingSlotQuestion(missing, next) : null;
+  const ack = buildSearchAcknowledgement(next, { previous });
   const patch = {
     ...listingSearchResetPatch(previous, next),
     ...rest,
@@ -360,7 +363,7 @@ function listingSlotResponse(profile, filters, extraPatch = {}) {
   return {
     type: 'clarify',
     profile: mergeProfile(profile, patch),
-    reply: question.reply,
+    reply: joinAckAndQuestion(ack, question.reply),
     options: question.options,
   };
 }
@@ -941,6 +944,15 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
   const showMore = applyShowMore(message, profile);
   if (showMore) return showMore;
 
+  if (isExplicitSearchReset(message)) {
+    const next = applyMessageToSearchFilters(emptySearchFilters(), message);
+    return listingSlotResponse(profile, next, {
+      resetShownPropertyIds: true,
+      lastPropertyCards: [],
+      shownPropertyIds: [],
+    });
+  }
+
   // "villa in another location" — reset location and keep type/bedrooms/purpose
   const relocation = applyRelocationIntent(message, profile);
   if (relocation) return relocation;
@@ -1191,37 +1203,28 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
 
   if (awaiting === 'budget') {
     const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    const patched = applyMessageToSearchFilters(last, message, { awaiting: 'budget' });
     const budget = parseBudgetFromMessage(message, { requireBudgetContext: true });
-    if (!budget) {
-      if (!isVagueConfirm(message) && !isListingFollowUp(message)) {
-        return leaveSearchSlotForGeneralQuestion(profile);
-      }
-      return listingSlotResponse(profile, last);
+    const changed =
+      JSON.stringify(copySearchFilters(last)) !== JSON.stringify(copySearchFilters(patched));
+    if (budget || changed) {
+      return listingSlotResponse(profile, patched, {
+        budget: { min: patched.budgetMin ?? null, max: patched.budgetMax ?? null },
+      });
     }
-    applyBudgetChoice(last, budget);
-    return listingSlotResponse(profile, last, {
-      budget: { min: last.budgetMin ?? null, max: last.budgetMax ?? null },
-    });
+    if (!isVagueConfirm(message) && !isListingFollowUp(message)) {
+      return leaveSearchSlotForGeneralQuestion(profile);
+    }
+    return listingSlotResponse(profile, last);
   }
 
   return null;
 }
 
 /**
- * Detects a new-location listing search ("Show me villas in Dubai Hills",
- * "Buy villas in Arabian Ranches under 5 million", etc.) when we already have
- * a prior location in context, and the message explicitly names a DIFFERENT
- * location — or when we are stuck in empty-results/alternatives and the user
- * issues a fresh listing search (including same area, different type).
- *
- * When matched, returns a `{ type: 'continue', profile }` result that:
- *   - Updates location and type from the message
- *   - Resets bedrooms (unknown → will trigger bedroom chips)
- *   - Resets budget unless stated in the message
- *   - Preserves purpose via the existing trustedPurpose rule
- *     (purpose from message if stated, else stored purpose)
- *
- * Returns null if the message isn't a new-location search.
+ * Detects a listing refinement that names a different location (or escapes
+ * empty-results with a fresh listing statement). Follow-ups are patches:
+ * only mentioned fields change; bedrooms/budget/purpose stay unless stated.
  */
 function applyNewLocationSearch(message, profile) {
   if (wantsDifferentLocation(message)) return null;
@@ -1231,7 +1234,6 @@ function applyNewLocationSearch(message, profile) {
   const bedsFromMsg = parseBedroomChoice(message);
   const budget = parseBudgetFromMessage(message);
 
-  // Must look like a listing search (type nouns include plurals; Buy/Rent verbs count too)
   const looksLikeListing =
     /\b(show|find|search|looking|buy|purchase|rent|lease|for\s+sale|apartments?|villas?|townhouses?|penthouses?|duplexes?|studios?|flats?|offices?|propert(?:y|ies)|homes?|listings?)\b/i.test(
       message
@@ -1242,24 +1244,20 @@ function applyNewLocationSearch(message, profile) {
   const awaiting = profile.slotFlow?.awaiting;
   const inEmptySlot = awaiting === 'emptyResults' || awaiting === 'alternatives';
 
-  // Only activate if we already have a prior location — avoids triggering on
-  // the very first search message in a session — unless escaping empty results.
   if (!last.location && !inEmptySlot) return null;
 
   const locDiffers =
     !!(mentionedLocation && last.location) &&
     mentionedLocation.trim().toLowerCase() !== last.location.trim().toLowerCase();
-  const mentionedType = mentionedTypes[0] || null;
   const lastTypes = typesFromFilters(last);
   const typeDiffers =
     mentionedTypes.length > 0 &&
     mentionedTypes.join('|').toLowerCase() !== lastTypes.join('|').toLowerCase();
 
-  // Escape empty-results with a fresh listing statement even if location is unchanged.
   const freshEscape =
     inEmptySlot &&
     !!(mentionedLocation || last.location) &&
-    !!(purposeFromMsg || mentionedType || bedsFromMsg || budget);
+    !!(purposeFromMsg || mentionedTypes.length || bedsFromMsg || budget);
 
   if (!locDiffers && !typeDiffers && !freshEscape) return null;
   if (!mentionedLocation && !locDiffers && !(inEmptySlot && last.location && (typeDiffers || purposeFromMsg))) {
@@ -1269,27 +1267,14 @@ function applyNewLocationSearch(message, profile) {
   const resolvedLocation = mentionedLocation || last.location;
   if (!resolvedLocation) return null;
 
-  const newFilters = copySearchFilters(last);
-  newFilters.location = resolvedLocation;
-  if (purposeFromMsg) newFilters.purpose = purposeFromMsg;
-  if (mentionedTypes.length) applyTypesToFilters(newFilters, mentionedTypes);
+  const newFilters = applyMessageToSearchFilters(last, message, { awaiting });
+  if (!newFilters.purpose) newFilters.purpose = last.purpose || profile.purpose || null;
+  if (!newFilters.location && !newFilters.locationAny) newFilters.location = resolvedLocation;
 
-  if (bedsFromMsg) {
-    applyBedroomChoice(newFilters, bedsFromMsg);
-  }
-  if (budget) {
-    applyBudgetChoice(newFilters, budget);
-  }
-
-  const patch = {
-    lastSearchFilters: newFilters,
-    slotFlow: { awaiting: null, alternatives: null },
-    resetShownPropertyIds: locDiffers,
+  return listingSlotResponse(profile, newFilters, {
+    preferredAreas: newFilters.location ? [newFilters.location] : [resolvedLocation],
     explicitPurpose: !!purposeFromMsg,
-  };
-  if (resolvedLocation) patch.preferredAreas = [resolvedLocation];
-
-  return listingSlotResponse(profile, newFilters, patch);
+  });
 }
 
 function applyListingFilterUpdate(message, profile) {
@@ -1442,7 +1427,45 @@ async function clarificationResponse(res, { reply, profile, conversation, messag
   return res.status(200).json(body);
 }
 
-async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
+async function polishListingReply(fallback, context, userMessage, previousSearch) {
+  const seed = String(fallback || '').trim();
+  if (!context || !process.env.OPENAI_API_KEY) return seed;
+  try {
+    const openai = getOpenAI();
+    const model = process.env.OPENAI_CHAT_MODEL || process.env.OPENAI_MODEL || 'gpt-5-nano';
+    const completion = await openai.chat.completions.create({
+      model,
+      max_completion_tokens: 450,
+      messages: [
+        { role: 'system', content: getListingReplyPrompt() },
+        {
+          role: 'user',
+          content: JSON.stringify({
+            userMessage,
+            previousSearch: previousSearch || null,
+            responseContext: (() => {
+              if (!context || typeof context !== 'object') return context;
+              const { searchUrl, exactListings, ...safe } = context;
+              const presentation = context.presentation || null;
+              const { viewAll, ...safePresentation } = presentation || {};
+              return {
+                ...safe,
+                presentation: Object.keys(safePresentation).length ? safePresentation : null,
+              };
+            })(),
+          }),
+        },
+      ],
+    });
+    const text = stripExposedUrlsFromReply(String(completion.choices?.[0]?.message?.content || '').trim());
+    return text || seed;
+  } catch (err) {
+    console.error('polishListingReply failed:', err.message || err);
+    return seed;
+  }
+}
+
+async function runForcedPropertySearch({ sessionId, profile, userMessage, previousSearch }) {
   const result = await executeTool(
     'search_properties',
     {},
@@ -1454,6 +1477,7 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
       userMessage,
       intent: profile.intent,
       shownPropertyIds: profile.shownPropertyIds,
+      previousSearch,
     }
   );
 
@@ -1505,12 +1529,18 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
     const hasOpts = Array.isArray(result.options) && result.options.length > 0;
     const responseOpts = hasOpts ? result.options : emptyResultOptions(filters);
     return {
-      reply: result.clarificationReply || emptyResultsReply(filters),
+      reply: await polishListingReply(
+        result.clarificationReply || emptyResultsReply(filters),
+        result.responseContext,
+        userMessage,
+        previousSearch || profile.lastSearchFilters
+      ),
       profile: mergeProfile(nextProfile, { slotFlow: resultSlotFlow }),
       propertyCards: [],
       sources: [],
       suggestedCta: null,
       viewAllMatching: null,
+      presentation: result.presentation || null,
       requiresClarification: true,
       options: responseOpts,
       select: PURPOSE_SELECT,
@@ -1522,15 +1552,22 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage }) {
     };
   }
 
+  const fallbackReply =
+    result.replyOverride ||
+    foundListingsReply(result.effectiveFilters || nextProfile.lastSearchFilters, result.modelPayload?.total);
   const success = {
-    reply:
-      result.replyOverride ||
-      foundListingsReply(result.effectiveFilters || nextProfile.lastSearchFilters, result.modelPayload?.total),
+    reply: await polishListingReply(
+      fallbackReply,
+      result.responseContext,
+      userMessage,
+      previousSearch || profile.lastSearchFilters
+    ),
     profile: mergeProfile(nextProfile, { slotFlow: { awaiting: null } }),
     propertyCards: uniqueBy(result.propertyCards || [], (c) => c.id),
     sources: result.sources || [],
     suggestedCta: null,
     viewAllMatching: result.viewAllMatching || null,
+    presentation: result.presentation || null,
     hasMore: !!result.hasMore,
     total: result.total ?? result.modelPayload?.total ?? 0,
     returnedCount: result.returnedCount ?? (result.propertyCards || []).length,
@@ -1568,6 +1605,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   let emptyClarifyReply = '';
   let emptyClarifyOptions = null;
   let viewAllMatching = null;
+  let presentation = null;
   let clarificationOptions = null;
   let usedSearchContent = false;
   let usedSearchProperties = false;
@@ -1575,7 +1613,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   let searchContentHits = 0;
   let lastSearchPagination = null;
 
-  const snapshotMeta = () => metaFromLoopState(propertyCards, sources, viewAllMatching);
+  const snapshotMeta = () => metaFromLoopState(propertyCards, sources, viewAllMatching, presentation);
 
   const completionParams = (forceContentAnswer, contentOnlyReply, hasToolResults) => ({
     model,
@@ -1681,6 +1719,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
       if (!reply) {
         reply = FRIENDLY_CHAT_ERROR;
       }
+      if (usedSearchProperties) reply = stripExposedUrlsFromReply(reply);
       return {
         reply,
         propertyCards: uniqueBy(propertyCards, (c) => c.id),
@@ -1688,6 +1727,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         leadCaptured,
         profile,
         viewAllMatching,
+        presentation,
         ...(lastSearchPagination || {}),
       };
     }
@@ -1730,6 +1770,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
           userMessage,
           intent: profile.intent,
           shownPropertyIds: profile.shownPropertyIds,
+          previousSearch,
         });
       } catch (err) {
         if (isAbortError(err)) throw err;
@@ -1811,6 +1852,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
           emptyClarifyReply = result.clarificationReply || emptyResultsReply(result.effectiveFilters || {});
           const hasAltOpts = Array.isArray(result.options) && result.options.length > 0;
           emptyClarifyOptions = hasAltOpts ? result.options : emptyResultOptions(result.effectiveFilters || {});
+          presentation = result.presentation || presentation;
           if (result.effectiveFilters) {
             const emptySlotFlow = result.profilePatch?.slotFlow || { awaiting: 'emptyResults' };
             profile = mergeProfile(profile, {
@@ -1823,6 +1865,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
           lastSearchNeedsSlot = false;
           lastSearchNeedsEmptyResults = false;
           viewAllMatching = result.viewAllMatching || null;
+          presentation = result.presentation || presentation;
           profile = mergeProfile(profile, {
             lastPropertyCards: result.propertyCards,
             lastSearchFilters: result.effectiveFilters,
@@ -1862,6 +1905,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         leadCaptured,
         profile,
         viewAllMatching: null,
+        presentation,
         requiresClarification: true,
         options: emptyClarifyOptions || emptyResultOptions(profile.lastSearchFilters || {}),
         select: PURPOSE_SELECT,
@@ -1884,6 +1928,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
     leadCaptured,
     profile,
     viewAllMatching,
+    presentation,
     ...(lastSearchPagination || {}),
   };
 }
@@ -1901,8 +1946,15 @@ const chat = async (req, res) => {
     } = req.body;
     const conversation = await loadConversation(sessionId);
     let profile = conversation.userProfile || {};
+    const previousSearch = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    const pageBound = isCurrentListingReference(message);
+    const applyPageContext =
+      pageBound ||
+      isPurposeChipReply(message) ||
+      isExplicitIntentStarter(message) ||
+      !hasInProgressListingSearch(profile);
     const requestTypes = filtersFromRequestBody(req.body);
-    if (requestTypes.length) {
+    if (requestTypes.length && applyPageContext) {
       const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
       applyTypesToFilters(last, mergePropertyTypes(typesFromFilters(last), requestTypes, message));
       profile = mergeProfile(profile, { lastSearchFilters: last });
@@ -1911,7 +1963,7 @@ const chat = async (req, res) => {
       message,
       profile,
       conversation.messages || [],
-      bodyIntent,
+      applyPageContext ? bodyIntent : null,
       { action, propertyRefNo, propertyId, propertyTitle }
     );
 
@@ -1987,7 +2039,12 @@ const chat = async (req, res) => {
       profile.intent !== CONVERSATION_INTENTS.PROPERTY_MANAGEMENT;
 
     if (canSearchNow) {
-      const forced = await runForcedPropertySearch({ sessionId, profile, userMessage: message });
+      const forced = await runForcedPropertySearch({
+        sessionId,
+        profile,
+        userMessage: message,
+        previousSearch,
+      });
       const forcedReply = String(forced.reply || '').trim() || FRIENDLY_CHAT_ERROR;
       conversation.messages.push({ role: 'user', content: message, createdAt: new Date() });
       conversation.messages.push({ role: 'assistant', content: forcedReply, createdAt: new Date() });
@@ -2008,6 +2065,7 @@ const chat = async (req, res) => {
               turnIndex: conversation.messages.length,
             }),
         viewAllMatching: forced.viewAllMatching || null,
+        presentation: forced.presentation || null,
       };
       if (forced.options) {
         payload.requiresClarification = true;
@@ -2071,6 +2129,7 @@ const chat = async (req, res) => {
         propertyCards: payload.propertyCards,
         sources: payload.sources,
         viewAllMatching: payload.viewAllMatching,
+        presentation: payload.presentation || null,
       });
       sse.done(payload);
       if (isResponseOpen(res)) res.end();
