@@ -98,6 +98,9 @@ function attachPropertySearchMeta(payload, source = {}) {
   if (source.remaining !== undefined) payload.remaining = source.remaining;
   if (source.nextCursor !== undefined) payload.nextCursor = source.nextCursor;
   if (source.presentation) payload.presentation = source.presentation;
+  if (source.intent) payload.intent = source.intent;
+  if (source.alternativeInventory) payload.alternativeInventory = source.alternativeInventory;
+  if (source.inventoryCounts) payload.inventoryCounts = source.inventoryCounts;
   return payload;
 }
 
@@ -1568,6 +1571,9 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage, previo
     suggestedCta: null,
     viewAllMatching: result.viewAllMatching || null,
     presentation: result.presentation || null,
+    intent: result.intent || null,
+    alternativeInventory: result.alternativeInventory || null,
+    inventoryCounts: result.inventoryCounts || null,
     hasMore: !!result.hasMore,
     total: result.total ?? result.modelPayload?.total ?? 0,
     returnedCount: result.returnedCount ?? (result.propertyCards || []).length,
@@ -2066,6 +2072,9 @@ const chat = async (req, res) => {
             }),
         viewAllMatching: forced.viewAllMatching || null,
         presentation: forced.presentation || null,
+        intent: forced.intent || null,
+        alternativeInventory: forced.alternativeInventory || null,
+        inventoryCounts: forced.inventoryCounts || null,
       };
       if (forced.options) {
         payload.requiresClarification = true;

@@ -697,9 +697,9 @@ test('2 BHK apartment in Dubai South to buy acknowledges search and does not ope
   assert.equal(search.searchOutcome, SEARCH_OUTCOME.MATCHES_FOUND);
   assert.equal(search.needsBudget, undefined);
   assert.match(search.replyOverride, /you're looking for a 2-bedroom apartment to buy in Dubai South/i);
-  assert.match(search.replyOverride, /I found 6 matching properties/i);
+  assert.match(search.replyOverride, /I found 6 ready properties for sale/i);
   assert.match(search.replyOverride, /Dubai South market snapshot/i);
-  assert.match(search.replyOverride, /Prices start from AED 1\.1M/i);
+  assert.match(search.replyOverride, /Ready properties start from AED 1\.1M/i);
   assert.match(search.replyOverride, /Average asking price is around AED 1\.68M/i);
   assert.match(search.replyOverride, /narrow these by budget/i);
   assert.equal(/View all |See all |Browse all /i.test(search.replyOverride), false);
@@ -709,8 +709,8 @@ test('2 BHK apartment in Dubai South to buy acknowledges search and does not ope
   assert.equal(/median/i.test(search.replyOverride), false);
   assert.equal(/sqft/i.test(search.replyOverride), false);
   assert.equal(/^What is your budget( range)?\?$/i.test(String(search.replyOverride || '').trim()), false);
-  assert.deepEqual(search.options, BUY_BUDGET_OPTIONS);
-  assert.equal(search.presentation.resultSummary, 'I found 6 matching properties.');
+  assert.equal(BUY_BUDGET_OPTIONS.every((opt) => search.options.includes(opt)), true);
+  assert.equal(search.presentation.resultSummary, 'I found 6 ready properties for sale.');
   assert.equal(search.presentation.marketSnapshot.minPrice, 1_100_000);
   assert.equal(search.presentation.marketSnapshot.averagePrice, 1_680_000);
   assert.equal(search.presentation.viewAll.label, 'View all 2-bedroom apartments in Dubai South');
@@ -723,19 +723,26 @@ test('2 BHK apartment in Dubai South to buy acknowledges search and does not ope
   assert.match(search.viewAllMatching.label, /View all 2-bedroom apartments in Dubai South/);
 });
 
-test('matching count uses search total not preview card length', async (t) => {
+test('BUY count is ready-only and mentions off-plan as an alternative', async (t) => {
   t.mock.method(propertyDbService, 'fetchBuyProperties', async () => ({
     properties: [
       sampleBuyApartment({ propertyRefNo: 'RO-B-1' }),
       sampleBuyApartment({ propertyRefNo: 'RO-B-2' }),
     ],
-    total: 17,
-    pagination: { page: 1, limit: 6, totalPages: 3, hasNextPage: true, hasPrevPage: false },
+    total: 2,
   }));
+  t.mock.method(propertyDbService, 'fetchOffPlanProperties', async () => ({
+    properties: [sampleBuyApartment({ propertyRefNo: 'RO-OP-1', offPlan: 'Yes' })],
+    total: 15,
+  }));
+  t.mock.method(propertyDbService, 'countProperties', async ({ forced } = {}) => {
+    if (forced?.offPlan === 'Yes') return 15;
+    return 0;
+  });
   t.mock.method(propertyDbService, 'getPropertyMarketStats', async () => ({
     minimumPrice: 1_250_000,
     averagePrice: 1_510_000,
-    totalAvailable: 17,
+    totalAvailable: 2,
   }));
 
   const msg = 'I need a 2 BHK apartment in Dubai South to buy.';
@@ -752,15 +759,20 @@ test('matching count uses search total not preview card length', async (t) => {
   );
 
   assert.equal(search.searchOutcome, SEARCH_OUTCOME.MATCHES_FOUND);
-  assert.equal(search.total, 17);
+  assert.equal(search.total, 2);
   assert.equal((search.propertyCards || []).length, 2);
-  assert.match(search.replyOverride, /I found 17 matching properties/);
-  assert.equal(/I found 2 matching properties/i.test(search.replyOverride), false);
-  assert.equal(search.presentation.resultSummary, 'I found 17 matching properties.');
-  assert.equal(search.presentation.matchingCount, 17);
-  assert.equal(search.modelPayload.count, 17);
+  assert.match(search.replyOverride, /I found 2 ready properties for sale/);
+  assert.match(search.replyOverride, /15 off-plan options/);
+  assert.equal(/I found 17 matching properties/i.test(search.replyOverride), false);
+  assert.equal(search.presentation.resultSummary, 'I found 2 ready properties for sale.');
+  assert.equal(search.presentation.matchingCount, 2);
+  assert.equal(search.intent, CONVERSATION_INTENTS.BUY);
+  assert.equal(search.inventoryCounts.readyBuyCount, 2);
+  assert.equal(search.inventoryCounts.offPlanCount, 15);
+  assert.equal(search.alternativeInventory.offPlan.count, 15);
+  assert.equal(search.options.includes('Explore 15 off-plan properties'), true);
+  assert.equal(search.modelPayload.count, 2);
   assert.equal(search.modelPayload.previewCount, 2);
-  assert.equal(search.responseContext.exactMatchCount, 17);
 
   t.mock.method(propertyDbService, 'fetchBuyProperties', async () => ({
     properties: [sampleBuyApartment({ propertyRefNo: 'RO-ONE' })],
@@ -776,8 +788,114 @@ test('matching count uses search total not preview card length', async (t) => {
       previousSearch: emptySearchFilters(),
     }
   );
-  assert.match(one.replyOverride, /I found 1 matching property\./);
-  assert.equal(/I found 1 matching properties/i.test(one.replyOverride), false);
+  assert.match(one.replyOverride, /I found 1 ready property for sale\./);
+  assert.equal(/I found 1 ready properties/i.test(one.replyOverride), false);
+});
+
+test('show me off-plan properties patches intent only and keeps the rest of the search', () => {
+  const first = qualifyListingSearch('I need a 2 BHK apartment in Dubai South to buy', {});
+  const second = qualifyListingSearch('Show me off-plan properties', profileFromQualify(first));
+  const next = second.profilePatch.lastSearchFilters;
+  assert.equal(next.purpose, 'Off-plan');
+  assert.equal(second.profilePatch.intent, CONVERSATION_INTENTS.OFF_PLAN);
+  assert.equal(next.type, 'Apartment');
+  assert.equal(next.bedrooms, 2);
+  assert.equal(next.location, 'Dubai South');
+  assert.notEqual(second.missing, 'intent');
+  assert.notEqual(second.missing, 'bedrooms');
+  assert.notEqual(second.missing, 'propertyType');
+  const ack = buildSearchAcknowledgement(next, {
+    previous: first.profilePatch.lastSearchFilters,
+    message: 'Show me off-plan properties',
+  });
+  assert.match(ack, /switch this to off-plan/i);
+  assert.equal(/buy, rent, or explore off-plan/i.test(ack), false);
+});
+
+test('explore off-plan chip switches to off-plan without resetting filters', () => {
+  const first = qualifyListingSearch('I need a 2 BHK apartment in Dubai South to buy', {});
+  const second = qualifyListingSearch('Explore 15 off-plan properties', profileFromQualify(first));
+  const next = second.profilePatch.lastSearchFilters;
+  assert.equal(next.purpose, 'Off-plan');
+  assert.equal(next.location, 'Dubai South');
+  assert.equal(next.type, 'Apartment');
+  assert.equal(next.bedrooms, 2);
+});
+
+test('new development and under construction parse as off-plan listing intent', () => {
+  assert.equal(parsePurposeFromMessage('Show me new development apartments'), 'Off-plan');
+  assert.equal(parsePurposeFromMessage('under construction in Dubai South'), 'Off-plan');
+  assert.equal(parseConversationIntent('new project in Business Bay'), CONVERSATION_INTENTS.OFF_PLAN);
+});
+
+test('OFF_PLAN count is off-plan-only and does not include ready sale inventory', async (t) => {
+  t.mock.method(propertyDbService, 'fetchOffPlanProperties', async () => ({
+    properties: Array.from({ length: 3 }, (_, i) =>
+      sampleBuyApartment({ propertyRefNo: `RO-OP-${i + 1}`, offPlan: 'Yes' })
+    ),
+    total: 15,
+  }));
+  t.mock.method(propertyDbService, 'getPropertyMarketStats', async () => ({
+    minimumPrice: 900_000,
+    averagePrice: 1_200_000,
+    totalAvailable: 15,
+  }));
+
+  const first = qualifyListingSearch('I need a 2 BHK apartment in Dubai South to buy', {});
+  const second = qualifyListingSearch('Show me off-plan properties', profileFromQualify(first));
+  const search = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: second.profilePatch.lastSearchFilters,
+      userMessage: 'Show me off-plan properties',
+      intent: CONVERSATION_INTENTS.OFF_PLAN,
+      previousSearch: first.profilePatch.lastSearchFilters,
+    }
+  );
+
+  assert.equal(search.intent, CONVERSATION_INTENTS.OFF_PLAN);
+  assert.equal(search.total, 15);
+  assert.match(search.replyOverride, /I found 15 off-plan 2-bedroom apartments in Dubai South/);
+  assert.equal(/ready properties for sale/i.test(search.replyOverride), false);
+  assert.equal(/I found 2 /i.test(search.replyOverride), false);
+  assert.equal(search.inventoryCounts.offPlanCount, 15);
+  assert.equal(search.inventoryCounts.readyBuyCount, 0);
+});
+
+test('RENT count is rental-only', async (t) => {
+  t.mock.method(propertyDbService, 'fetchRentProperties', async () => ({
+    properties: Array.from({ length: 3 }, (_, i) =>
+      sampleBuyApartment({ propertyRefNo: `RO-R-${i + 1}`, propertyPurpose: 'Rent' })
+    ),
+    total: 8,
+  }));
+  t.mock.method(propertyDbService, 'getPropertyMarketStats', async () => ({
+    minimumPrice: 70_000,
+    averagePrice: 95_000,
+    totalAvailable: 8,
+  }));
+
+  const first = qualifyListingSearch('I need a 2 BHK apartment in Dubai South to buy', {});
+  const second = qualifyListingSearch('Show me properties for rent', profileFromQualify(first));
+  const search = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: second.profilePatch.lastSearchFilters,
+      userMessage: 'Show me properties for rent',
+      intent: CONVERSATION_INTENTS.RENT,
+      previousSearch: first.profilePatch.lastSearchFilters,
+    }
+  );
+
+  assert.equal(search.intent, CONVERSATION_INTENTS.RENT);
+  assert.equal(search.total, 8);
+  assert.match(search.replyOverride, /I found 8 2-bedroom apartments for rent in Dubai South/);
+  assert.equal(/ready properties for sale/i.test(search.replyOverride), false);
+  assert.equal(/off-plan/i.test(search.replyOverride), false);
+  assert.equal(search.inventoryCounts.rentCount, 8);
+  assert.equal(search.inventoryCounts.offPlanCount, 0);
 });
 
 test('location change acknowledges the patch and does not re-ask known filters', () => {
@@ -1224,7 +1342,7 @@ test('missing budget still searches and then offers budget as a refinement', asy
   assert.equal((result.propertyCards || []).length > 0, true);
   assert.match(result.replyOverride, /you're looking for a 2-bedroom apartment to buy in Dubai South/i);
   assert.match(result.replyOverride, /narrow these by budget/i);
-  assert.deepEqual(result.options, BUY_BUDGET_OPTIONS);
+  assert.equal(BUY_BUDGET_OPTIONS.every((opt) => (result.options || []).includes(opt)), true);
   assert.equal(propertyDbService.fetchBuyProperties.mock.calls.length > 0, true);
 });
 
@@ -1459,7 +1577,7 @@ test('Change budget keeps listing criteria and asks budget without searching', a
   assert.equal(result.profilePatch.lastSearchFilters.budgetProvided, false);
   assert.match(result.reply, /budget/i);
   assert.equal(/you're looking for/i.test(result.reply), false);
-  assert.deepEqual(result.options, BUY_BUDGET_OPTIONS);
+  assert.equal(BUY_BUDGET_OPTIONS.every((opt) => (result.options || []).includes(opt)), true);
 
   const search = await executeTool(
     'search_properties',

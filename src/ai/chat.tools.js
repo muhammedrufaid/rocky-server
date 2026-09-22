@@ -1638,6 +1638,9 @@ function parsePurposeFromMessage(text) {
   if (/\bunder\s+construction\b/.test(lower) && !isOffPlanInformationalQuery(lower)) {
     return 'Off-plan';
   }
+  if (/\b(new\s+projects?|new\s+developments?)\b/.test(lower) && !isOffPlanInformationalQuery(lower)) {
+    return 'Off-plan';
+  }
 
   // Buy: start-anchored intents + mid-sentence ("to buy", "for sale", "buying a…")
   if (
@@ -2930,6 +2933,15 @@ function buildRefinementAcknowledgement(previous = {}, next = {}) {
   if (typeChanged && !locChanged && !purposeChanged) {
     return `Sure — I'll switch this to ${String(nextType).toLowerCase()}s and keep the rest of your search.`;
   }
+  if (purposeChanged && !locChanged && !bedsChanged && !typeChanged) {
+    if (normalizePurpose(next.purpose) === 'Off-plan') {
+      return "Sure — I'll switch this to off-plan and keep the rest of your search.";
+    }
+    if (normalizePurpose(next.purpose) === 'Rent') {
+      return "Sure — I'll switch this to rent and keep the rest of your search.";
+    }
+    return "Sure — I'll switch this to a purchase search and keep the rest of your search.";
+  }
   const looking = describeLookingForPhrase(next);
   if (!looking) return '';
   return `${searchAckOpener(next)} — you're looking for ${looking}.`;
@@ -4203,6 +4215,7 @@ function emptyResultsClarificationFields() {
 function purposeCountFilters(purpose, queryFilters = {}) {
   const next = { ...queryFilters };
   if (purpose === 'Buy') next.offPlan = 'No';
+  if (purpose === 'Off-plan') next.offPlan = 'Yes';
   return next;
 }
 
@@ -4241,8 +4254,40 @@ async function countByFilters(filters, search) {
 function forcedFromPurpose(purpose) {
   if (purpose === 'Rent') return { propertyPurpose: 'Rent' };
   if (purpose === 'Off-plan') return { offPlan: 'Yes' };
-  if (purpose === 'Buy') return { propertyPurpose: 'Buy' };
+  if (purpose === 'Buy') return { propertyPurpose: 'Buy', offPlan: 'No' };
   return null;
+}
+
+async function probeAlternativeInventory(filters = {}, { currentTotal = 0 } = {}) {
+  const purpose = normalizePurpose(filters.purpose);
+  const loc = hasLocationConstraint(filters) ? String(filters.location).trim() : '';
+  const n = Number(currentTotal);
+  const total = Number.isFinite(n) ? n : 0;
+  const counts = { readyBuyCount: 0, rentCount: 0, offPlanCount: 0 };
+  if (purpose === 'Buy') {
+    counts.readyBuyCount = total;
+    const offPlanFilters = copySearchFilters(filters);
+    offPlanFilters.purpose = 'Off-plan';
+    const opts = listingQueryOpts(offPlanFilters, loc);
+    try {
+      counts.offPlanCount =
+        Number(
+          await propertyDbService.countProperties({
+            search: opts.search || loc,
+            filters: purposeCountFilters('Off-plan', opts.filters),
+            forced: forcedFromPurpose('Off-plan'),
+          })
+        ) || 0;
+    } catch (err) {
+      console.error('probeAlternativeInventory failed:', err);
+      counts.offPlanCount = 0;
+    }
+  } else if (purpose === 'Rent') {
+    counts.rentCount = total;
+  } else if (purpose === 'Off-plan') {
+    counts.offPlanCount = total;
+  }
+  return counts;
 }
 
 async function getSegmentMarketStats(filters = {}, { excludeRefNos = [] } = {}) {
@@ -4732,7 +4777,14 @@ function compactMarketSnapshot(stats = {}, purpose) {
 function formatSearchSnapshotLines(stats = {}, filters = {}) {
   const snapshot = compactMarketSnapshot(stats, filters.purpose);
   const lines = [];
-  if (snapshot.minPrice != null) lines.push(`• Prices start from ${formatAed(snapshot.minPrice)}`);
+  const purpose = normalizePurpose(filters.purpose);
+  if (snapshot.minPrice != null) {
+    lines.push(
+      purpose === 'Buy'
+        ? `• Ready properties start from ${formatAed(snapshot.minPrice)}`
+        : `• Prices start from ${formatAed(snapshot.minPrice)}`
+    );
+  }
   if (snapshot.averagePrice != null) {
     lines.push(`• Average asking price is around ${formatAed(snapshot.averagePrice)}`);
   }
@@ -4742,10 +4794,45 @@ function formatSearchSnapshotLines(stats = {}, filters = {}) {
   return [heading, ...lines];
 }
 
-function matchingCountSummary(count) {
+function matchingCountSummary(count, filters = {}) {
   const n = Number(count);
   if (!Number.isFinite(n) || n <= 0) return '';
+  const purpose = normalizePurpose(filters.purpose);
+  if (purpose === 'Buy') {
+    return `I found ${n} ready ${n === 1 ? 'property' : 'properties'} for sale.`;
+  }
+  const loc = hasLocationConstraint(filters) ? String(filters.location).trim() : '';
+  const area = loc ? ` in ${loc}` : '';
+  const segment = describeBedsAndType(filters, { plural: n !== 1 });
+  if (purpose === 'Off-plan') {
+    return `I found ${n} off-plan ${segment}${area}.`.replace(/\s+/g, ' ').trim();
+  }
+  if (purpose === 'Rent') {
+    return `I found ${n} ${segment} for rent${area}.`.replace(/\s+/g, ' ').trim();
+  }
   return `I found ${n} matching ${n === 1 ? 'property' : 'properties'}.`;
+}
+
+function alternativeInventoryLine(ctx = {}) {
+  const purpose = normalizePurpose(ctx.filters?.purpose);
+  const offPlanCount = Number(ctx.inventoryCounts?.offPlanCount);
+  if (purpose !== 'Buy' || !Number.isFinite(offPlanCount) || offPlanCount <= 0) return '';
+  const loc = hasLocationConstraint(ctx.filters) ? String(ctx.filters.location).trim() : '';
+  const where = loc ? ` in ${loc}` : '';
+  return `There are also ${offPlanCount} off-plan option${offPlanCount === 1 ? '' : 's'}${where} if you'd like to explore them.`;
+}
+
+function exploreOffPlanChip(count) {
+  const n = Number(count);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return `Explore ${n} off-plan ${n === 1 ? 'property' : 'properties'}`;
+}
+
+function withOffPlanExploreOption(options = [], ctx = {}) {
+  const purpose = normalizePurpose(ctx.filters?.purpose);
+  const chip = purpose === 'Buy' ? exploreOffPlanChip(ctx.inventoryCounts?.offPlanCount) : null;
+  if (!chip) return options;
+  return [chip, ...options.filter((opt) => opt !== chip)];
 }
 
 function refinementPromptFor(filters = {}, outcome) {
@@ -4761,13 +4848,19 @@ function buildSearchPresentation(ctx = {}) {
   const snapshot = compactMarketSnapshot(ctx.marketStats || {}, filters.purpose);
   const viewAll =
     ctx.outcome === SEARCH_OUTCOME.MATCHES_FOUND ? buildViewAllMatching(Number(count) || 0, filters) : null;
+  const offPlanCount = Number(ctx.inventoryCounts?.offPlanCount);
   return {
     acknowledgement: String(ctx.acknowledgement || '').trim() || null,
     resultSummary:
-      ctx.outcome === SEARCH_OUTCOME.MATCHES_FOUND ? matchingCountSummary(count) || null : null,
+      ctx.outcome === SEARCH_OUTCOME.MATCHES_FOUND ? matchingCountSummary(count, filters) || null : null,
     matchingCount: ctx.outcome === SEARCH_OUTCOME.MATCHES_FOUND && Number.isFinite(Number(count))
       ? Number(count)
       : null,
+    inventoryCounts: ctx.inventoryCounts || null,
+    alternativeInventory:
+      normalizePurpose(filters.purpose) === 'Buy' && Number.isFinite(offPlanCount) && offPlanCount > 0
+        ? { offPlan: { count: offPlanCount } }
+        : null,
     marketSnapshot: Object.keys(snapshot).length ? snapshot : null,
     viewAll: viewAll
       ? { label: String(viewAll.label || '').replace(/\s*→\s*$/, ''), url: viewAll.url }
@@ -4817,8 +4910,10 @@ function composeSearchReply(ctx = {}) {
     if (!/you're looking for/i.test(ack)) {
       lines.push(`Here are ${segment} ${purposeBit}${area}.`.replace(/\s+/g, ' ').trim());
     }
-    const summary = matchingCountSummary(count);
+    const summary = matchingCountSummary(count, filters);
     if (summary) lines.push(summary);
+    const alternative = alternativeInventoryLine(ctx);
+    if (alternative) lines.push(alternative);
     const snapshot = formatSearchSnapshotLines(ctx.marketStats || {}, filters);
     if (snapshot.length) lines.push(snapshot.join('\n'));
     const refine = refinementPromptFor(filters, ctx.outcome);
@@ -4848,6 +4943,9 @@ function composeSearchReply(ctx = {}) {
         .trim()
     );
   }
+
+  const alternative = alternativeInventoryLine(ctx);
+  if (alternative) lines.push(alternative);
 
   const alts = ctx.sameAreaAlternatives || {};
   const byBeds = Array.isArray(alts.byBedrooms) ? alts.byBedrooms.filter((item) => item.count > 0) : [];
@@ -4971,7 +5069,10 @@ async function buildSearchResponseContext(effectiveFilters, {
   }
 
   if (outcome === SEARCH_OUTCOME.MATCHES_FOUND) {
-    const nearbyInventory = await probeNearbyInventory(effectiveFilters);
+    const [nearbyInventory, inventoryCounts] = await Promise.all([
+      probeNearbyInventory(effectiveFilters),
+      probeAlternativeInventory(effectiveFilters, { currentTotal: total }),
+    ]);
     const context = {
       outcome,
       searchState,
@@ -4982,6 +5083,7 @@ async function buildSearchResponseContext(effectiveFilters, {
       exactListings: propertyCards.slice(0, 3),
       marketStats,
       nearbyInventory,
+      inventoryCounts,
       sameAreaAlternatives: {},
       searchUrl,
     };
@@ -4989,10 +5091,11 @@ async function buildSearchResponseContext(effectiveFilters, {
     return context;
   }
 
-  const [byBedrooms, totalInArea, nearbyInventory] = await Promise.all([
+  const [byBedrooms, totalInArea, nearbyInventory, inventoryCounts] = await Promise.all([
     probeSameAreaBedroomCounts(effectiveFilters),
     probeSameAreaTypeTotal(effectiveFilters),
     probeNearbyInventory(effectiveFilters),
+    probeAlternativeInventory(effectiveFilters, { currentTotal: 0 }),
   ]);
 
   const context = {
@@ -5006,6 +5109,7 @@ async function buildSearchResponseContext(effectiveFilters, {
     marketStats,
     sameAreaAlternatives: { totalInArea, byBedrooms },
     nearbyInventory,
+    inventoryCounts,
     searchUrl,
   };
   context.presentation = buildSearchPresentation(context);
@@ -5053,11 +5157,17 @@ async function emptyResultsResult(effectiveFilters, { previousFilters = {}, user
     effectiveFilters,
     needsEmptyResults: true,
     searchOutcome: outcome,
+    intent: purposeToIntent(effectiveFilters.purpose),
+    inventoryCounts: context.inventoryCounts || null,
+    alternativeInventory: (context.presentation || buildSearchPresentation(context))?.alternativeInventory || null,
     marketStats: stats || context.marketStats || null,
     responseContext: context,
     presentation: buildSearchPresentation(context),
     clarificationReply: reply,
-    options: options.length > 0 ? options : dropNearbyIfEmpty(noInventoryOptions(effectiveFilters), context.nearbyInventory),
+    options: withOffPlanExploreOption(
+      options.length > 0 ? options : dropNearbyIfEmpty(noInventoryOptions(effectiveFilters), context.nearbyInventory),
+      context
+    ),
     ...emptyResultsClarificationFields(),
     modelPayload: {
       count: 0,
@@ -5385,6 +5495,9 @@ async function searchProperties(
   effectiveFilters.locationAny = canonicalFilters.locationAny;
   result.responseContext = context;
   result.presentation = buildSearchPresentation(context);
+  result.intent = purposeToIntent(effectiveFilters.purpose);
+  result.inventoryCounts = context.inventoryCounts || null;
+  result.alternativeInventory = result.presentation?.alternativeInventory || null;
   result.replyOverride =
     showMore && excludeIds.length > 0
       ? foundListingsReply(effectiveFilters, total, {
@@ -5392,12 +5505,15 @@ async function searchProperties(
           newCount: propertyCards.length,
         })
       : composeSearchReply(context);
-  const opts = !isBudgetProvided(effectiveFilters) && !showMore
-    ? budgetOptionsForPurpose(effectiveFilters.purpose)
-    : moreMatchesOptions(effectiveFilters, {
-        hasMore: pagination.hasMore,
-        nearbyCount: (context.nearbyInventory || []).length,
-      });
+  const opts = withOffPlanExploreOption(
+    !isBudgetProvided(effectiveFilters) && !showMore
+      ? budgetOptionsForPurpose(effectiveFilters.purpose)
+      : moreMatchesOptions(effectiveFilters, {
+          hasMore: pagination.hasMore,
+          nearbyCount: (context.nearbyInventory || []).length,
+        }),
+    context
+  );
   if (opts.length) {
     result.options = opts;
     result.requiresClarification = true;
@@ -5409,7 +5525,7 @@ async function searchProperties(
     responseContext: llmSafeSearchContext(context),
     presentation: result.presentation,
     instruction:
-      'Authoritative structured search data. Write a concise natural reply using ONLY acknowledgement, resultSummary, and marketSnapshot min/average. Do not write a View all / See all / Browse all line — that is a separate UI action. Do not list individual properties, amenities, beds, baths, or listing links — those are property cards. Do not invent prices or counts. Do not re-ask known filters. Never print URLs.',
+      'Authoritative structured search data. Write a concise natural reply using ONLY acknowledgement, resultSummary, alternativeInventory, and marketSnapshot min/average. The main count is ready BUY / rent / off-plan for the current intent only — never add off-plan into a BUY total. Do not write a View all / See all / Browse all line — that is a separate UI action. Do not list individual properties, amenities, beds, baths, or listing links — those are property cards. Do not invent prices or counts. Do not re-ask known filters. Never print URLs.',
   };
   attachSearchPagination(result, pagination);
   console.log(
