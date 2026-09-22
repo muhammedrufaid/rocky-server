@@ -965,6 +965,136 @@ test('off-plan switch then Above AED 3M patches budget on the same OFF_PLAN quer
   assert.equal(backToReady.profilePatch.lastSearchFilters.bedrooms, 2);
 });
 
+test('not off-plan ready studio for rent overrides OFF_PLAN to READY_RENT', async (t) => {
+  assert.equal(
+    parsePurposeFromMessage('not offplan ready studio for rent i need', { purpose: 'Off-plan' }),
+    'Rent'
+  );
+  assert.equal(parsePurposeFromMessage('I need ready properties for rent', { purpose: 'Off-plan' }), 'Rent');
+  assert.equal(parsePurposeFromMessage('I want ready', { purpose: 'Off-plan' }), 'Buy');
+  assert.equal(parsePurposeFromMessage('I want off-plan'), 'Off-plan');
+
+  const rentQueries = [];
+  t.mock.method(propertyDbService, 'fetchRentProperties', async (opts = {}) => {
+    rentQueries.push(opts);
+    return {
+      properties: [
+        sampleBuyApartment({
+          propertyRefNo: 'RO-R-ST',
+          propertyPurpose: 'Rent',
+          offPlan: 'No',
+          bedrooms: '0',
+        }),
+      ],
+      total: 5,
+    };
+  });
+  t.mock.method(propertyDbService, 'fetchOffPlanProperties', async () => {
+    throw new Error('OFF_PLAN inventory must not be queried after READY_RENT switch');
+  });
+  t.mock.method(propertyDbService, 'getPropertyMarketStats', async () => ({
+    minimumPrice: 55_000,
+    averagePrice: 72_000,
+    totalAvailable: 5,
+  }));
+
+  const first = qualifyListingSearch('I need a studio apartment in JLT off-plan', {});
+  assert.equal(first.profilePatch.lastSearchFilters.purpose, 'Off-plan');
+  assert.equal(first.profilePatch.lastSearchFilters.bedrooms, 0);
+  assert.match(String(first.profilePatch.lastSearchFilters.location || ''), /jlt/i);
+
+  const msg = 'not offplan ready studio for rent i need';
+  const second = qualifyListingSearch(msg, profileFromQualify(first));
+  const next = second.profilePatch.lastSearchFilters;
+  assert.equal(second.profilePatch.intent, CONVERSATION_INTENTS.RENT);
+  assert.equal(next.purpose, 'Rent');
+  assert.equal(next.bedrooms, 0);
+  assert.equal(next.type, 'Apartment');
+  assert.match(String(next.location || ''), /jlt/i);
+  assert.notEqual(second.missing, 'intent');
+  assert.notEqual(second.missing, 'bedrooms');
+  assert.notEqual(second.missing, 'location');
+  assert.notEqual(second.missing, 'propertyType');
+
+  const search = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: next,
+      userMessage: msg,
+      intent: CONVERSATION_INTENTS.RENT,
+      previousSearch: first.profilePatch.lastSearchFilters,
+    }
+  );
+  assert.equal(search.searchState.listingMode, LISTING_MODES.READY_RENT);
+  assert.equal(search.effectiveFilters.purpose, 'Rent');
+  assert.equal(search.resultCount, 5);
+  assert.equal((search.propertyCards || []).every((card) => card.id !== 'RO-OP-1'), true);
+  assert.match(search.replyOverride, /switch to ready rental properties/i);
+  assert.match(search.replyOverride, /studio/i);
+  assert.equal(/off-plan/i.test(search.replyOverride), false);
+  assert.equal(/View all off-plan/i.test(search.viewAllMatching?.label || ''), false);
+  assert.match(search.viewAllMatching.url, /\/properties\/rent\/in-dubai/);
+  assert.match(search.viewAllMatching.url, /[?&]type=apartment/);
+  assert.match(search.viewAllMatching.url, /[?&]beds=0/);
+  assert.equal(/off-plan/i.test(search.viewAllMatching.url), false);
+  assert.equal(/[?&]search=/i.test(search.viewAllMatching.url), false);
+  assert.equal(/[?&]bedrooms=/i.test(search.viewAllMatching.url), false);
+  assert.equal(rentQueries.length > 0, true);
+  assert.equal(rentQueries[0].filters?.offPlan, 'No');
+  assert.equal(rentQueries[0].filters?.bedrooms, 0);
+});
+
+test('ready properties for rent keep location and beds when leaving OFF_PLAN', () => {
+  const first = qualifyListingSearch('I need a 2 BHK apartment in Dubai South off-plan', {});
+  const second = qualifyListingSearch('I need ready properties for rent', profileFromQualify(first));
+  const next = second.profilePatch.lastSearchFilters;
+  assert.equal(second.profilePatch.intent, CONVERSATION_INTENTS.RENT);
+  assert.equal(next.purpose, 'Rent');
+  assert.equal(next.location, 'Dubai South');
+  assert.equal(next.type, 'Apartment');
+  assert.equal(next.bedrooms, 2);
+  assert.notEqual(second.missing, 'intent');
+  assert.notEqual(second.missing, 'location');
+  assert.notEqual(second.missing, 'bedrooms');
+});
+
+test('ready studio for rent in Dubai Marina replaces OFF_PLAN location', () => {
+  const first = qualifyListingSearch('I need a studio apartment in Dubai South off-plan', {});
+  const second = qualifyListingSearch(
+    'ready studio for rent in Dubai Marina',
+    profileFromQualify(first)
+  );
+  const next = second.profilePatch.lastSearchFilters;
+  assert.equal(next.purpose, 'Rent');
+  assert.equal(next.location, 'Dubai Marina');
+  assert.equal(next.bedrooms, 0);
+  assert.equal(next.type, 'Apartment');
+});
+
+test('OFF_PLAN purchase budget is cleared when switching to READY_RENT', () => {
+  const first = qualifyListingSearch('I need a studio apartment in JLT off-plan', {});
+  const withBudget = qualifyListingSearch('Above AED 3M', profileFromQualify(first));
+  assert.equal(withBudget.profilePatch.lastSearchFilters.budgetMin, 3_000_000);
+  const second = qualifyListingSearch('ready studio for rent', profileFromQualify(withBudget));
+  const next = second.profilePatch.lastSearchFilters;
+  assert.equal(next.purpose, 'Rent');
+  assert.match(String(next.location || ''), /jlt/i);
+  assert.equal(next.bedrooms, 0);
+  assert.equal(next.budgetMin, null);
+  assert.equal(next.budgetMax, null);
+});
+
+test('ready studio for rent anywhere clears preserved OFF_PLAN location', () => {
+  const first = qualifyListingSearch('I need a studio apartment in JLT off-plan', {});
+  const second = qualifyListingSearch('ready studio for rent anywhere', profileFromQualify(first));
+  const next = second.profilePatch.lastSearchFilters;
+  assert.equal(next.purpose, 'Rent');
+  assert.equal(next.location, null);
+  assert.equal(next.locationAny, true);
+  assert.equal(next.bedrooms, 0);
+});
+
 test('new development and under construction parse as off-plan listing intent', () => {
   assert.equal(parsePurposeFromMessage('Show me new development apartments'), 'Off-plan');
   assert.equal(parsePurposeFromMessage('under construction in Dubai South'), 'Off-plan');

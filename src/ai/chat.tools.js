@@ -1638,7 +1638,66 @@ function isBuyContentQuestion(lower) {
   );
 }
 
-function parsePurposeFromMessage(text) {
+function mentionsOffPlan(lower) {
+  const collapsed = String(lower || '').replace(/[\s_-]+/g, '');
+  return /off[\s-_]*plan/.test(lower) || collapsed.includes('offplan');
+}
+
+function isOffPlanNegation(lower) {
+  const collapsed = String(lower || '').replace(/[\s_-]+/g, '');
+  return (
+    /\b(?:not|no|non)[\s,-]+(?:an?\s+)?off[\s-_]*plan\b/.test(lower) ||
+    collapsed.includes('notoffplan') ||
+    collapsed.includes('nooffplan')
+  );
+}
+
+function isReadyInventoryRequest(lower) {
+  return /\bready\b/.test(lower);
+}
+
+function isExplicitRentIntent(lower) {
+  if (/\brent\s+collection\b/.test(lower)) return false;
+  if (/\bbuy\b|\bpurchase\b|\bfor\s+sale\b/.test(lower) && !/\b(?:for\s+rent|to\s+rent|rental|lease)\b/.test(lower)) {
+    return false;
+  }
+  return (
+    /^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|i'?m\s+(looking\s+to\s+|looking\s+for\s+)?|i\s+am\s+(looking\s+to\s+|looking\s+for\s+)?|looking\s+to\s+|looking\s+for\s+)?(rent|rental|lease|renting|leasing)\b/.test(
+      lower
+    ) ||
+    /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+to\s+rent\b/.test(lower) ||
+    /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+for\b.{0,60}\b(to\s+rent|for\s+rent|rental)\b/.test(lower) ||
+    /\b(?:want|would\s+like|('d\s+like)|need)\s+(?:to\s+)?(?:rent|rental|lease)\b/.test(lower) ||
+    /\bneed\s+a\b.{0,40}\b(for\s+rent|to\s+rent)\b/.test(lower) ||
+    /\b(apartment|villa|townhouse|penthouse|studio|flat|property|home)\s+to\s+rent\b/.test(lower) ||
+    /\bfor\s+rent\b/.test(lower) ||
+    /\bto\s+rent\b/.test(lower) ||
+    /\bto\s+lease\b/.test(lower) ||
+    /\brenting\s+(?:a|an|the)\b/.test(lower) ||
+    /\bleasing\s+(?:a|an|the)\b/.test(lower)
+  );
+}
+
+function isExplicitBuyIntent(lower) {
+  if (isBuyContentQuestion(lower)) return false;
+  if (/\brent\b|\blease\b/.test(lower)) return false;
+  return (
+    /^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|i'?m\s+(looking\s+to\s+|looking\s+for\s+)?|i\s+am\s+(looking\s+to\s+|looking\s+for\s+)?|looking\s+to\s+|looking\s+for\s+)?(buy|purchase|buying|purchasing)\b/.test(
+      lower
+    ) ||
+    /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+to\s+buy\b/.test(lower) ||
+    /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+for\s+(?:a\s+|an\s+)?(?:to\s+)?buy\b/.test(lower) ||
+    /\b(?:want|would\s+like|('d\s+like)|need)\s+(?:to\s+)?buy\b/.test(lower) ||
+    /\b(?:want|would\s+like|('d\s+like)|need)\s+(?:to\s+)?purchase\b/.test(lower) ||
+    /\bto\s+buy\b/.test(lower) ||
+    /\bto\s+purchase\b/.test(lower) ||
+    /\bfor\s+sale\b/.test(lower) ||
+    /\bbuying\s+(?:a|an|the)\b/.test(lower) ||
+    /\bpurchasing\s+(?:a|an|the)\b/.test(lower)
+  );
+}
+
+function parsePurposeFromMessage(text, previous = {}) {
   const raw = String(text || '').trim();
   if (!raw) return null;
   if (parseSellIntent(raw)) return null;
@@ -1647,64 +1706,29 @@ function parsePurposeFromMessage(text) {
 
   const lower = raw.toLowerCase().replace(/[.!?]/g, '').trim();
   const collapsed = lower.replace(/[\s_-]+/g, '');
-  if (collapsed === 'offplan' || collapsed === 'offplanproperties') return 'Off-plan';
-  // "Off-plan financing / articles / can I sell off-plan…" are content, not listing purpose
-  if (/off[\s-_]*plan/.test(lower)) {
-    if (isOffPlanInformationalQuery(lower)) return null;
-    return 'Off-plan';
-  }
-  if (/\bunder\s+construction\b/.test(lower) && !isOffPlanInformationalQuery(lower)) {
-    return 'Off-plan';
-  }
-  if (/\b(new\s+projects?|new\s+developments?)\b/.test(lower) && !isOffPlanInformationalQuery(lower)) {
-    return 'Off-plan';
-  }
-  if (
-    /\bready\s+(properties|homes|listings|inventory|units)\b/.test(lower) &&
-    !/off[\s-_]*plan/.test(lower) &&
-    !/\brent\b|\blease\b/.test(lower)
-  ) {
-    return 'Buy';
-  }
+  const rejectsOffPlan = isOffPlanNegation(lower);
+  const wantsReady = isReadyInventoryRequest(lower);
+  const wantsRent = isExplicitRentIntent(lower);
+  const wantsBuy = isExplicitBuyIntent(lower);
+  const wantsOffPlan =
+    !rejectsOffPlan &&
+    !wantsReady &&
+    !wantsRent &&
+    (collapsed === 'offplan' ||
+      collapsed === 'offplanproperties' ||
+      mentionsOffPlan(lower) ||
+      (/\bunder\s+construction\b/.test(lower) && !isOffPlanInformationalQuery(lower)) ||
+      (/\b(new\s+projects?|new\s+developments?)\b/.test(lower) && !isOffPlanInformationalQuery(lower)));
 
-  // Buy: start-anchored intents + mid-sentence ("to buy", "for sale", "buying a…")
-  if (
-    !/\brent\b|\blease\b|off[\s-_]*plan/.test(lower) &&
-    !isBuyContentQuestion(lower) &&
-    (/^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|i'?m\s+(looking\s+to\s+|looking\s+for\s+)?|i\s+am\s+(looking\s+to\s+|looking\s+for\s+)?|looking\s+to\s+|looking\s+for\s+)?(buy|purchase|buying|purchasing)\b/.test(
-      lower
-    ) ||
-      /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+to\s+buy\b/.test(lower) ||
-      /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+for\s+(?:a\s+|an\s+)?(?:to\s+)?buy\b/.test(lower) ||
-      /\b(?:want|would\s+like|('d\s+like)|need)\s+(?:to\s+)?buy\b/.test(lower) ||
-      /\b(?:want|would\s+like|('d\s+like)|need)\s+(?:to\s+)?purchase\b/.test(lower) ||
-      /\bto\s+buy\b/.test(lower) ||
-      /\bto\s+purchase\b/.test(lower) ||
-      /\bfor\s+sale\b/.test(lower) ||
-      /\bbuying\s+(?:a|an|the)\b/.test(lower) ||
-      /\bpurchasing\s+(?:a|an|the)\b/.test(lower))
-  ) {
-    return 'Buy';
-  }
+  if (wantsOffPlan && isOffPlanInformationalQuery(lower)) return null;
 
-  // Rent: same coverage including "I'm looking to rent" / "for rent" / "apartment to rent"
-  if (
-    !/\bbuy\b|\bpurchase\b|\bfor\s+sale\b|off[\s-_]*plan|\brent\s+collection\b/.test(lower) &&
-    (/^(i\s+(want\s+to\s+|would\s+like\s+to\s+)?|i'?d\s+like\s+to\s+|i'?m\s+(looking\s+to\s+|looking\s+for\s+)?|i\s+am\s+(looking\s+to\s+|looking\s+for\s+)?|looking\s+to\s+|looking\s+for\s+)?(rent|rental|lease|renting|leasing)\b/.test(
-      lower
-    ) ||
-      /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+to\s+rent\b/.test(lower) ||
-      /\b((?:i(?:'| a)?m|i\s+am)\s+)?looking\s+for\b.{0,60}\b(to\s+rent|for\s+rent|rental)\b/.test(lower) ||
-      /\b(?:want|would\s+like|('d\s+like)|need)\s+(?:to\s+)?(?:rent|rental|lease)\b/.test(lower) ||
-      /\bneed\s+a\b.{0,40}\b(for\s+rent|to\s+rent)\b/.test(lower) ||
-      /\b(apartment|villa|townhouse|penthouse|studio|flat|property|home)\s+to\s+rent\b/.test(lower) ||
-      /\bfor\s+rent\b/.test(lower) ||
-      /\bto\s+rent\b/.test(lower) ||
-      /\bto\s+lease\b/.test(lower) ||
-      /\brenting\s+(?:a|an|the)\b/.test(lower) ||
-      /\bleasing\s+(?:a|an|the)\b/.test(lower))
-  ) {
-    return 'Rent';
+  // Latest-message priority: rent > buy > off-plan > ready / not off-plan.
+  if (wantsRent) return 'Rent';
+  if (wantsBuy) return 'Buy';
+  if (wantsOffPlan) return 'Off-plan';
+  if (rejectsOffPlan || wantsReady) {
+    if (isRentalPurpose(previous.purpose)) return 'Rent';
+    return 'Buy';
   }
   return null;
 }
@@ -3026,7 +3050,13 @@ function buildRefinementAcknowledgement(previous = {}, next = {}) {
       return "Sure — I'll switch this to off-plan and keep the rest of your search.";
     }
     if (normalizePurpose(next.purpose) === 'Rent') {
-      return "Sure — I'll switch this to rent and keep the rest of your search.";
+      if (Number.isFinite(nextBeds) && nextBeds === 0) {
+        return "Sure — I'll switch to ready rental properties and keep your studio preference.";
+      }
+      return "Sure — I'll switch to ready rental properties and keep the rest of your search.";
+    }
+    if (normalizePurpose(previous.purpose) === 'Off-plan') {
+      return "Sure — I'll switch this to ready properties for sale and keep the rest of your search.";
     }
     return "Sure — I'll switch this to a purchase search and keep the rest of your search.";
   }
@@ -3800,7 +3830,7 @@ function extractSearchPatch(message, previous = {}, { awaiting } = {}) {
 
   if (shouldTreatMessageAsAnyBudget(previous, message, awaiting)) {
     changes.budget = { any: true };
-    const purposeOnly = parsePurposeFromMessage(message);
+    const purposeOnly = parsePurposeFromMessage(message, previous);
     if (purposeOnly) changes.purpose = purposeOnly;
     return changes;
   }
@@ -3823,7 +3853,7 @@ function extractSearchPatch(message, previous = {}, { awaiting } = {}) {
   const beds = skipBedsForLocationAny || skipBedsForAnyReply ? null : parseBedroomChoice(message);
   const budget = parseBudgetFromMessage(message, { requireBudgetContext: awaiting === 'budget' });
   const furnished = parseFurnishedFromMessage(message);
-  const purpose = parsePurposeFromMessage(message);
+  const purpose = parsePurposeFromMessage(message, previous);
 
   if (types.length) {
     const current = typesFromFilters(previous);
@@ -4028,7 +4058,7 @@ function shouldSkipPropertySearch(text) {
 function trustedPurpose({ lastSearchFilters = {}, userMessage, slotFlow, intent, effectiveFilters } = {}) {
   if (parseSellIntent(userMessage) || isServiceInquiryMessage(userMessage)) return null;
 
-  const fromMessage = parsePurposeFromMessage(userMessage);
+  const fromMessage = parsePurposeFromMessage(userMessage, lastSearchFilters);
   if (fromMessage) return fromMessage;
 
   const next = effectiveFilters || lastSearchFilters;
@@ -4122,12 +4152,15 @@ async function fetchByPurpose(purpose, opts) {
     JSON.stringify({
       purpose: requested,
       propertyPurpose: requested === 'Off-plan' ? undefined : requested,
-      offPlan: requested === 'Off-plan' ? 'Yes' : requested === 'Buy' ? 'No' : undefined,
+      offPlan: requested === 'Off-plan' ? 'Yes' : requested === 'Buy' || requested === 'Rent' ? 'No' : undefined,
       search: opts?.search || null,
       filters: opts?.filters || {},
     })
   );
-  if (requested === 'Rent') return propertyDbService.fetchRentProperties(opts);
+  if (requested === 'Rent') {
+    const filters = { ...(opts.filters || {}), offPlan: 'No' };
+    return propertyDbService.fetchRentProperties({ ...opts, filters });
+  }
   if (requested === 'Off-plan') return propertyDbService.fetchOffPlanProperties(opts);
   if (requested === 'Buy') {
     const filters = { ...(opts.filters || {}), offPlan: 'No' };
@@ -4302,7 +4335,7 @@ function emptyResultsClarificationFields() {
 
 function purposeCountFilters(purpose, queryFilters = {}) {
   const next = { ...queryFilters };
-  if (purpose === 'Buy') next.offPlan = 'No';
+  if (purpose === 'Buy' || purpose === 'Rent') next.offPlan = 'No';
   if (purpose === 'Off-plan') next.offPlan = 'Yes';
   return next;
 }
@@ -4340,7 +4373,7 @@ async function countByFilters(filters, search) {
 }
 
 function forcedFromPurpose(purpose) {
-  if (purpose === 'Rent') return { propertyPurpose: 'Rent' };
+  if (purpose === 'Rent') return { propertyPurpose: 'Rent', offPlan: 'No' };
   if (purpose === 'Off-plan') return { offPlan: 'Yes' };
   if (purpose === 'Buy') return { propertyPurpose: 'Buy', offPlan: 'No' };
   return null;
