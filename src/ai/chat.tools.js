@@ -2580,7 +2580,10 @@ function hasInProgressListingSearch(profile = {}) {
     typesFromFilters(last).length > 0 ||
     !!String(last.location || '').trim() ||
     last.locationAny === true ||
-    LISTING_SLOT_AWAITING.has(awaiting)
+    LISTING_SLOT_AWAITING.has(awaiting) ||
+    awaiting === 'emptyResults' ||
+    awaiting === 'alternatives' ||
+    awaiting === 'nearbyArea'
   );
 }
 
@@ -3046,8 +3049,15 @@ function buildRefinementAcknowledgement(previous = {}, next = {}) {
   }
   if (bedsChanged && !locChanged && !typeChanged && !purposeChanged) {
     if (nextBeds === 0) {
-      const keep = [nextLoc, normalizePurpose(next.purpose) === 'Rent' ? 'rent' : 'buy'].filter(Boolean).join(' + ');
-      return `Got it — I'll switch this to studio apartments and keep ${keep}.`;
+      const keepBits = [];
+      if (nextLoc) keepBits.push(nextLoc);
+      if (normalizePurpose(next.purpose) === 'Rent') keepBits.push('rent');
+      else if (normalizePurpose(next.purpose) === 'Off-plan') keepBits.push('off-plan');
+      else if (normalizePurpose(next.purpose) === 'Buy') keepBits.push('buy');
+      const keep = keepBits.join(' + ');
+      return keep
+        ? `Got it — I'll switch this to studio apartments and keep ${keep}.`
+        : `Got it — I'll switch this to studio apartments and keep the rest of your search.`;
     }
     return `Sure — I'll update this to ${nextBeds}-bedroom and keep the rest of your search.`;
   }
@@ -3313,16 +3323,20 @@ function qualifyListingSearch(message, profile = {}) {
   const missing = nextMissingListingSlot(next);
   const question = missing ? listingSlotQuestion(missing, next) : null;
   const patch = {
-    purpose: next.purpose || null,
-    intent: purposeToIntent(next.purpose) || null,
+    purpose: next.purpose || profile.purpose || null,
+    intent:
+      purposeToIntent(next.purpose) ||
+      normalizeIntentValue(profile.intent) ||
+      purposeToIntent(profile.purpose) ||
+      null,
     preferredAreas: next.location ? [next.location] : undefined,
     bedrooms: requiresBedroomsForSearch(next)
       ? next.bedrooms ?? next.bedroomsMin ?? null
       : null,
     lastSearchFilters: next,
     slotFlow: question
-      ? { awaiting: question.awaiting, alternatives: null }
-      : { awaiting: null, alternatives: null },
+      ? { awaiting: question.awaiting, alternatives: null, lastAskedField: missing }
+      : { awaiting: null, alternatives: null, lastAskedField: null },
   };
   if (isBudgetProvided(next)) {
     patch.budget = { min: next.budgetMin ?? null, max: next.budgetMax ?? null };
@@ -4126,12 +4140,11 @@ function profilePatchFromPropertyFilters(filters) {
     };
   }
   const purpose = normalizePurpose(filters.purpose);
+  // Never wipe a known conversation purpose/intent just because this search
+  // payload omitted them — that causes buy/rent to be re-asked mid-flow.
   if (purpose) {
     patch.purpose = purpose;
     patch.intent = purposeToIntent(purpose);
-  } else {
-    patch.purpose = null;
-    patch.intent = null;
   }
   return patch;
 }

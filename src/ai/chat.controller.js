@@ -201,6 +201,7 @@ function mergeProfile(current, patch) {
     slotFlow: {
       awaiting: current.slotFlow?.awaiting || null,
       alternatives: current.slotFlow?.alternatives || null,
+      lastAskedField: current.slotFlow?.lastAskedField || null,
     },
     sellListing: copySellListing(current.sellListing || {}),
     serviceInquiry: copyServiceInquiry(current.serviceInquiry || {}),
@@ -240,6 +241,10 @@ function mergeProfile(current, patch) {
     next.slotFlow = {
       awaiting: patch.slotFlow.awaiting || null,
       alternatives: patch.slotFlow.alternatives ?? null,
+      lastAskedField:
+        patch.slotFlow.lastAskedField !== undefined
+          ? patch.slotFlow.lastAskedField
+          : next.slotFlow.lastAskedField || null,
     };
   }
   if (patch.sellListing) {
@@ -343,11 +348,15 @@ function listingSlotResponse(profile, filters, extraPatch = {}) {
     ...rest,
     lastSearchFilters: next,
     slotFlow: question
-      ? { awaiting: question.awaiting, alternatives: null }
-      : { awaiting: null, alternatives: null },
+      ? { awaiting: question.awaiting, alternatives: null, lastAskedField: missing }
+      : { awaiting: null, alternatives: null, lastAskedField: null },
   };
-  patch.purpose = next.purpose || null;
-  patch.intent = purposeToIntent(next.purpose) || null;
+  patch.purpose = next.purpose || profile.purpose || null;
+  patch.intent =
+    purposeToIntent(next.purpose) ||
+    normalizeIntentValue(profile.intent) ||
+    purposeToIntent(profile.purpose) ||
+    null;
   if (next.location) patch.preferredAreas = rest.preferredAreas || [next.location];
   if (requiresBedroomsForSearch(next)) {
     if (next.bedrooms != null) patch.bedrooms = next.bedrooms;
@@ -791,7 +800,15 @@ function applyRelocationIntent(message, profile) {
 function applyPropertyTypeChange(message, profile) {
   const incoming = parsePropertyTypesFromMessage(message);
   const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
-  if (!last.purpose && !last.location && !profile.purpose && !isListingIntent(profile.intent)) return null;
+  if (!last.purpose && !last.location && !last.locationAny && !profile.purpose && !isListingIntent(profile.intent)) {
+    return null;
+  }
+
+  // Bedroom / budget refinements that also mention a type (e.g. "okay studio apartment")
+  // must patch via qualifyListingSearch so intent/location/budget stay intact.
+  if (parseBedroomChoice(message) || parseBudgetFromMessage(message)) {
+    return null;
+  }
 
   const mentionedLocation = parseLocationFromMessage(message);
   if (mentionedLocation && last.location) {
@@ -804,10 +821,6 @@ function applyPropertyTypeChange(message, profile) {
     const explicitPurpose = parsePurposeFromMessage(message);
     if (explicitPurpose) last.purpose = explicitPurpose;
     if (mentionedLocation && !last.location) last.location = mentionedLocation;
-    const beds = parseBedroomChoice(message);
-    if (beds) applyBedroomChoice(last, beds);
-    const budget = parseBudgetFromMessage(message);
-    if (budget) applyBudgetChoice(last, budget);
     return listingSlotResponse(profile, last, {
       preferredAreas: last.location ? [last.location] : undefined,
       explicitPurpose: !!explicitPurpose,
@@ -818,7 +831,11 @@ function applyPropertyTypeChange(message, profile) {
   if (!newType) return null;
 
   const currentTypes = typesFromFilters(last);
-  if (currentTypes.length === 1 && currentTypes[0].toLowerCase() === newType.toLowerCase() && last.location) {
+  if (
+    currentTypes.length === 1 &&
+    currentTypes[0].toLowerCase() === newType.toLowerCase() &&
+    (last.location || last.locationAny)
+  ) {
     return null;
   }
 
@@ -834,7 +851,7 @@ function applyPropertyTypeChange(message, profile) {
     });
   }
 
-  if (!last.location) {
+  if (!last.location && !last.locationAny) {
     const normalized = listingSlotResponse(profile, last, { explicitPurpose: !!explicitPurpose });
     if (normalized.type === 'clarify') return normalized;
     return {

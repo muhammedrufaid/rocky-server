@@ -2777,6 +2777,162 @@ test('studio follow-up patches bedrooms only and keeps the apartment search', as
   assert.equal(result.effectiveFilters.type, 'Apartment');
 });
 
+test('okay studio apartment after empty rent search keeps intent location budget', async (t) => {
+  const turn1 = qualifyListingSearch('Show me a 2-bedroom apartment under AED 1.5M.', {});
+  assert.equal(turn1.type, 'clarify');
+  assert.equal(turn1.missing, 'intent');
+  assert.equal(turn1.profilePatch.lastSearchFilters.bedrooms, 2);
+  assert.equal(turn1.profilePatch.lastSearchFilters.type, 'Apartment');
+  assert.equal(turn1.profilePatch.lastSearchFilters.budgetMax, 1_500_000);
+  assert.equal(/how many bedrooms|which area|what type of property/i.test(turn1.reply), false);
+
+  const turn2 = qualifyListingSearch('Rent', profileFromQualify(turn1));
+  assert.equal(turn2.type, 'clarify');
+  assert.equal(turn2.missing, 'location');
+  assert.equal(turn2.profilePatch.intent, CONVERSATION_INTENTS.RENT);
+  assert.equal(turn2.profilePatch.lastSearchFilters.purpose, 'Rent');
+  assert.equal(turn2.profilePatch.lastSearchFilters.bedrooms, 2);
+  assert.equal(turn2.profilePatch.lastSearchFilters.budgetMax, 1_500_000);
+  assert.equal(/how many bedrooms|what type of property|budget/i.test(turn2.reply), false);
+
+  const turn3 = qualifyListingSearch('Dubai South', profileFromQualify(turn2));
+  assert.equal(turn3.type, 'continue');
+  assert.equal(turn3.missing, null);
+  const ready = turn3.profilePatch.lastSearchFilters;
+  assert.equal(ready.purpose, 'Rent');
+  assert.equal(ready.location, 'Dubai South');
+  assert.equal(ready.type, 'Apartment');
+  assert.equal(ready.bedrooms, 2);
+  assert.equal(ready.budgetMax, 1_500_000);
+
+  const emptyProfile = {
+    ...profileFromQualify(turn3),
+    slotFlow: { awaiting: 'emptyResults', alternatives: null, lastAskedField: null },
+  };
+  assert.equal(hasInProgressListingSearch(emptyProfile), true);
+  assert.equal(shouldResetOnListingIntent('Rent', emptyProfile, 'RENT'), false);
+
+  const turn4 = qualifyListingSearch('okay studio apartment', emptyProfile);
+  assert.equal(turn4.type, 'continue');
+  assert.equal(turn4.missing, null);
+  const next = turn4.profilePatch.lastSearchFilters;
+  assert.equal(next.purpose, 'Rent');
+  assert.equal(next.location, 'Dubai South');
+  assert.equal(next.type, 'Apartment');
+  assert.equal(next.bedrooms, 0);
+  assert.equal(next.budgetMax, 1_500_000);
+  assert.equal(next.budgetMin, null);
+  assert.equal(turn4.profilePatch.intent, CONVERSATION_INTENTS.RENT);
+  assert.notEqual(turn4.missing, 'intent');
+  assert.notEqual(turn4.missing, 'location');
+  assert.notEqual(turn4.missing, 'propertyType');
+  assert.notEqual(turn4.missing, 'budget');
+  assert.equal(/buy, rent, or explore off-plan|which area|what type of property|what is your/i.test(turn4.reply || ''), false);
+
+  const ack = buildSearchAcknowledgement(next, {
+    previous: ready,
+    message: 'okay studio apartment',
+  });
+  assert.match(ack, /switch this to studio apartments/i);
+  assert.match(ack, /Dubai South/);
+  assert.match(ack, /rent/i);
+  assert.equal(/buy, rent, or explore off-plan/i.test(ack), false);
+
+  t.mock.method(propertyDbService, 'fetchRentProperties', async (opts = {}) => {
+    assert.equal(opts.filters?.bedrooms, 0);
+    assert.equal(opts.filters?.offPlan, 'No');
+    assert.equal(opts.filters?.priceMax, 1_500_000);
+    assert.match(String(opts.search || ''), /dubai south/i);
+    return {
+      properties: [
+        sampleBuyApartment({
+          propertyRefNo: 'RO-R-ST',
+          propertyPurpose: 'Rent',
+          offPlan: 'No',
+          bedrooms: '0',
+        }),
+      ],
+      total: 1,
+    };
+  });
+  t.mock.method(propertyDbService, 'getPropertyMarketStats', async () => ({
+    minimumPrice: 55_000,
+    averagePrice: 72_000,
+    totalAvailable: 1,
+  }));
+
+  const search = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: next,
+      userMessage: 'okay studio apartment',
+      intent: CONVERSATION_INTENTS.RENT,
+      previousSearch: ready,
+      slotFlow: { awaiting: 'emptyResults' },
+    }
+  );
+  assert.equal(search.searchOutcome, SEARCH_OUTCOME.MATCHES_FOUND);
+  assert.equal(search.searchState.listingMode, LISTING_MODES.READY_RENT);
+  assert.equal(search.effectiveFilters.bedrooms, 0);
+  assert.equal(search.effectiveFilters.purpose, 'Rent');
+  assert.equal(search.effectiveFilters.location, 'Dubai South');
+  assert.equal(search.effectiveFilters.budgetMax, 1_500_000);
+  assert.equal(search.resultCount, 1);
+  assert.match(search.replyOverride, /studio/i);
+  assert.equal(/Are you looking to buy, rent/i.test(search.replyOverride), false);
+  assert.equal(/Which area or community/i.test(search.replyOverride), false);
+});
+
+test('studio after empty results does not re-ask when location was temporarily missing from type-change path', () => {
+  const profile = {
+    purpose: 'Rent',
+    intent: CONVERSATION_INTENTS.RENT,
+    lastSearchFilters: {
+      location: null,
+      locationAny: false,
+      bedrooms: 2,
+      bedroomsMin: null,
+      bedroomsAny: false,
+      bedroomsResolved: true,
+      budgetMin: null,
+      budgetMax: 1_500_000,
+      budgetProvided: true,
+      type: 'Apartment',
+      types: ['Apartment'],
+      purpose: 'Rent',
+      furnished: null,
+    },
+    slotFlow: { awaiting: 'emptyResults', alternatives: null },
+  };
+  // Even without location, a bedroom refinement must not wipe rent/budget or invent a type-only restart.
+  const result = qualifyListingSearch('okay studio apartment', profile);
+  assert.equal(result.type, 'clarify');
+  assert.equal(result.missing, 'location');
+  assert.equal(result.profilePatch.lastSearchFilters.purpose, 'Rent');
+  assert.equal(result.profilePatch.lastSearchFilters.bedrooms, 0);
+  assert.equal(result.profilePatch.lastSearchFilters.budgetMax, 1_500_000);
+  assert.equal(result.profilePatch.intent, CONVERSATION_INTENTS.RENT);
+  assert.equal(/buy, rent, or explore off-plan|how many bedrooms|what type of property/i.test(result.reply), false);
+});
+
+test('emptyResults slot alone counts as in-progress listing search', () => {
+  assert.equal(
+    hasInProgressListingSearch({
+      lastSearchFilters: emptySearchFilters(),
+      slotFlow: { awaiting: 'emptyResults' },
+    }),
+    true
+  );
+  assert.equal(
+    hasInProgressListingSearch({
+      lastSearchFilters: emptySearchFilters(),
+      slotFlow: { awaiting: 'alternatives' },
+    }),
+    true
+  );
+});
+
 test('studio room without intent asks buy/rent and keeps bedrooms 0', () => {
   assert.equal(parseBedroomChoice('i need a studio room').exact, 0);
   assert.deepEqual(parsePropertyTypesFromMessage('i need a studio room'), ['Apartment']);
