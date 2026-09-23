@@ -120,10 +120,12 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
   ].filter(Boolean);
   if (listMatches.length) match.push(...listMatches);
 
-  // Amenity / feature requirements — every requested amenity must match at least one features[] value.
+  // Amenity / feature requirements — every requested amenity must match features,
+  // or fall back to title/description text when features are sparse.
   if (nf.amenities && nf.amenities.length) {
     const amenityMatchers = {
-      swimming_pool: /swimming\s*pool|private\s*pool|shared\s*pool|^pools?$/i,
+      swimming_pool:
+        /swimming\s*pools?|private\s*pools?|shared\s*pools?|community\s*pools?|common\s*pools?|\bpools?\b/i,
       gym: /gym|fitness\s*(cent(?:er|re)|club|room)|health\s*club/i,
       parking: /parking|car\s*park/i,
       balcony: /balcon|terrace/i,
@@ -149,7 +151,14 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
         .replace(/['’]/g, '')
         .replace(/[^a-z0-9]+/g, '_');
       const re = amenityMatchers[key] || new RegExp(escapeRegex(String(amenity || '').trim()), 'i');
-      match.push({ features: { $elemMatch: { $regex: re.source, $options: 'i' } } });
+      match.push({
+        $or: [
+          { features: { $elemMatch: { $regex: re.source, $options: 'i' } } },
+          { features: { $regex: re.source, $options: 'i' } },
+          { propertyDescription: { $regex: re.source, $options: 'i' } },
+          { propertyTitle: { $regex: re.source, $options: 'i' } },
+        ],
+      });
     }
   }
 

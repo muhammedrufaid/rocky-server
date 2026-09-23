@@ -420,8 +420,8 @@ const AMENITY_DEFINITIONS = [
   {
     id: 'swimming_pool',
     label: 'swimming pool',
-    parse: /\b(?:swimming|private|shared)\s+pools?\b|\b(?:with|has|have|needs?|wants?|included?)\s+(?:a\s+|an\s+)?pools?\b|\bpools?\s+(?:access|view)\b/i,
-    feature: /swimming\s*pool|private\s*pool|shared\s*pool|^pools?$/i,
+    parse: /\b(?:swimming|private|shared|community|common)\s+pools?\b|\b(?:with|has|have|needs?|wants?|included?)\s+(?:a\s+|an\s+)?pools?\b|\bpools?\s+(?:access|view)\b/i,
+    feature: /swimming\s*pools?|private\s*pools?|shared\s*pools?|community\s*pools?|common\s*pools?|\bpools?\b/i,
   },
   {
     id: 'gym',
@@ -544,6 +544,8 @@ function normalizeAmenityId(value) {
     swimming_pools: 'swimming_pool',
     private_pool: 'swimming_pool',
     shared_pool: 'swimming_pool',
+    community_pool: 'swimming_pool',
+    common_pool: 'swimming_pool',
     fitness: 'gym',
     fitness_center: 'gym',
     fitness_centre: 'gym',
@@ -593,6 +595,35 @@ function amenityFeatureRegex(id) {
   return AMENITY_BY_ID[id]?.feature || null;
 }
 
+function propertyMatchesAmenities(property = {}, amenities = []) {
+  const required = normalizeAmenityList(amenities);
+  if (!required.length) return true;
+  const features = Array.isArray(property.features)
+    ? property.features
+    : typeof property.features === 'string'
+      ? String(property.features).split(/[,|;]+/)
+      : [];
+  const blob = [
+    features.join(' '),
+    property.propertyTitle,
+    property.propertyDescription,
+    property.title,
+    ...(Array.isArray(property.cardFeatures) ? property.cardFeatures : []),
+  ]
+    .map((v) => String(v || ''))
+    .join(' ');
+  return required.every((id) => {
+    const re = amenityFeatureRegex(id) || new RegExp(String(id).replace(/_/g, '\\s*'), 'i');
+    return re.test(blob);
+  });
+}
+
+function filterPropertiesByAmenities(properties = [], amenities = []) {
+  const required = normalizeAmenityList(amenities);
+  if (!required.length) return Array.isArray(properties) ? properties.slice() : [];
+  return (properties || []).filter((property) => propertyMatchesAmenities(property, required));
+}
+
 function clearsAllAmenities(text) {
   const raw = String(text || '')
     .trim()
@@ -613,17 +644,22 @@ function clearsAllAmenities(text) {
 
 function parseAmenityRemovals(text) {
   const raw = String(text || '').toLowerCase();
-  if (!raw || !/\b(no|without|remove|drop|exclude)\b/.test(raw)) return [];
+  if (!raw || !/\b(no|without|remove|drop|exclude|clear)\b/.test(raw)) return [];
   const removed = [];
   for (const def of AMENITY_DEFINITIONS) {
     const label = def.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
     const neg = new RegExp(
-      `\\b(no|without|remove|drop|exclude)\\s+(?:a\\s+|an\\s+|the\\s+)?${label}\\b`,
+      `\\b(no|without|remove|drop|exclude|clear)\\s+(?:a\\s+|an\\s+|the\\s+)?${label}(?:\\s+(?:filter|requirement|amenity))?\\b`,
       'i'
     );
     if (neg.test(raw)) removed.push(def.id);
   }
-  if (/\b(no|without)\s+(?:a\s+|an\s+|the\s+)?pools?\b/i.test(raw)) {
+  if (
+    /\b(no|without)\s+(?:a\s+|an\s+|the\s+)?pools?\b/i.test(raw) ||
+    /\b(remove|drop|clear|exclude)\s+(?:the\s+)?(?:swimming[-\s]*)?pool(?:\s+(?:filter|requirement|amenity))?\b/i.test(
+      raw
+    )
+  ) {
     removed.push('swimming_pool');
   }
   return normalizeAmenityList(removed);
@@ -2278,7 +2314,11 @@ function exactNoMatchLine(filters = {}) {
   const loc = hasLocationConstraint(filters) ? ` in ${String(filters.location).trim()}` : '';
   const budget = describeBudgetConstraint(filters);
   const segment = matchingSegmentPhrase(filters);
-  return `I couldn't find any ${segment}${loc}${budget ? ` ${budget}` : ''}.`.replace(/\s+/g, ' ').trim();
+  const amenity = describeAmenitiesClause(filters);
+  const suffix = amenity ? ' matching your current search' : '';
+  return `I couldn't find any ${segment}${amenity}${loc}${budget ? ` ${budget}` : ''}${suffix}.`
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function unconstrainedBudgetLine(count, filters = {}) {
@@ -2377,9 +2417,22 @@ function searchBroadenReply(filters = {}, { budgetHint = false } = {}) {
   if (!budgetHint && !requiresBedroomsForSearch(filters)) {
     parts.unshift('changing your budget');
   }
+  const amenities = normalizeAmenityList(filters.amenities);
+  if (amenities.length === 1) {
+    parts.push(`removing the ${amenityLabel(amenities[0])} requirement`);
+  } else if (amenities.length > 1) {
+    parts.push('removing an amenity filter');
+  }
   if (parts.length === 1) return `I can broaden the search by ${parts[0]}.`;
   if (parts.length === 2) return `I can broaden the search by ${parts[0]} or ${parts[1]}.`;
   return `I can broaden the search by ${parts.slice(0, -1).join(', ')}, or ${parts[parts.length - 1]}.`;
+}
+
+function amenityRemovalOptions(filters = {}) {
+  return normalizeAmenityList(filters.amenities).map((id) => {
+    if (id === 'swimming_pool') return 'Remove swimming pool filter';
+    return `Remove ${amenityLabel(id)} filter`;
+  });
 }
 
 function noAdditionalSegmentReply(filters = {}) {
@@ -5039,6 +5092,7 @@ function resolveMatchingTotal(result = {}, { previewLimited = true } = {}) {
 
 async function fetchPropertyCards(filters, search) {
   const opts = listingQueryOpts(filters, search);
+  const amenities = normalizeAmenityList(filters.amenities);
   const requested = normalizePurpose(filters.purpose);
   if (!requested) {
     return { propertyCards: [], usedPurpose: null, total: 0, remainingAfterExclude: 0 };
@@ -5054,12 +5108,30 @@ async function fetchPropertyCards(filters, search) {
     ? await fetchByPurpose(requested, unfilteredOpts)
     : null;
   const result = await fetchByPurpose(requested, opts);
-  const remainingAfterExclude = resolveMatchingTotal(result, { previewLimited: true }) ?? 0;
-  const total = exclude.length
+  let remainingAfterExclude = resolveMatchingTotal(result, { previewLimited: true }) ?? 0;
+  let total = exclude.length
     ? resolveMatchingTotal(unfiltered, { previewLimited: true }) ?? remainingAfterExclude
     : remainingAfterExclude;
+
+  let properties = result.properties || [];
+  if (amenities.length) {
+    const verified = filterPropertiesByAmenities(properties, amenities);
+    const dropped = properties.length - verified.length;
+    properties = verified;
+    // Never surface cards that fail the active amenity requirements.
+    if (dropped > 0) {
+      remainingAfterExclude = Math.max(0, remainingAfterExclude - dropped);
+      total = Math.max(0, total - dropped);
+    }
+    if (properties.length === 0 && (result.properties || []).length > 0) {
+      // Page failed verification — do not claim unmatched inventory.
+      remainingAfterExclude = 0;
+      total = 0;
+    }
+  }
+
   return {
-    propertyCards: dedupePropertyCards((result.properties || []).map(toPropertyCard)),
+    propertyCards: dedupePropertyCards(properties.map(toPropertyCard)),
     usedPurpose: requested,
     total,
     remainingAfterExclude,
@@ -5335,7 +5407,8 @@ function noInventoryOptions(filters = {}) {
   if (requiresBedroomsForSearch(filters)) opts.push('Change bedrooms');
   opts.push('Property type');
   if (!requiresBedroomsForSearch(filters)) opts.push('Change budget');
-  return opts;
+  opts.push(...amenityRemovalOptions(filters));
+  return opts.filter((opt, i, arr) => arr.indexOf(opt) === i);
 }
 
 function userBudgetBelowSegmentMin(filters = {}, stats = {}) {
@@ -5611,12 +5684,18 @@ async function buildAlternativeChips(effectiveFilters, { nearbyOnly = false } = 
 function canonicalSearchState(filters = {}) {
   const types = typesFromFilters(filters);
   const listingMode = listingModeFromFilters(filters);
+  const purpose = normalizePurpose(filters.purpose) || null;
+  const intent = purposeToIntent(purpose) || null;
   const minPrice = filters.budgetMin ?? null;
   const maxPrice = filters.budgetMax ?? null;
+  let transaction = null;
+  if (purpose === 'Rent') transaction = 'rent';
+  else if (purpose === 'Buy' || purpose === 'Off-plan') transaction = 'buy';
   return {
+    transaction,
     listingMode,
-    intent: purposeToIntent(filters.purpose) || null,
-    purpose: normalizePurpose(filters.purpose) || null,
+    intent,
+    purpose,
     category: searchCategory(filters),
     propertyType: types[0] || filters.type || null,
     propertyTypes: types,
@@ -5634,6 +5713,7 @@ function canonicalSearchState(filters = {}) {
     maxBudget: maxPrice,
     budgetProvided: isBudgetProvided(filters),
     furnishing: filters.furnished || null,
+    furnished: filters.furnished || null,
     amenities: normalizeAmenityList(filters.amenities),
   };
 }
@@ -5779,10 +5859,14 @@ function matchingCountSummary(count, filters = {}) {
   const loc = hasLocationConstraint(filters) ? String(filters.location).trim() : '';
   const area = loc ? ` in ${loc}` : '';
   const segment = describeBedsAndType(filters, { plural: n !== 1 });
+  const amenity = describeAmenitiesClause(filters);
   if (purpose === 'Off-plan') {
-    return `I found ${n} off-plan ${segment}${area}.`.replace(/\s+/g, ' ').trim();
+    return `I found ${n} off-plan ${segment}${area}${amenity}.`.replace(/\s+/g, ' ').trim();
   }
   if (purpose === 'Rent') {
+    if (amenity) {
+      return `I found ${n} matching ${segment}${area}.`.replace(/\s+/g, ' ').trim();
+    }
     return `I found ${n} ${segment} for rent${area}.`.replace(/\s+/g, ' ').trim();
   }
   return `I found ${n} matching ${n === 1 ? 'property' : 'properties'}.`;
@@ -5911,7 +5995,11 @@ function composeSearchReply(ctx = {}) {
     }
     const count = Number(ctx.exactMatchCount);
     if (!/you're looking for/i.test(ack)) {
-      lines.push(`Here are ${segment} ${purposeBit}${area}.`.replace(/\s+/g, ' ').trim());
+      lines.push(
+        `Here are ${segment} ${purposeBit}${area}${describeAmenitiesClause(filters)}.`
+          .replace(/\s+/g, ' ')
+          .trim()
+      );
     }
     const summary = matchingCountSummary(count, filters);
     if (summary) lines.push(summary);
@@ -5990,6 +6078,7 @@ function situationActionChips(ctx = {}) {
   opts.push('Change budget');
   opts.push('Property type');
   if (nearby.length) opts.push('Nearby areas');
+  opts.push(...amenityRemovalOptions(filters));
   return opts.filter((v, i, arr) => arr.indexOf(v) === i);
 }
 
@@ -7187,7 +7276,12 @@ module.exports = {
   mergeAmenities,
   amenityLabel,
   describeAmenitiesClause,
+  propertyMatchesAmenities,
+  filterPropertiesByAmenities,
+  amenityRemovalOptions,
   AMENITY_DEFINITIONS,
+  exactNoMatchLine,
+  withOffPlanExploreOption,
   parseOccupancyFromMessage,
   parseSellIntent,
   isSellCta,

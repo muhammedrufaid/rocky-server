@@ -31,6 +31,13 @@ const {
   isContentKnowledgeTopic,
   parseAmenitiesFromMessage,
   clearsAllAmenities,
+  propertyMatchesAmenities,
+  filterPropertiesByAmenities,
+  describeAmenitiesClause,
+  amenityRemovalOptions,
+  canonicalSearchState,
+  exactNoMatchLine,
+  withOffPlanExploreOption,
   isGoldenVisaMention,
   isGoldenVisaPropertySearchIntent,
   isShowGoldenVisaPropertiesAction,
@@ -282,6 +289,87 @@ test('amenity memory survives purpose type bedrooms and any-area answers', () =>
   assert.deepEqual(finalFilters.amenities, ['swimming_pool']);
   assert.deepEqual(listingQueryOpts(finalFilters, '').filters.amenities, ['swimming_pool']);
   assert.match(getSystemPrompt({ intent: null }), /amenities\/features/i);
+});
+
+test('CRITICAL: Rent + Villa + Any bedrooms + Any area keeps swimming_pool and query filters', () => {
+  let step = qualifyListingSearch('Properties with a Swimming Pool', {});
+  assert.deepEqual(step.profilePatch.lastSearchFilters.amenities, ['swimming_pool']);
+
+  step = qualifyListingSearch('Rent', {
+    intent: null,
+    purpose: null,
+    lastSearchFilters: step.profilePatch.lastSearchFilters,
+    slotFlow: step.profilePatch.slotFlow,
+  });
+  assert.equal(step.profilePatch.lastSearchFilters.purpose, 'Rent');
+  assert.deepEqual(step.profilePatch.lastSearchFilters.amenities, ['swimming_pool']);
+
+  step = qualifyListingSearch('Villa', {
+    intent: CONVERSATION_INTENTS.RENT,
+    purpose: 'Rent',
+    lastSearchFilters: step.profilePatch.lastSearchFilters,
+    slotFlow: step.profilePatch.slotFlow,
+  });
+  assert.deepEqual(step.profilePatch.lastSearchFilters.types, ['Villa']);
+  assert.deepEqual(step.profilePatch.lastSearchFilters.amenities, ['swimming_pool']);
+
+  step = qualifyListingSearch('Any', {
+    intent: CONVERSATION_INTENTS.RENT,
+    purpose: 'Rent',
+    lastSearchFilters: step.profilePatch.lastSearchFilters,
+    slotFlow: step.profilePatch.slotFlow,
+  });
+  assert.equal(step.profilePatch.lastSearchFilters.bedrooms, null);
+  assert.equal(step.profilePatch.lastSearchFilters.bedroomsAny, true);
+  assert.deepEqual(step.profilePatch.lastSearchFilters.types, ['Villa']);
+  assert.deepEqual(step.profilePatch.lastSearchFilters.amenities, ['swimming_pool']);
+
+  step = qualifyListingSearch('Any area', {
+    intent: CONVERSATION_INTENTS.RENT,
+    purpose: 'Rent',
+    lastSearchFilters: step.profilePatch.lastSearchFilters,
+    slotFlow: step.profilePatch.slotFlow,
+  });
+  const finalFilters = step.profilePatch.lastSearchFilters;
+  assert.equal(finalFilters.purpose, 'Rent');
+  assert.deepEqual(finalFilters.types, ['Villa']);
+  assert.equal(finalFilters.bedrooms, null);
+  assert.equal(finalFilters.location, null);
+  assert.equal(finalFilters.locationAny, true);
+  assert.deepEqual(finalFilters.amenities, ['swimming_pool']);
+
+  const state = canonicalSearchState(finalFilters);
+  assert.equal(state.transaction, 'rent');
+  assert.equal(state.propertyType, 'Villa');
+  assert.equal(state.bedrooms, 'any');
+  assert.equal(state.location, null);
+  assert.ok(state.amenities.includes('swimming_pool'));
+  assert.equal(state.listingMode, LISTING_MODES.READY_RENT);
+
+  const query = listingQueryOpts(finalFilters, '');
+  assert.equal(query.filters.amenities.includes('swimming_pool'), true);
+  assert.deepEqual(query.filters.propertyType, ['Villa']);
+
+  assert.equal(
+    propertyMatchesAmenities(
+      { features: ['Shared Pool', 'Maid'], propertyTitle: 'Luxury villa', propertyDescription: '' },
+      ['swimming_pool']
+    ),
+    true
+  );
+  assert.equal(
+    propertyMatchesAmenities(
+      { features: ['Gym', 'Parking'], propertyTitle: 'Villa for rent', propertyDescription: 'Bright living room' },
+      ['swimming_pool']
+    ),
+    false
+  );
+
+  const heading = `Here are villas for rent${describeAmenitiesClause(finalFilters)}.`;
+  assert.match(heading, /villas for rent with a swimming pool/i);
+  assert.match(exactNoMatchLine(finalFilters), /villas for rent with a swimming pool matching your current search/i);
+  assert.ok(amenityRemovalOptions(finalFilters).includes('Remove swimming pool filter'));
+  assert.ok(!withOffPlanExploreOption(['Change budget'], { filters: finalFilters, inventoryCounts: { offPlanCount: 5 } }).some((o) => /off-plan/i.test(o)));
 });
 
 test('search memory rule: each action patches only the requested field', () => {
