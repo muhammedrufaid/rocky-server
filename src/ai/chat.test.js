@@ -26,6 +26,14 @@ const {
   parseSellServiceLocationChoice,
   sellServiceLocationReply,
   isGeneralKnowledgeQuery,
+  isGoldenVisaMention,
+  isGoldenVisaPropertySearchIntent,
+  isShowGoldenVisaPropertiesAction,
+  parseGoldenVisaMinInvestment,
+  applyGoldenVisaSearchDefaults,
+  goldenVisaInfoOptions,
+  GOLDEN_VISA_MIN_AED,
+  GOLDEN_VISA_INFO_OPTIONS,
   isServiceInquiryMessage,
   serviceContactPromptBlock,
   serviceContactReply,
@@ -154,6 +162,7 @@ test('sell is not treated as buy search', () => {
 test('content questions skip property search (flexi rent, summer, golden visa)', () => {
   for (const phrase of [
     'golden visa eligibility',
+    'How do I get a Golden Visa?',
     'flexi rent',
     'how can we manage our property in summer',
     'is summer the best option to invest in dubai?',
@@ -168,6 +177,107 @@ test('content questions skip property search (flexi rent, summer, golden visa)',
     assert.equal(isListingFollowUp(phrase), false, phrase);
     assert.equal(isServiceInquiryMessage(phrase), false, phrase);
   }
+});
+
+test('Golden Visa property requests search BUY from AED 2M and preserve memory', async (t) => {
+  for (const phrase of [
+    'show me properties for Golden Visa',
+    'I need to get a Golden Visa, so show me properties I can buy',
+    'which properties qualify for Golden Visa',
+    'Golden Visa properties',
+    'Show Golden Visa properties',
+    'AED 2M Golden Visa properties',
+    'properties suitable for Golden Visa eligibility',
+  ]) {
+    assert.equal(isGoldenVisaMention(phrase), true, phrase);
+    assert.equal(isGoldenVisaPropertySearchIntent(phrase), true, phrase);
+    assert.equal(shouldSkipPropertySearch(phrase), false, phrase);
+    assert.equal(isListingFollowUp(phrase), true, phrase);
+  }
+  assert.equal(isGoldenVisaPropertySearchIntent('How do I get a Golden Visa?'), false);
+  assert.equal(isShowGoldenVisaPropertiesAction('Show Golden Visa properties'), true);
+  assert.equal(parseGoldenVisaMinInvestment('I want Golden Visa properties above AED 3M'), 3_000_000);
+  assert.equal(parseGoldenVisaMinInvestment('show Golden Visa properties'), GOLDEN_VISA_MIN_AED);
+  assert.deepEqual(goldenVisaInfoOptions(), GOLDEN_VISA_INFO_OPTIONS);
+
+  const profile = {
+    intent: CONVERSATION_INTENTS.RENT,
+    purpose: 'Rent',
+    lastSearchFilters: {
+      ...emptySearchFilters(),
+      purpose: 'Rent',
+      location: 'Dubai Marina',
+      type: 'Apartment',
+      types: ['Apartment'],
+      bedrooms: 2,
+      bedroomsResolved: true,
+      budgetMax: 150000,
+      budgetProvided: true,
+    },
+    slotFlow: { awaiting: null },
+  };
+
+  const qualified = qualifyListingSearch('I need Golden Visa properties.', profile);
+  assert.equal(qualified.type, 'continue');
+  const next = qualified.profilePatch.lastSearchFilters;
+  assert.equal(next.purpose, 'Buy');
+  assert.equal(qualified.profilePatch.intent, CONVERSATION_INTENTS.BUY);
+  assert.equal(next.budgetMin, GOLDEN_VISA_MIN_AED);
+  assert.equal(next.budgetMax, null);
+  assert.equal(next.budgetProvided, true);
+  assert.equal(next.goldenVisaSearch, true);
+  assert.equal(next.location, 'Dubai Marina');
+  assert.equal(next.type, 'Apartment');
+  assert.equal(next.bedrooms, 2);
+
+  const higher = qualifyListingSearch('I want Golden Visa properties above AED 3M', profile);
+  assert.equal(higher.profilePatch.lastSearchFilters.budgetMin, 3_000_000);
+  assert.equal(higher.profilePatch.lastSearchFilters.budgetMax, null);
+
+  const chip = qualifyListingSearch('Show Golden Visa properties', profile);
+  assert.equal(chip.type, 'continue');
+  assert.equal(chip.profilePatch.lastSearchFilters.budgetMin, GOLDEN_VISA_MIN_AED);
+
+  t.mock.method(propertyDbService, 'fetchBuyProperties', async (opts = {}) => {
+    assert.equal(opts.filters?.priceMin, GOLDEN_VISA_MIN_AED);
+    assert.equal(opts.filters?.priceMax, undefined);
+    return {
+      properties: [
+        sampleBuyApartment({
+          propertyRefNo: 'GV-1',
+          price: 'AED 2,400,000',
+          community: 'Dubai Marina',
+        }),
+      ],
+      total: 8,
+    };
+  });
+  t.mock.method(propertyDbService, 'countProperties', async () => 21);
+  t.mock.method(propertyDbService, 'getPropertyMarketStats', async () => ({
+    minimumPrice: 2_100_000,
+    averagePrice: 3_200_000,
+    totalAvailable: 8,
+  }));
+
+  const result = await executeTool(
+    'search_properties',
+    {},
+    {
+      lastSearchFilters: next,
+      userMessage: 'I need Golden Visa properties.',
+      intent: CONVERSATION_INTENTS.BUY,
+      shownPropertyIds: [],
+    }
+  );
+  assert.equal(result.searchOutcome, SEARCH_OUTCOME.MATCHES_FOUND);
+  assert.equal((result.propertyCards || []).length, 1);
+  assert.equal(result.effectiveFilters.budgetMin, GOLDEN_VISA_MIN_AED);
+  assert.equal(result.effectiveFilters.budgetMax, null);
+  assert.equal(result.effectiveFilters.purpose, 'Buy');
+  assert.match(result.replyOverride || '', /AED 2M|AED 2,000,000|2 million/i);
+  assert.equal(/can't pull live property listings/i.test(result.replyOverride || ''), false);
+  assert.equal(/Golden Visa approved/i.test(result.replyOverride || ''), false);
+  assert.equal(/Golden Visa qualified/i.test(result.replyOverride || ''), false);
 });
 
 test('listing follow-ups still search', () => {

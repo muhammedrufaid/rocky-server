@@ -417,6 +417,7 @@ function emptySearchFilters() {
     types: [],
     purpose: null,
     furnished: null,
+    goldenVisaSearch: false,
   };
 }
 
@@ -506,6 +507,7 @@ function copySearchFilters(filters = {}) {
     types,
     purpose: filters.purpose || null,
     furnished: filters.furnished || null,
+    goldenVisaSearch: filters.goldenVisaSearch === true,
   };
 }
 
@@ -2748,11 +2750,91 @@ function isServicesCatalogQuestion(text) {
   );
 }
 
+const GOLDEN_VISA_MIN_AED = 2_000_000;
+const GOLDEN_VISA_INFO_OPTIONS = ['Show Golden Visa properties', 'Read investor visa guide'];
+
+function isGoldenVisaMention(text) {
+  return /\b(golden\s+visa|investor\s+visa|10[-\s]?year\s+(?:golden\s+)?visa)\b/i.test(
+    String(text || '')
+  );
+}
+
+function isShowGoldenVisaPropertiesAction(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  if (!raw) return false;
+  return (
+    /^show golden visa properties$/.test(raw) ||
+    /^show me golden visa properties$/.test(raw) ||
+    /^golden visa properties$/.test(raw) ||
+    /^find golden visa properties$/.test(raw)
+  );
+}
+
+function isReadInvestorVisaGuideAction(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  return /^read investor visa guide$/.test(raw) || /^investor visa guide$/.test(raw);
+}
+
+/** True when the visitor wants listings for Golden Visa investment — not info-only. */
+function isGoldenVisaPropertySearchIntent(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  if (isShowGoldenVisaPropertiesAction(raw)) return true;
+  if (!isGoldenVisaMention(raw)) return false;
+  const lower = raw.toLowerCase();
+  const asksHowOnly =
+    /\b(how\s+(?:do|can|to)\s+(?:i|we)\s+get|what\s+is|what\s+are|eligibility|requirements?|tell\s+me\s+about|explain)\b/.test(
+      lower
+    ) && !/\b(show|find|search|see|buy|purchase|propert(?:y|ies)|homes?|listings?|options)\b/.test(lower);
+  if (asksHowOnly) return false;
+  return (
+    /\b(show|find|search|see|buy|purchase|invest(?:ment|ing)?|list(?:ings?)?|options)\b/.test(lower) ||
+    /\b(propert(?:y|ies)|homes?|apartments?|villas?|townhouses?)\b/.test(lower) ||
+    /\b(qualif(?:y|ying|ies)|suitable|eligible)\b/.test(lower) ||
+    /\baed\s*[\d.,]+\s*[mk]?\b/.test(lower) ||
+    /\b[\d.,]+\s*[mk]\b/.test(lower)
+  );
+}
+
+function parseGoldenVisaMinInvestment(text) {
+  const budget = parseBudgetFromMessage(text, { requireBudgetContext: false });
+  if (budget?.budgetMin != null) {
+    const n = Number(budget.budgetMin);
+    if (Number.isFinite(n) && n >= GOLDEN_VISA_MIN_AED) return n;
+  }
+  return GOLDEN_VISA_MIN_AED;
+}
+
+function applyGoldenVisaSearchDefaults(filters, message = '') {
+  if (!filters) return filters;
+  const min = parseGoldenVisaMinInvestment(message);
+  filters.purpose = 'Buy';
+  filters.budgetProvided = true;
+  filters.budgetMin = min;
+  filters.goldenVisaSearch = true;
+  const max = budgetNumber(filters.budgetMax);
+  if (max != null && max <= min) filters.budgetMax = null;
+  return filters;
+}
+
+function goldenVisaInfoOptions() {
+  return GOLDEN_VISA_INFO_OPTIONS.slice();
+}
+
 function isContentKnowledgeTopic(text) {
   const raw = String(text || '')
     .trim()
     .toLowerCase();
   if (!raw) return false;
+  // Golden Visa listing requests are property search, not content-only.
+  if (isGoldenVisaPropertySearchIntent(raw)) return false;
+  if (isReadInvestorVisaGuideAction(raw)) return true;
   if (/\b(show|find|search)\s+(me\s+)?(villas?|apartments?|townhouses?|properties|homes?|listings?)\b/.test(raw)) {
     return false;
   }
@@ -3154,6 +3236,10 @@ function joinAckAndQuestion(acknowledgement, question) {
 function buildSearchAcknowledgement(next = {}, { previous = {}, message = '' } = {}) {
   if (isShowMoreRequest(message)) return '';
   if (parseEmptyResultChoice(message)?.budget) return '';
+  if (next.goldenVisaSearch && (isGoldenVisaPropertySearchIntent(message) || isShowGoldenVisaPropertiesAction(message))) {
+    const minLabel = formatAed(next.budgetMin || GOLDEN_VISA_MIN_AED);
+    return `Certainly. Based on Rocky Real Estate's current investor visa guide, the property investment threshold for the 10-year Golden Visa is ${minLabel}.`;
+  }
   if (isBudgetOnlyFollowUp(previous, next, message)) {
     return budgetKeepAcknowledgement(next);
   }
@@ -3504,6 +3590,7 @@ function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
     budgetProvided: last.budgetProvided === true,
     furnished: coalesceFilter(filters.furnished, last.furnished),
     purpose: last.purpose || null,
+    goldenVisaSearch: last.goldenVisaSearch === true || filters.goldenVisaSearch === true,
   };
   if (locationProvided) merged.locationAny = false;
   applyTypesToFilters(merged, preservedTypes);
@@ -3557,6 +3644,7 @@ function isListingFollowUp(text) {
   if (!raw) return false;
   if (isPropertyUiAction(raw)) return false;
   if (parseSellIntent(raw) || isSellCta(raw)) return false;
+  if (isGoldenVisaPropertySearchIntent(raw) || isShowGoldenVisaPropertiesAction(raw)) return true;
   if (isContentKnowledgeTopic(raw)) return false;
   if (isMultiPropertyServiceQuery(raw) || matchesServiceInquiryPhrase(raw)) return false;
   if (parsePurposeFromMessage(raw)) return true;
@@ -3944,6 +4032,23 @@ function extractSearchPatch(message, previous = {}, { awaiting } = {}) {
   // UI action — do not treat as a bedroom/budget/location patch.
   if (isChangeBedroomsAction(raw)) return changes;
 
+  if (isGoldenVisaPropertySearchIntent(raw) || isShowGoldenVisaPropertiesAction(raw)) {
+    changes.purpose = 'Buy';
+    changes.goldenVisaSearch = true;
+    const explicitBudget = parseBudgetFromMessage(message, {
+      requireBudgetContext: awaiting === 'budget',
+    });
+    const min =
+      explicitBudget?.budgetMin != null && Number(explicitBudget.budgetMin) >= GOLDEN_VISA_MIN_AED
+        ? Number(explicitBudget.budgetMin)
+        : GOLDEN_VISA_MIN_AED;
+    const max =
+      explicitBudget?.budgetMax != null && Number(explicitBudget.budgetMax) > min
+        ? Number(explicitBudget.budgetMax)
+        : null;
+    changes.budget = { budgetMin: min, budgetMax: max };
+  }
+
   if (shouldTreatMessageAsAnyBudget(previous, message, awaiting)) {
     changes.budget = { any: true };
     const purposeOnly = parsePurposeFromMessage(message, previous);
@@ -3967,9 +4072,11 @@ function extractSearchPatch(message, previous = {}, { awaiting } = {}) {
     skipBedsForAnyReply && awaiting !== 'location' && awaiting !== 'nearbyArea';
   if (skipLocationForAnyReply) location = null;
   const beds = skipBedsForLocationAny || skipBedsForAnyReply ? null : parseBedroomChoice(message);
-  const budget = parseBudgetFromMessage(message, { requireBudgetContext: awaiting === 'budget' });
+  const budget = changes.budget
+    ? null
+    : parseBudgetFromMessage(message, { requireBudgetContext: awaiting === 'budget' });
   const furnished = parseFurnishedFromMessage(message);
-  const purpose = parsePurposeFromMessage(message, previous);
+  const purpose = changes.purpose || parsePurposeFromMessage(message, previous);
 
   if (types.length) {
     const current = typesFromFilters(previous);
@@ -4014,6 +4121,10 @@ function mergeSearchPatch(previous, patch, message = '') {
   if (changes.budget) applyBudgetChoice(next, changes.budget);
   if (changes.furnished) next.furnished = changes.furnished;
   if (changes.purpose) next.purpose = changes.purpose;
+  if (changes.goldenVisaSearch) {
+    next.goldenVisaSearch = true;
+    applyGoldenVisaSearchDefaults(next, message);
+  }
   return next;
 }
 
@@ -4021,9 +4132,14 @@ function applyMessageToSearchFilters(filters, message, { awaiting } = {}) {
   const previous = copySearchFilters(filters);
   const patch = extractSearchPatch(message, previous, { awaiting });
   const next = mergeSearchPatch(previous, patch, message);
-  return normalizeSearchProfileAfterPatch(previous, next, {
+  const normalized = normalizeSearchProfileAfterPatch(previous, next, {
     explicitPurpose: !!patch.purpose || isPurposeChipReply(message),
   });
+  // Purpose switches clear budgets — restore Golden Visa floor after that wipe.
+  if (patch.goldenVisaSearch || isGoldenVisaPropertySearchIntent(message) || isShowGoldenVisaPropertiesAction(message)) {
+    applyGoldenVisaSearchDefaults(normalized, message);
+  }
+  return normalized;
 }
 
 function listingIntakeReply(intent) {
@@ -5037,6 +5153,10 @@ function matchingCountSummary(count, filters = {}) {
   const n = Number(count);
   if (!Number.isFinite(n) || n <= 0) return '';
   const purpose = normalizePurpose(filters.purpose);
+  if (filters.goldenVisaSearch) {
+    const minLabel = formatAed(filters.budgetMin || GOLDEN_VISA_MIN_AED);
+    return `I found ${n} properties currently listed from ${minLabel} that fit this investment range.`;
+  }
   if (purpose === 'Buy') {
     return `I found ${n} ready ${n === 1 ? 'property' : 'properties'} for sale.`;
   }
@@ -5056,7 +5176,16 @@ function alternativeInventoryLine(ctx = {}) {
   const purpose = normalizePurpose(ctx.filters?.purpose);
   const offPlanCount = Number(ctx.inventoryCounts?.offPlanCount);
   if (purpose !== 'Buy' || !Number.isFinite(offPlanCount) || offPlanCount <= 0) return '';
-  const loc = hasLocationConstraint(ctx.filters) ? String(ctx.filters.location).trim() : '';
+  const filters = ctx.filters || {};
+  if (filters.goldenVisaSearch) {
+    const ready = Number(ctx.exactMatchCount);
+    const minLabel = formatAed(filters.budgetMin || GOLDEN_VISA_MIN_AED);
+    if (Number.isFinite(ready) && ready > 0) {
+      return `I found ${ready} ready properties from ${minLabel} and ${offPlanCount} off-plan options from ${minLabel}.`;
+    }
+    return `There are also ${offPlanCount} off-plan options from ${minLabel}.`;
+  }
+  const loc = hasLocationConstraint(filters) ? String(filters.location).trim() : '';
   const where = loc ? ` in ${loc}` : '';
   return `There are also ${offPlanCount} off-plan option${offPlanCount === 1 ? '' : 's'}${where} if you'd like to explore them.`;
 }
@@ -5150,6 +5279,29 @@ function composeSearchReply(ctx = {}) {
   }
 
   if (ctx.outcome === SEARCH_OUTCOME.MATCHES_FOUND) {
+    if (filters.goldenVisaSearch) {
+      const count = Number(ctx.exactMatchCount);
+      const offPlanCount = Number(ctx.inventoryCounts?.offPlanCount) || 0;
+      const minLabel = formatAed(filters.budgetMin || GOLDEN_VISA_MIN_AED);
+      if (!ack) {
+        lines.push(
+          `Certainly. Based on Rocky Real Estate's current investor visa guide, the property investment threshold for the 10-year Golden Visa is ${formatAed(GOLDEN_VISA_MIN_AED)}.`
+        );
+      }
+      if (Number.isFinite(count) && count > 0 && offPlanCount > 0) {
+        lines.push(
+          `I found ${count} ready properties from ${minLabel} and ${offPlanCount} off-plan options from ${minLabel}.`
+        );
+      } else {
+        const summary = matchingCountSummary(count, filters);
+        if (summary) lines.push(summary);
+      }
+      lines.push(
+        `These properties meet the ${minLabel} minimum property-value filter used for this Golden Visa property search. Final visa eligibility remains subject to the applicable ownership and authority requirements.`
+      );
+      lines.push('Would you like me to narrow these by area, property type, or bedroom count?');
+      return stripExposedUrlsFromReply(lines.filter(Boolean).join('\n\n').replace(/\n\n+/g, '\n\n'));
+    }
     const count = Number(ctx.exactMatchCount);
     if (!/you're looking for/i.test(ack)) {
       lines.push(`Here are ${segment} ${purposeBit}${area}.`.replace(/\s+/g, ' ').trim());
@@ -6469,6 +6621,15 @@ module.exports = {
   isListingFollowUp,
   isGeneralKnowledgeQuery,
   isContentKnowledgeTopic,
+  isGoldenVisaMention,
+  isGoldenVisaPropertySearchIntent,
+  isShowGoldenVisaPropertiesAction,
+  isReadInvestorVisaGuideAction,
+  parseGoldenVisaMinInvestment,
+  applyGoldenVisaSearchDefaults,
+  goldenVisaInfoOptions,
+  GOLDEN_VISA_MIN_AED,
+  GOLDEN_VISA_INFO_OPTIONS,
   isNonPlaceLocationToken,
   shouldSkipPropertySearch,
   isVagueConfirm,
