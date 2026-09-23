@@ -20,7 +20,7 @@ const {
   buildViewingLeadIntent,
   logViewingDebug,
 } = require('./chat.tools');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, shouldResetOnListingIntent, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, isChangeBedroomsAction, bedroomChangeQuestion, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion, listingSearchResetPatch, isExplicitSearchReset, hasInProgressListingSearch, hasActiveListingSearch, isCurrentListingReference, buildSearchAcknowledgement, joinAckAndQuestion, stripExposedUrlsFromReply } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, shouldResetOnListingIntent, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, isChangeBedroomsAction, bedroomChangeQuestion, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion, listingSearchResetPatch, isExplicitSearchReset, hasInProgressListingSearch, hasActiveListingSearch, isCurrentListingReference, buildSearchAcknowledgement, joinAckAndQuestion, stripExposedUrlsFromReply } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -45,12 +45,27 @@ function synthesizeContentReply(chunks = [], sources = []) {
     const title = String(first.title || '').trim();
     if (excerpt) {
       return title
-        ? `${excerpt}. Would you like more details from “${title}”?`
+        ? `${excerpt}. You can read more in “${title}” — would you like more details?`
         : `${excerpt}. Would you like more details?`;
     }
   }
   if ((sources || []).length) {
-    return 'I found related information for you — see the links below. Would you like more details?';
+    const title = String(sources[0].title || '').trim();
+    return title
+      ? `Here’s what Rocky covers on this in “${title}”. Would you like more details?`
+      : 'Here’s related Rocky information for you — see the links below. Would you like more details?';
+  }
+  return '';
+}
+
+function contentReplyOrFallback(chunks = [], sources = [], usedSearchContent = false) {
+  const fromContent = synthesizeContentReply(chunks, sources);
+  if (fromContent) return fromContent;
+  if ((chunks || []).length || (sources || []).length) {
+    return 'I found related Rocky information for you — see the links below. Would you like more details?';
+  }
+  if (usedSearchContent) {
+    return "I don't have a Rocky article that directly covers that. In general for Dubai real estate, requirements can change — please verify with the relevant authority. Would you like help finding properties or speaking with an agent?";
   }
   return '';
 }
@@ -1697,11 +1712,15 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
 
   const snapshotMeta = () => metaFromLoopState(propertyCards, sources, viewAllMatching, presentation);
 
-  const completionParams = (forceContentAnswer, contentOnlyReply, hasToolResults) => ({
+  const completionParams = (forceContentAnswer, contentOnlyReply, hasToolResults, forceSearchContent) => ({
     model,
     messages,
     tools: TOOL_DEFINITIONS,
-    tool_choice: forceContentAnswer ? 'none' : 'auto',
+    tool_choice: forceContentAnswer
+      ? 'none'
+      : forceSearchContent
+        ? { type: 'function', function: { name: 'search_content' } }
+        : 'auto',
     max_completion_tokens: contentOnlyReply
       ? CONTENT_REPLY_MAX_TOKENS
       : hasToolResults
@@ -1710,9 +1729,19 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
     reasoning_effort: reasoningEffort,
   });
 
-  async function createAssistantMessage({ forceContentAnswer, contentOnlyReply, hasToolResults }) {
+  async function createAssistantMessage({
+    forceContentAnswer,
+    contentOnlyReply,
+    hasToolResults,
+    forceSearchContent,
+  }) {
     throwIfAborted(abortSignal);
-    const params = completionParams(forceContentAnswer, contentOnlyReply, hasToolResults);
+    const params = completionParams(
+      forceContentAnswer,
+      contentOnlyReply,
+      hasToolResults,
+      forceSearchContent
+    );
     const requestOptions = abortSignal ? { signal: abortSignal } : undefined;
 
     if (!streamEnabled) {
@@ -1778,13 +1807,23 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
     const hasToolResults = messages.some((m) => m.role === 'tool');
     const contentOnlyReply =
       hasToolResults && usedSearchContent && !usedSearchProperties && propertyCards.length === 0;
-    // After a successful content search, force a text answer — models otherwise re-call
+    // After search_content (hits or empty), force a text answer — models otherwise re-call
     // search_content until MAX_TOOL_ROUNDS and the user sees "could not finish".
-    const forceContentAnswer = contentOnlyReply && searchContentHits > 0;
+    const forceContentAnswer = contentOnlyReply;
+    const forceSearchContent =
+      round === 0 &&
+      !usedSearchContent &&
+      !usedSearchProperties &&
+      (isContentKnowledgeTopic(userMessage) || isGeneralKnowledgeQuery(userMessage)) &&
+      !isListingFollowUp(userMessage) &&
+      !isShowMoreRequest(userMessage) &&
+      !isPropertyUiAction(userMessage) &&
+      !isBookViewingAction(userMessage);
     const msg = await createAssistantMessage({
       forceContentAnswer,
       contentOnlyReply,
       hasToolResults,
+      forceSearchContent,
     });
     if (!msg) {
       throw new Error('Empty response from OpenAI');
@@ -1796,7 +1835,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
     if (!toolCalls || !toolCalls.length) {
       let reply = String(msg.content || '').trim();
       if (!reply && usedSearchContent) {
-        reply = synthesizeContentReply(lastContentChunks, sources) || FRIENDLY_CHAT_ERROR;
+        reply = contentReplyOrFallback(lastContentChunks, sources, true) || FRIENDLY_CHAT_ERROR;
       }
       if (!reply) {
         reply = FRIENDLY_CHAT_ERROR;
@@ -1836,7 +1875,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
             count: lastContentChunks.length,
             chunks: lastContentChunks,
             instruction:
-              'You already have matching content. Do NOT call tools again. Answer the visitor now in at most 2 short sentences.',
+              'You already have matching Rocky content. Do NOT call tools again. Answer the visitor now from those chunks in at most 2 short sentences. Do not ask to pull up the article and do not claim a fetch hiccup.',
           }),
         });
         continue;
@@ -2002,7 +2041,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
 
   // Max rounds exhausted — still return useful content if we have it
   const fallbackReply =
-    synthesizeContentReply(lastContentChunks, sources) ||
+    contentReplyOrFallback(lastContentChunks, sources, usedSearchContent) ||
     (usedSearchContent
       ? FRIENDLY_CHAT_ERROR
       : 'Sorry, I could not finish that just now. Please try again.');

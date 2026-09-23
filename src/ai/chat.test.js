@@ -4,6 +4,7 @@
  */
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { getSystemPrompt } = require('./chat.prompt');
 const {
   parseSellIntent,
   parsePurposeFromMessage,
@@ -39,6 +40,9 @@ const {
   parseDesiredPropertyType,
   parsePropertyTypeChange,
   rankRelatedContentSources,
+  contentSearchKeywords,
+  mergeContentSearchRows,
+  contentAnswerInstruction,
   isHomepageUrl,
   emptyResultsReply,
   foundListingsReply,
@@ -329,6 +333,74 @@ test('related buttons come only from embedding hits', () => {
   assert.equal(ranked[0].url, 'https://www.rockyrealestate.com/blogs/summer-proof-home-dubai');
   assert.equal(ranked[1].url, 'https://www.rockyrealestate.com/services/property-management');
   assert.equal(ranked.every((s) => !isHomepageUrl(s.url)), true);
+});
+
+test('content search keywords drop stop words and keep topic tokens', () => {
+  assert.deepEqual(contentSearchKeywords('What is the Dubai Golden Visa eligibility?'), [
+    'golden',
+    'visa',
+    'eligibility',
+  ]);
+  assert.equal(contentSearchKeywords('a the to').length, 0);
+});
+
+test('content search merge prefers higher score and dedupes by source', () => {
+  const merged = mergeContentSearchRows(
+    [
+      {
+        sourceType: 'blog',
+        sourceId: '1',
+        title: 'Golden Visa',
+        url: 'https://www.rockyrealestate.com/blogs/golden-visa',
+        content: 'vector hit',
+        score: 0.8,
+      },
+    ],
+    [
+      {
+        sourceType: 'blog',
+        sourceId: '1',
+        title: 'Golden Visa',
+        url: 'https://www.rockyrealestate.com/blogs/golden-visa',
+        content: 'keyword hit',
+        score: 0.92,
+      },
+      {
+        sourceType: 'faq',
+        sourceId: '2',
+        title: 'Visa FAQ',
+        url: 'https://www.rockyrealestate.com/faqs/visa',
+        content: 'faq',
+        score: 0.7,
+      },
+    ],
+    5
+  );
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].sourceId, '1');
+  assert.equal(merged[0].score, 0.92);
+  assert.equal(merged[0].content, 'keyword hit');
+  assert.equal(merged[1].sourceId, '2');
+});
+
+test('content answer instruction prioritizes Rocky hits and forbids pull-up/hiccup', () => {
+  const withHits = contentAnswerInstruction(true);
+  assert.match(withHits, /Rocky internal content was found/i);
+  assert.match(withHits, /priority over generic/i);
+  assert.match(withHits, /Do NOT ask permission to pull up/i);
+  assert.match(withHits, /hiccup/i);
+  const withoutHits = contentAnswerInstruction(false);
+  assert.match(withoutHits, /No sufficiently relevant Rocky/i);
+  assert.match(withoutHits, /Do NOT claim the answer came from Rocky/i);
+  assert.match(withoutHits, /verified with the relevant authority/i);
+});
+
+test('system prompt encodes Rocky knowledge-retrieval priority', () => {
+  const prompt = getSystemPrompt({});
+  assert.match(prompt, /KNOWLEDGE RETRIEVAL/i);
+  assert.match(prompt, /MUST call search_content first/i);
+  assert.match(prompt, /Would you like me to pull up the Rocky article/i);
+  assert.match(prompt, /Internal Rocky content has priority/i);
 });
 
 // --- Sell flow ---
