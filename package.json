@@ -7,7 +7,10 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "test": "node --test src/ai/chat.test.js",
-    "migrate:area-guides": "node scripts/migrateAreaGuides.js"
+    "migrate:area-guides": "node scripts/migrateAreaGuides.js",
+    "migrate:cleanup-legacy-property-fields": "node scripts/cleanupLegacyPropertyFields.js",
+    "migrate:cleanup-legacy-property-fields:dry-run": "node scripts/cleanupLegacyPropertyFields.js --dry-run",
+    "migrate:cleanup-legacy-property-fields:validate": "node scripts/cleanupLegacyPropertyFields.js --validate"
   },
   "keywords": [],
   "author": "",

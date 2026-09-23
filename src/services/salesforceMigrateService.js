@@ -1,6 +1,5 @@
 const crypto = require('crypto');
 const Property = require('../models/Property');
-const PropertyEmbedding = require('../models/PropertyEmbedding');
 const propertyService = require('./propertyService');
 const {
   syncAllAreaGuideAgentOrders,
@@ -61,7 +60,8 @@ const buildBulkUpserts = ({ properties }) => {
             portals: Array.isArray(p.portals) ? p.portals : [],
             images: Array.isArray(p.images) ? p.images : [],
           },
-          // Cleanup legacy duplicated fields from earlier schema/migrations.
+          // Cleanup legacy duplicated / denormalized fields from earlier schemas.
+          // Keep stripping embeddings so vectors never reappear on properties docs.
           $unset: {
             source: '',
             data: '',
@@ -71,6 +71,16 @@ const buildBulkUpserts = ({ properties }) => {
             updatedAt: '',
             embedding: '',
             embeddingHash: '',
+            currencyNormalized: '',
+            currencyVerified: '',
+            furnishingNormalized: '',
+            offPlanNormalized: '',
+            offPlanSlug: '',
+            poolAccess: '',
+            priceAmount: '',
+            propertyPurposeNormalized: '',
+            propertyStatusNormalized: '',
+            rentFrequencyNormalized: '',
           },
         },
         upsert: true,
@@ -121,9 +131,6 @@ const removeStaleProperties = async (feedRefNos) => {
 
   const staleRefNos = staleDocs.map((doc) => doc.propertyRefNo);
   const deleteResult = await Property.deleteMany({
-    propertyRefNo: { $in: staleRefNos },
-  });
-  await PropertyEmbedding.deleteMany({
     propertyRefNo: { $in: staleRefNos },
   });
 

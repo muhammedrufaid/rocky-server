@@ -1,8 +1,13 @@
 const mongoose = require('mongoose');
 
+/**
+ * Live listing documents. Intentionally omits legacy denormalized keys
+ * (currencyNormalized, priceAmount, embedding, etc.) — those are unset by
+ * scripts/cleanupLegacyPropertyFields.js and stripped on Salesforce upsert.
+ */
 const propertySchema = new mongoose.Schema(
   {
-    propertyRefNo: { type: String, required: true, index: true },
+    propertyRefNo: { type: String, required: true },
 
     // Common fields we use in the app (keeps queries fast/typed)
     permitNumber: String,
