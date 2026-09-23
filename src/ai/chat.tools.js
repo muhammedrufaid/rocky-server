@@ -328,7 +328,7 @@ const PROPERTY_TYPE_CHANGE_OPTIONS = [
   'Shop',
   'Warehouse',
 ];
-const BEDROOM_OPTIONS = ['Studio', '1 BR', '2 BR', '3 BR', '4+ BR', 'Any'];
+const BEDROOM_OPTIONS = ['Studio', '1 Bed', '2 Beds', '3 Beds', '4 Beds', '5+ Beds', 'Any'];
 const PROPERTY_TYPE_OPTIONS = ['Apartment', 'Villa', 'Townhouse', 'Penthouse'];
 const BUY_BUDGET_OPTIONS = [
   'Below AED 1M',
@@ -2197,7 +2197,7 @@ function parseEmptyResultChoice(text) {
   if (!raw) return null;
   if (/^nearby areas$/i.test(raw)) return { nearby: true };
   if (/^(change|increase) budget$/i.test(raw)) return { budget: true };
-  if (/^change bedrooms$/i.test(raw)) return { askBedrooms: true };
+  if (isChangeBedroomsAction(raw)) return { askBedrooms: true };
   if (/^(property type|change property type)$/i.test(raw)) return { askType: true };
   const tryBr = raw.match(/^try\s+(.+)$/i);
   if (tryBr) {
@@ -2209,6 +2209,21 @@ function parseEmptyResultChoice(text) {
   const beds = parseBedroomChoice(raw);
   if (beds) return { bedrooms: beds };
   return null;
+}
+
+function isChangeBedroomsAction(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  if (!raw) return false;
+  return (
+    /^change bedrooms?$/.test(raw) ||
+    /^different bedrooms?$/.test(raw) ||
+    /^another bedroom(s| configuration)?$/.test(raw) ||
+    /^change bedroom configuration$/.test(raw) ||
+    /^different bedroom configuration$/.test(raw)
+  );
 }
 
 function matchesNamedOption(text, options = []) {
@@ -2230,40 +2245,57 @@ function parseBedroomChoice(text) {
   if (
     raw === 'any' ||
     raw === 'any br' ||
+    raw === 'any bed' ||
+    raw === 'any beds' ||
     isBedroomSkip(raw)
   ) {
     return { any: true };
   }
 
-  if (/\bstudio\b/.test(raw) || raw === '0' || raw === '0 br' || raw === '0 bedroom' || raw === '0 bedrooms') {
+  if (/\bstudio\b/.test(raw) || raw === '0' || raw === '0 br' || raw === '0 bedroom' || raw === '0 bedrooms' || raw === '0 bed') {
     return { exact: 0 };
+  }
+
+  if (/5\s*\+|5\s*or\s*more|5\s*and\s*(up|above|more)|five\s*or\s*more|at\s*least\s*5/.test(raw)) {
+    return { min: 5 };
   }
 
   if (/4\s*\+|4\s*or\s*more|4\s*and\s*(up|above|more)|four\s*or\s*more|at\s*least\s*4/.test(raw)) {
     return { min: 4 };
   }
 
-  const chip = raw.match(/^(\d+)\s*br$/);
+  const chip = raw.match(/^(\d+)\s*(br|bed|beds)?$/);
   if (chip) {
     const n = Number(chip[1]);
-    if (n >= 1 && n <= 3) return { exact: n };
+    if (n >= 1 && n <= 4) return { exact: n };
+    if (n >= 5) return { min: n };
   }
 
   const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
   if (Object.prototype.hasOwnProperty.call(words, raw)) return { exact: words[raw] };
 
   const wordBed = raw.match(/\b(one|two|three|four|five|six)\s*-?\s*(bed|br|bhk|bedroom)s?\b/);
-  if (wordBed) return { exact: words[wordBed[1]] };
+  if (wordBed) {
+    const n = words[wordBed[1]];
+    if (n >= 5) return { min: n };
+    return { exact: n };
+  }
 
   if (/^\d+$/.test(raw)) {
     const n = Number(raw);
-    if (Number.isFinite(n) && n >= 0 && n <= 12) return { exact: n };
+    if (Number.isFinite(n) && n >= 0 && n <= 12) {
+      if (n >= 5) return { min: n };
+      return { exact: n };
+    }
   }
 
   const numbered = raw.match(/\b(\d+)\s*-?\s*(bed|br|bhk|bedroom)s?\b/);
   if (numbered) {
     const n = Number(numbered[1]);
-    if (Number.isFinite(n) && n >= 0 && n <= 12) return { exact: n };
+    if (Number.isFinite(n) && n >= 0 && n <= 12) {
+      if (n >= 5) return { min: n };
+      return { exact: n };
+    }
   }
   return null;
 }
@@ -2919,6 +2951,26 @@ function bedroomsClarificationReply() {
   return 'How many bedrooms are you looking for?';
 }
 
+function bedroomsChangeReply() {
+  return 'What bedroom configuration would you like?';
+}
+
+function bedroomChangeQuestion(filters = {}) {
+  return {
+    reply: bedroomsChangeReply(),
+    options: BEDROOM_OPTIONS.slice(),
+    awaiting: 'bedrooms',
+    missing: 'bedrooms',
+    currentBedrooms: isBedroomsSet(filters.bedrooms)
+      ? Number(filters.bedrooms)
+      : isBedroomsSet(filters.bedroomsMin)
+        ? `${Number(filters.bedroomsMin)}+`
+        : filters.bedroomsAny
+          ? 'any'
+          : null,
+  };
+}
+
 function propertyTypeClarificationReply() {
   return 'What type of property are you looking for?';
 }
@@ -3059,7 +3111,15 @@ function buildRefinementAcknowledgement(previous = {}, next = {}) {
         ? `Got it — I'll switch this to studio apartments and keep ${keep}.`
         : `Got it — I'll switch this to studio apartments and keep the rest of your search.`;
     }
-    return `Sure — I'll update this to ${nextBeds}-bedroom and keep the rest of your search.`;
+    const keepBits = [];
+    if (nextLoc) keepBits.push(nextLoc);
+    if (normalizePurpose(next.purpose) === 'Rent') keepBits.push('rent');
+    else if (normalizePurpose(next.purpose) === 'Off-plan') keepBits.push('off-plan');
+    else if (normalizePurpose(next.purpose) === 'Buy') keepBits.push('buy');
+    const keep = keepBits.join(' + ');
+    return keep
+      ? `Sure — I'll switch this to ${nextBeds}-bedroom apartments and keep ${keep}.`
+      : `Sure — I'll update this to ${nextBeds}-bedroom and keep the rest of your search.`;
   }
   if (typeChanged && !locChanged && !purposeChanged) {
     return `Sure — I'll switch this to ${String(nextType).toLowerCase()}s and keep the rest of your search.`;
@@ -3228,7 +3288,7 @@ function qualifyListingSearch(message, profile = {}) {
   }
   if (
     ['emptyResults', 'alternatives', 'nearbyArea'].includes(awaiting) &&
-    (parseEmptyResultChoice(message)?.askType || parseEmptyResultChoice(message)?.askBedrooms)
+    parseEmptyResultChoice(message)?.askType
   ) {
     return null;
   }
@@ -3289,6 +3349,31 @@ function qualifyListingSearch(message, profile = {}) {
       },
       reply: budgetQuestion.reply,
       options: budgetQuestion.options,
+    };
+  }
+  if ((hasListingContext || extracted) && emptyChoice?.askBedrooms) {
+    const question = bedroomChangeQuestion(next);
+    return {
+      type: 'clarify',
+      missing: 'bedrooms',
+      profilePatch: {
+        purpose: next.purpose || profile.purpose,
+        intent: purposeToIntent(next.purpose) || normalizeIntentValue(profile.intent) || profile.intent,
+        preferredAreas: next.location ? [next.location] : undefined,
+        bedrooms: next.bedrooms ?? next.bedroomsMin ?? profile.bedrooms,
+        lastSearchFilters: next,
+        slotFlow: {
+          awaiting: 'bedrooms',
+          alternatives: null,
+          lastAskedField: 'bedrooms',
+        },
+        budget: {
+          min: next.budgetMin ?? null,
+          max: next.budgetMax ?? null,
+        },
+      },
+      reply: question.reply,
+      options: question.options,
     };
   }
   if ((hasListingContext || extracted) && emptyChoice?.askType) {
@@ -3856,6 +3941,8 @@ function extractSearchPatch(message, previous = {}, { awaiting } = {}) {
   const changes = {};
   const raw = String(message || '').trim();
   if (!raw) return changes;
+  // UI action — do not treat as a bedroom/budget/location patch.
+  if (isChangeBedroomsAction(raw)) return changes;
 
   if (shouldTreatMessageAsAnyBudget(previous, message, awaiting)) {
     changes.budget = { any: true };
@@ -5555,6 +5642,39 @@ async function searchProperties(
   const waitingOnBudget =
     !isBudgetProvided(effectiveFilters) &&
     (slotFlow?.awaiting === 'budget' || parseEmptyResultChoice(userMessage)?.budget);
+  const waitingOnBedroomsChange =
+    isChangeBedroomsAction(userMessage) || parseEmptyResultChoice(userMessage)?.askBedrooms;
+  if (waitingOnBedroomsChange) {
+    const question = bedroomChangeQuestion(effectiveFilters);
+    return {
+      propertyCards: [],
+      sources: [],
+      leadCaptured: false,
+      profilePatch: {
+        ...profilePatchFromPropertyFilters(effectiveFilters),
+        lastSearchFilters: effectiveFilters,
+        slotFlow: {
+          awaiting: 'bedrooms',
+          alternatives: null,
+          lastAskedField: 'bedrooms',
+        },
+      },
+      viewAllMatching: null,
+      effectiveFilters,
+      needsBedrooms: true,
+      clarificationReply: question.reply,
+      options: question.options,
+      requiresClarification: true,
+      select: PURPOSE_SELECT,
+      modelPayload: {
+        count: 0,
+        needsBedrooms: true,
+        missingSlot: 'bedrooms',
+        instruction:
+          'The visitor asked to change bedrooms. Do not search yet and do not invent listings. Ask which bedroom configuration they want using the provided options.',
+      },
+    };
+  }
   if (missing) {
     return missingSlotResult(missing, effectiveFilters, {
       previous: previousSearch || lastSearchFilters,
@@ -6094,6 +6214,9 @@ module.exports = {
   parseBudgetFromMessage,
   applyBudgetChoice,
   parseEmptyResultChoice,
+  isChangeBedroomsAction,
+  bedroomChangeQuestion,
+  bedroomsChangeReply,
   emptyResultOptions,
   emptyResultsReply,
   locationEmptyNearbyReply,
