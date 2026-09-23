@@ -83,6 +83,7 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
     towerName: normalizeStringList(filters.towerName),
     listingAgent: normalizeStringList(filters.listingAgent),
     furnished: normalizeStringList(filters.furnished),
+    amenities: normalizeStringList(filters.amenities || filters.features),
     offPlan: normalizeStringList(filters.offPlan),
     propertyStatus: normalizeStringList(filters.propertyStatus),
     bedrooms: parseOptionalNumber(filters.bedrooms),
@@ -118,6 +119,39 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
     buildStringListMatch('propertyStatus', nf.propertyStatus),
   ].filter(Boolean);
   if (listMatches.length) match.push(...listMatches);
+
+  // Amenity / feature requirements — every requested amenity must match at least one features[] value.
+  if (nf.amenities && nf.amenities.length) {
+    const amenityMatchers = {
+      swimming_pool: /swimming\s*pool|private\s*pool|shared\s*pool|^pools?$/i,
+      gym: /gym|fitness\s*(cent(?:er|re)|club|room)|health\s*club/i,
+      parking: /parking|car\s*park/i,
+      balcony: /balcon|terrace/i,
+      maid_room: /maid|helper'?s?\s*room/i,
+      garden: /garden/i,
+      waterfront: /waterfront|beachfront|beach\s*access|canal|seafront/i,
+      pet_friendly: /pet|pets?\s*allowed/i,
+      sea_view: /sea\s*view|ocean\s*view|beach\s*view/i,
+      marina_view: /marina\s*view/i,
+      city_view: /city\s*view|skyline\s*view/i,
+      golf_view: /golf/i,
+      study: /study|home\s*office/i,
+      jacuzzi: /jacuzzi|hot\s*tub/i,
+      sauna: /sauna/i,
+      concierge: /concierge|24\s*hour|security/i,
+      built_in_wardrobes: /built[-\s]?in\s*wardrobe|fitted\s*wardrobe/i,
+      central_ac: /central\s*a\/?c|central\s*air|central\s*cooling/i,
+    };
+    for (const amenity of nf.amenities) {
+      const key = String(amenity || '')
+        .trim()
+        .toLowerCase()
+        .replace(/['’]/g, '')
+        .replace(/[^a-z0-9]+/g, '_');
+      const re = amenityMatchers[key] || new RegExp(escapeRegex(String(amenity || '').trim()), 'i');
+      match.push({ features: { $elemMatch: { $regex: re.source, $options: 'i' } } });
+    }
+  }
 
   Object.entries(forced).forEach(([key, value]) => {
     match.push({ [key]: value });

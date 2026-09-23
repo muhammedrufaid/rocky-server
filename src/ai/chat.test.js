@@ -29,6 +29,7 @@ const {
   isInformationalRealEstateQuery,
   isExplicitPropertySearchIntent,
   isContentKnowledgeTopic,
+  parseAmenitiesFromMessage,
   isGoldenVisaMention,
   isGoldenVisaPropertySearchIntent,
   isShowGoldenVisaPropertiesAction,
@@ -225,6 +226,61 @@ test('content-first routing: informational RE questions never open Buy/Rent/Off-
   assert.match(purposeClarificationReply(), /buy, rent, or explore off-plan/i);
   assert.match(getSystemPrompt({ intent: null }), /CONTENT-FIRST QUERY ROUTING/i);
   assert.match(getSystemPrompt({ intent: null }), /Never ask.*Buy \/ Rent \/ Off-plan as the first response/i);
+});
+
+test('amenity memory survives purpose type bedrooms and any-area answers', () => {
+  assert.deepEqual(parseAmenitiesFromMessage('Properties with a Swimming Pool'), ['swimming_pool']);
+  assert.deepEqual(parseAmenitiesFromMessage('with a gym and parking'), ['gym', 'parking']);
+  assert.deepEqual(parseAmenitiesFromMessage('without a swimming pool'), []);
+
+  let step = qualifyListingSearch('Properties with a Swimming Pool', {});
+  assert.equal(step?.type, 'clarify');
+  assert.equal(step.missing, 'intent');
+  assert.deepEqual(step.profilePatch.lastSearchFilters.amenities, ['swimming_pool']);
+  assert.match(step.reply, /buy, rent, or explore off-plan/i);
+
+  step = qualifyListingSearch('Buy', {
+    intent: null,
+    purpose: null,
+    lastSearchFilters: step.profilePatch.lastSearchFilters,
+    slotFlow: step.profilePatch.slotFlow,
+  });
+  assert.equal(step.profilePatch.lastSearchFilters.purpose, 'Buy');
+  assert.deepEqual(step.profilePatch.lastSearchFilters.amenities, ['swimming_pool']);
+
+  step = qualifyListingSearch('Apartment', {
+    intent: CONVERSATION_INTENTS.BUY,
+    purpose: 'Buy',
+    lastSearchFilters: step.profilePatch.lastSearchFilters,
+    slotFlow: step.profilePatch.slotFlow,
+  });
+  assert.deepEqual(step.profilePatch.lastSearchFilters.types, ['Apartment']);
+  assert.deepEqual(step.profilePatch.lastSearchFilters.amenities, ['swimming_pool']);
+
+  step = qualifyListingSearch('1 Bed', {
+    intent: CONVERSATION_INTENTS.BUY,
+    purpose: 'Buy',
+    lastSearchFilters: step.profilePatch.lastSearchFilters,
+    slotFlow: step.profilePatch.slotFlow,
+  });
+  assert.equal(step.profilePatch.lastSearchFilters.bedrooms, 1);
+  assert.deepEqual(step.profilePatch.lastSearchFilters.amenities, ['swimming_pool']);
+
+  step = qualifyListingSearch('Any area', {
+    intent: CONVERSATION_INTENTS.BUY,
+    purpose: 'Buy',
+    lastSearchFilters: step.profilePatch.lastSearchFilters,
+    slotFlow: step.profilePatch.slotFlow,
+  });
+  const finalFilters = step.profilePatch.lastSearchFilters;
+  assert.equal(finalFilters.purpose, 'Buy');
+  assert.deepEqual(finalFilters.types, ['Apartment']);
+  assert.equal(finalFilters.bedrooms, 1);
+  assert.equal(finalFilters.locationAny, true);
+  assert.equal(finalFilters.location, null);
+  assert.deepEqual(finalFilters.amenities, ['swimming_pool']);
+  assert.deepEqual(listingQueryOpts(finalFilters, '').filters.amenities, ['swimming_pool']);
+  assert.match(getSystemPrompt({ intent: null }), /amenities\/features/i);
 });
 
 test('Golden Visa property requests search BUY from AED 2M and preserve memory', async (t) => {

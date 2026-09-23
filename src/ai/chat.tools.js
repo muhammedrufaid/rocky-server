@@ -53,6 +53,16 @@ const TOOL_DEFINITIONS = [
             description:
               'Buy, Rent, or Off-plan. Optional only when already known from lastSearchFilters or the visitor profile. Never invent Buy.',
           },
+          furnished: {
+            type: 'string',
+            description: 'Furnished, Unfurnished, or Semi-furnished — only if the visitor stated it.',
+          },
+          amenities: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Amenity / feature keys the visitor required (e.g. swimming_pool, gym, parking, balcony, maid_room, garden, waterfront, pet_friendly, sea_view). Pass every still-active amenity from memory — do not drop previously stated features.',
+          },
         },
       },
     },
@@ -402,6 +412,257 @@ const LISTING_INTENTS = new Set([
   CONVERSATION_INTENTS.OFF_PLAN,
 ]);
 
+/**
+ * Canonical amenity keys persisted in lastSearchFilters.amenities.
+ * featurePatterns match Mongo Property.features strings (Bayut-style labels).
+ */
+const AMENITY_DEFINITIONS = [
+  {
+    id: 'swimming_pool',
+    label: 'swimming pool',
+    parse: /\b(?:swimming|private|shared)\s+pools?\b|\b(?:with|has|have|needs?|wants?|included?)\s+(?:a\s+|an\s+)?pools?\b|\bpools?\s+(?:access|view)\b/i,
+    feature: /swimming\s*pool|private\s*pool|shared\s*pool|^pools?$/i,
+  },
+  {
+    id: 'gym',
+    label: 'gym',
+    parse: /\b(gyms?|fitness\s+(?:cent(?:er|re)|club|room)|health\s+club)\b/i,
+    feature: /gym|fitness\s+(?:cent(?:er|re)|club|room)|health\s+club/i,
+  },
+  {
+    id: 'parking',
+    label: 'parking',
+    parse: /\b((?:covered|basement|allocated|private)\s+)?parkings?\b|\bcar\s+park(?:ing)?\b/i,
+    feature: /parking|car\s+park/i,
+  },
+  {
+    id: 'balcony',
+    label: 'balcony',
+    parse: /\b(balcon(?:y|ies)|terraces?)\b/i,
+    feature: /balcon|terrace/i,
+  },
+  {
+    id: 'maid_room',
+    label: "maid's room",
+    parse: /\b(maid'?s?\s*rooms?|maid\s+rooms?|helper'?s?\s*rooms?)\b/i,
+    feature: /maid|helper'?s?\s*room/i,
+  },
+  {
+    id: 'garden',
+    label: 'garden',
+    parse: /\b((?:private|back|front)\s+)?gardens?\b/i,
+    feature: /garden/i,
+  },
+  {
+    id: 'waterfront',
+    label: 'waterfront',
+    parse: /\b(waterfront|beachfront|beach\s+access|canal\s+(?:front|view)|seafront)\b/i,
+    feature: /waterfront|beachfront|beach\s+access|canal|seafront/i,
+  },
+  {
+    id: 'pet_friendly',
+    label: 'pet-friendly',
+    parse: /\b(pet[-\s]?friendly|pets?\s+allowed|allows?\s+pets?)\b/i,
+    feature: /pet|pets?\s+allowed/i,
+  },
+  {
+    id: 'sea_view',
+    label: 'sea view',
+    parse: /\b(sea\s+views?|ocean\s+views?|beach\s+views?)\b/i,
+    feature: /sea\s*view|ocean\s*view|beach\s*view/i,
+  },
+  {
+    id: 'marina_view',
+    label: 'marina view',
+    parse: /\b(marina\s+views?)\b/i,
+    feature: /marina\s*view/i,
+  },
+  {
+    id: 'city_view',
+    label: 'city view',
+    parse: /\b(city\s+views?|skyline\s+views?)\b/i,
+    feature: /city\s*view|skyline\s*view/i,
+  },
+  {
+    id: 'golf_view',
+    label: 'golf view',
+    parse: /\b(golf\s+views?|golf\s+course\s+views?)\b/i,
+    feature: /golf/i,
+  },
+  {
+    id: 'study',
+    label: 'study',
+    parse: /\b(study(?:\s+rooms?)?|home\s+office)\b/i,
+    feature: /study|home\s+office/i,
+  },
+  {
+    id: 'jacuzzi',
+    label: 'jacuzzi',
+    parse: /\b(jacuzzis?|hot\s+tubs?)\b/i,
+    feature: /jacuzzi|hot\s+tub/i,
+  },
+  {
+    id: 'sauna',
+    label: 'sauna',
+    parse: /\b(saunas?)\b/i,
+    feature: /sauna/i,
+  },
+  {
+    id: 'concierge',
+    label: 'concierge',
+    parse: /\b(concierge|24\s*hour\s+(?:security|reception)|security\s+(?:24|twenty))\b/i,
+    feature: /concierge|24\s*hour|security/i,
+  },
+  {
+    id: 'built_in_wardrobes',
+    label: 'built-in wardrobes',
+    parse: /\b(built[-\s]?in\s+wardrobes?|fitted\s+wardrobes?)\b/i,
+    feature: /built[-\s]?in\s+wardrobe|fitted\s+wardrobe/i,
+  },
+  {
+    id: 'central_ac',
+    label: 'central A/C',
+    parse: /\b(central\s+a\/?c|central\s+air(?:\s*conditioning)?|central\s+cooling)\b/i,
+    feature: /central\s+a\/?c|central\s+air|central\s+cooling/i,
+  },
+];
+
+const AMENITY_BY_ID = Object.fromEntries(AMENITY_DEFINITIONS.map((item) => [item.id, item]));
+
+function normalizeAmenityId(value) {
+  const raw = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/['’]/g, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  if (!raw) return null;
+  if (AMENITY_BY_ID[raw]) return raw;
+  const alias = {
+    pool: 'swimming_pool',
+    swimmingpool: 'swimming_pool',
+    swimming_pools: 'swimming_pool',
+    private_pool: 'swimming_pool',
+    shared_pool: 'swimming_pool',
+    fitness: 'gym',
+    fitness_center: 'gym',
+    fitness_centre: 'gym',
+    covered_parking: 'parking',
+    basement_parking: 'parking',
+    terrace: 'balcony',
+    maid: 'maid_room',
+    maids_room: 'maid_room',
+    maidroom: 'maid_room',
+    pets: 'pet_friendly',
+    pets_allowed: 'pet_friendly',
+    petfriendly: 'pet_friendly',
+    sea: 'sea_view',
+    ocean_view: 'sea_view',
+    beach_view: 'sea_view',
+    wardrobe: 'built_in_wardrobes',
+    wardrobes: 'built_in_wardrobes',
+    ac: 'central_ac',
+    air_conditioning: 'central_ac',
+  };
+  if (alias[raw]) return alias[raw];
+  for (const def of AMENITY_DEFINITIONS) {
+    if (def.parse.test(String(value || '').replace(/_/g, ' '))) return def.id;
+  }
+  return null;
+}
+
+function normalizeAmenityList(value) {
+  if (value == null || value === '') return [];
+  const parts = Array.isArray(value) ? value : String(value).split(/[,|;]+/);
+  const out = [];
+  const seen = new Set();
+  for (const part of parts) {
+    const id = normalizeAmenityId(part);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+function amenityLabel(id) {
+  return AMENITY_BY_ID[id]?.label || String(id || '').replace(/_/g, ' ');
+}
+
+function amenityFeatureRegex(id) {
+  return AMENITY_BY_ID[id]?.feature || null;
+}
+
+function clearsAllAmenities(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]/g, '');
+  if (!raw) return false;
+  if (/^(any|any amenities?|no amenities?|no amenity preference|amenities? (don'?t|do not) matter)$/i.test(raw)) {
+    return true;
+  }
+  return /\b(any|no|without)\s+amenities?\b|\bamenities?\s+(don'?t|do\s+not)\s+matter\b|\bno\s+amenity\s+(preference|filter|requirement)s?\b/.test(
+    raw
+  );
+}
+
+function parseAmenityRemovals(text) {
+  const raw = String(text || '').toLowerCase();
+  if (!raw || !/\b(no|without|remove|drop|exclude)\b/.test(raw)) return [];
+  const removed = [];
+  for (const def of AMENITY_DEFINITIONS) {
+    const label = def.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+    const neg = new RegExp(
+      `\\b(no|without|remove|drop|exclude)\\s+(?:a\\s+|an\\s+|the\\s+)?${label}\\b`,
+      'i'
+    );
+    if (neg.test(raw)) removed.push(def.id);
+  }
+  if (/\b(no|without)\s+(?:a\s+|an\s+|the\s+)?pools?\b/i.test(raw)) {
+    removed.push('swimming_pool');
+  }
+  return normalizeAmenityList(removed);
+}
+
+function parseAmenitiesFromMessage(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return [];
+  if (clearsAllAmenities(raw)) return [];
+  const lower = raw.toLowerCase();
+  const removed = new Set(parseAmenityRemovals(raw));
+  const found = [];
+  for (const def of AMENITY_DEFINITIONS) {
+    if (removed.has(def.id)) continue;
+    if (def.parse.test(lower)) found.push(def.id);
+  }
+  return normalizeAmenityList(found);
+}
+
+function mergeAmenities(previous = [], incoming = [], { remove = [], clear = false } = {}) {
+  if (clear) return [];
+  const base = normalizeAmenityList(previous);
+  const add = normalizeAmenityList(incoming);
+  const drop = new Set(normalizeAmenityList(remove));
+  const out = [];
+  const seen = new Set();
+  for (const id of [...base, ...add]) {
+    if (!id || drop.has(id) || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+function describeAmenitiesClause(filters = {}) {
+  const list = normalizeAmenityList(filters.amenities);
+  if (!list.length) return '';
+  const labels = list.map(amenityLabel);
+  if (labels.length === 1) return ` with a ${labels[0]}`;
+  if (labels.length === 2) return ` with a ${labels[0]} and ${labels[1]}`;
+  return ` with ${labels.slice(0, -1).join(', ')}, and ${labels[labels.length - 1]}`;
+}
+
 function emptySearchFilters() {
   return {
     location: null,
@@ -417,6 +678,7 @@ function emptySearchFilters() {
     types: [],
     purpose: null,
     furnished: null,
+    amenities: [],
     goldenVisaSearch: false,
   };
 }
@@ -507,6 +769,7 @@ function copySearchFilters(filters = {}) {
     types,
     purpose: filters.purpose || null,
     furnished: filters.furnished || null,
+    amenities: normalizeAmenityList(filters.amenities),
     goldenVisaSearch: filters.goldenVisaSearch === true,
   };
 }
@@ -3351,7 +3614,7 @@ function describeLookingForPhrase(filters = {}) {
   const purpose = normalizePurpose(filters.purpose);
   const verb = purpose === 'Rent' ? 'to rent' : purpose === 'Off-plan' ? 'off-plan' : purpose === 'Buy' ? 'to buy' : '';
   const loc = hasLocationConstraint(filters) ? ` in ${String(filters.location).trim()}` : '';
-  return `${noun}${verb ? ` ${verb}` : ''}${loc}`.replace(/\s+/g, ' ').trim();
+  return `${noun}${verb ? ` ${verb}` : ''}${loc}${describeAmenitiesClause(filters)}`.replace(/\s+/g, ' ').trim();
 }
 
 function hasEnoughToDescribe(filters = {}) {
@@ -3849,6 +4112,11 @@ function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
     budgetMax: last.budgetMax ?? null,
     budgetProvided: last.budgetProvided === true,
     furnished: coalesceFilter(filters.furnished, last.furnished),
+    amenities: (() => {
+      const incoming = normalizeAmenityList(filters.amenities);
+      if (incoming.length) return mergeAmenities(last.amenities, incoming);
+      return normalizeAmenityList(last.amenities);
+    })(),
     purpose: last.purpose || null,
     goldenVisaSearch: last.goldenVisaSearch === true || filters.goldenVisaSearch === true,
   };
@@ -3867,6 +4135,9 @@ function isAmbiguousListingQuery(text) {
   if (parseBedroomChoice(raw)) return false;
   // Property-type change phrases are refinements, not ambiguous new queries
   if (parsePropertyTypeChange(raw)) return false;
+  if (parseAmenitiesFromMessage(raw).length || parseAmenityRemovals(raw).length || clearsAllAmenities(raw)) {
+    return true;
+  }
   return /\b(show|find|search|looking|apartments?|villas?|townhouses?|properties|homes?|listings?)\b/.test(raw);
 }
 
@@ -3915,6 +4186,9 @@ function isListingFollowUp(text) {
   if (wantsDifferentLocation(raw)) return true;
   if (isUnrestrictedLocationPhrase(raw)) return true;
   if (parseEmptyResultChoice(raw)) return true;
+  if (parseAmenitiesFromMessage(raw).length || parseAmenityRemovals(raw).length || clearsAllAmenities(raw)) {
+    return true;
+  }
   if (isAmbiguousListingQuery(raw)) return true;
   if (parseLocationFromMessage(raw)) return true;
   if (parseBudgetFromMessage(raw)) return true;
@@ -4264,6 +4538,8 @@ function listingSearchResetPatch(previous = {}, next = {}) {
     (previous.budgetMax ?? null) !== (next.budgetMax ?? null) ||
     !!previous.budgetProvided !== !!next.budgetProvided;
   const furnishedChanged = (previous.furnished || null) !== (next.furnished || null);
+  const amenitiesChanged =
+    normalizeAmenityList(previous.amenities).join('|') !== normalizeAmenityList(next.amenities).join('|');
   if (
     !purposeChanged &&
     !locationChanged &&
@@ -4271,7 +4547,8 @@ function listingSearchResetPatch(previous = {}, next = {}) {
     !typeChanged &&
     !bedroomsChanged &&
     !budgetChanged &&
-    !furnishedChanged
+    !furnishedChanged &&
+    !amenitiesChanged
   ) {
     return {};
   }
@@ -4338,6 +4615,9 @@ function extractSearchPatch(message, previous = {}, { awaiting } = {}) {
     : parseBudgetFromMessage(message, { requireBudgetContext: awaiting === 'budget' });
   const furnished = parseFurnishedFromMessage(message);
   const purpose = changes.purpose || parsePurposeFromMessage(message, previous);
+  const clearAmenities = clearsAllAmenities(message);
+  const removeAmenities = parseAmenityRemovals(message);
+  const amenities = parseAmenitiesFromMessage(message);
 
   if (types.length) {
     const current = typesFromFilters(previous);
@@ -4355,6 +4635,13 @@ function extractSearchPatch(message, previous = {}, { awaiting } = {}) {
   if (budget) changes.budget = budget;
   if (furnished) changes.furnished = furnished;
   if (purpose) changes.purpose = purpose;
+  if (clearAmenities) {
+    changes.amenities = [];
+    changes.clearAmenities = true;
+  } else if (amenities.length || removeAmenities.length) {
+    changes.amenities = amenities;
+    if (removeAmenities.length) changes.removeAmenities = removeAmenities;
+  }
   return changes;
 }
 
@@ -4382,6 +4669,17 @@ function mergeSearchPatch(previous, patch, message = '') {
   if (changes.budget) applyBudgetChoice(next, changes.budget);
   if (changes.furnished) next.furnished = changes.furnished;
   if (changes.purpose) next.purpose = changes.purpose;
+  if (
+    changes.clearAmenities ||
+    changes.amenities ||
+    changes.removeAmenities ||
+    Object.prototype.hasOwnProperty.call(changes, 'amenities')
+  ) {
+    next.amenities = mergeAmenities(previous.amenities, changes.amenities, {
+      remove: changes.removeAmenities,
+      clear: !!changes.clearAmenities,
+    });
+  }
   if (changes.goldenVisaSearch) {
     next.goldenVisaSearch = true;
     applyGoldenVisaSearchDefaults(next, message);
@@ -4632,6 +4930,8 @@ function listingQueryOpts(filters, search) {
   const types = typesFromFilters(filters);
   if (types.length) queryFilters.propertyType = types;
   if (filters.furnished) queryFilters.furnished = filters.furnished;
+  const amenities = normalizeAmenityList(filters.amenities);
+  if (amenities.length) queryFilters.amenities = amenities;
   if (Array.isArray(filters.excludeRefNos) && filters.excludeRefNos.length) {
     queryFilters.excludeRefNos = uniqueIdList(filters.excludeRefNos);
   }
@@ -5281,6 +5581,7 @@ function canonicalSearchState(filters = {}) {
     maxBudget: maxPrice,
     budgetProvided: isBudgetProvided(filters),
     furnishing: filters.furnished || null,
+    amenities: normalizeAmenityList(filters.amenities),
   };
 }
 
@@ -6109,6 +6410,7 @@ async function searchProperties(
       bedroomsAny: !!effectiveFilters.bedroomsAny,
       budgetMin: effectiveFilters.budgetMin ?? null,
       budgetMax: effectiveFilters.budgetMax ?? null,
+      amenities: normalizeAmenityList(effectiveFilters.amenities),
       excludeCount: excludeIds.length,
     })
   );
@@ -6825,6 +7127,14 @@ module.exports = {
   listingQueryOpts,
   resolveEffectiveFilters,
   parseFurnishedFromMessage,
+  parseAmenitiesFromMessage,
+  parseAmenityRemovals,
+  clearsAllAmenities,
+  normalizeAmenityList,
+  mergeAmenities,
+  amenityLabel,
+  describeAmenitiesClause,
+  AMENITY_DEFINITIONS,
   parseOccupancyFromMessage,
   parseSellIntent,
   isSellCta,

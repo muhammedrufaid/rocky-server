@@ -60,6 +60,7 @@ const conversationSchema = new mongoose.Schema(
         types: { type: [String], default: [] },
         purpose: { type: String, default: null, trim: true },
         furnished: { type: String, default: null, trim: true },
+        amenities: { type: [String], default: [] },
       },
       goldenVisaFlow: {
         shownActions: { type: [String], default: [] },
