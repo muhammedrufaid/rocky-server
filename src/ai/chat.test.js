@@ -32,8 +32,14 @@ const {
   parseGoldenVisaMinInvestment,
   applyGoldenVisaSearchDefaults,
   goldenVisaInfoOptions,
+  goldenVisaInitialReply,
+  goldenVisaGuideDetailReply,
+  buildGoldenVisaInfoResult,
+  markGoldenVisaAction,
+  filterGoldenVisaRelatedSources,
   GOLDEN_VISA_MIN_AED,
   GOLDEN_VISA_INFO_OPTIONS,
+  GOLDEN_VISA_ACTION,
   isServiceInquiryMessage,
   serviceContactPromptBlock,
   serviceContactReply,
@@ -185,7 +191,7 @@ test('Golden Visa property requests search BUY from AED 2M and preserve memory',
     'I need to get a Golden Visa, so show me properties I can buy',
     'which properties qualify for Golden Visa',
     'Golden Visa properties',
-    'Show Golden Visa properties',
+    'Show properties from AED 2M',
     'AED 2M Golden Visa properties',
     'properties suitable for Golden Visa eligibility',
   ]) {
@@ -195,10 +201,47 @@ test('Golden Visa property requests search BUY from AED 2M and preserve memory',
     assert.equal(isListingFollowUp(phrase), true, phrase);
   }
   assert.equal(isGoldenVisaPropertySearchIntent('How do I get a Golden Visa?'), false);
-  assert.equal(isShowGoldenVisaPropertiesAction('Show Golden Visa properties'), true);
+  assert.equal(isShowGoldenVisaPropertiesAction('Show properties from AED 2M'), true);
   assert.equal(parseGoldenVisaMinInvestment('I want Golden Visa properties above AED 3M'), 3_000_000);
-  assert.equal(parseGoldenVisaMinInvestment('show Golden Visa properties'), GOLDEN_VISA_MIN_AED);
-  assert.deepEqual(goldenVisaInfoOptions(), GOLDEN_VISA_INFO_OPTIONS);
+  assert.equal(parseGoldenVisaMinInvestment('Show properties from AED 2M'), GOLDEN_VISA_MIN_AED);
+  assert.deepEqual(goldenVisaInfoOptions({}), GOLDEN_VISA_INFO_OPTIONS);
+  assert.deepEqual(goldenVisaInfoOptions({ completedActions: [GOLDEN_VISA_ACTION.READ_GUIDE] }), [
+    'Show properties from AED 2M',
+  ]);
+  assert.match(goldenVisaInitialReply(), /AED 2 million/i);
+  assert.match(goldenVisaGuideDetailReply(), /Ten-year Golden Visa/i);
+  assert.equal(/Would you like me to show/i.test(goldenVisaInitialReply()), false);
+
+  const guide = buildGoldenVisaInfoResult({}, { detailGuide: true });
+  assert.match(guide.reply, /key points from Rocky's investor visa guide/i);
+  assert.deepEqual(guide.options, ['Show properties from AED 2M']);
+  assert.equal(guide.goldenVisaFlow.completedActions.includes(GOLDEN_VISA_ACTION.READ_GUIDE), true);
+
+  const related = filterGoldenVisaRelatedSources([
+    {
+      title: 'Dubai Updates Investor Visa: Key Information for You',
+      url: 'https://www.rockyrealestate.com/blogs/dubai-updates-investor-visa',
+      sourceType: 'blog',
+    },
+    {
+      title: 'Freehold vs Leasehold in Dubai',
+      url: 'https://www.rockyrealestate.com/blogs/freehold-vs-leasehold',
+      sourceType: 'blog',
+    },
+    {
+      title: 'Buying Property in Dubai as a Foreigner',
+      url: 'https://www.rockyrealestate.com/blogs/buying-property-dubai-foreigner',
+      sourceType: 'blog',
+    },
+    {
+      title: 'Downtown Jebel Ali Investment Guide',
+      url: 'https://www.rockyrealestate.com/blogs/downtown-jebel-ali',
+      sourceType: 'blog',
+    },
+  ]);
+  assert.equal(related.length <= 2, true);
+  assert.equal(related[0].title.includes('Investor Visa'), true);
+  assert.equal(related.some((s) => /freehold|jebel ali/i.test(s.title)), false);
 
   const profile = {
     intent: CONVERSATION_INTENTS.RENT,
@@ -234,7 +277,7 @@ test('Golden Visa property requests search BUY from AED 2M and preserve memory',
   assert.equal(higher.profilePatch.lastSearchFilters.budgetMin, 3_000_000);
   assert.equal(higher.profilePatch.lastSearchFilters.budgetMax, null);
 
-  const chip = qualifyListingSearch('Show Golden Visa properties', profile);
+  const chip = qualifyListingSearch('Show properties from AED 2M', profile);
   assert.equal(chip.type, 'continue');
   assert.equal(chip.profilePatch.lastSearchFilters.budgetMin, GOLDEN_VISA_MIN_AED);
 
@@ -264,7 +307,7 @@ test('Golden Visa property requests search BUY from AED 2M and preserve memory',
     {},
     {
       lastSearchFilters: next,
-      userMessage: 'I need Golden Visa properties.',
+      userMessage: 'Show properties from AED 2M',
       intent: CONVERSATION_INTENTS.BUY,
       shownPropertyIds: [],
     }
@@ -274,7 +317,9 @@ test('Golden Visa property requests search BUY from AED 2M and preserve memory',
   assert.equal(result.effectiveFilters.budgetMin, GOLDEN_VISA_MIN_AED);
   assert.equal(result.effectiveFilters.budgetMax, null);
   assert.equal(result.effectiveFilters.purpose, 'Buy');
-  assert.match(result.replyOverride || '', /AED 2M|AED 2,000,000|2 million/i);
+  assert.match(result.replyOverride || '', /I found 8 (ready )?properties/i);
+  assert.match(result.replyOverride || '', /from AED 2M/i);
+  assert.equal(/investor visa guide/i.test(result.replyOverride || ''), false);
   assert.equal(/can't pull live property listings/i.test(result.replyOverride || ''), false);
   assert.equal(/Golden Visa approved/i.test(result.replyOverride || ''), false);
   assert.equal(/Golden Visa qualified/i.test(result.replyOverride || ''), false);

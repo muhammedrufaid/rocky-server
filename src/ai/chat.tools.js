@@ -2751,9 +2751,26 @@ function isServicesCatalogQuestion(text) {
 }
 
 const GOLDEN_VISA_MIN_AED = 2_000_000;
-const GOLDEN_VISA_INFO_OPTIONS = ['Show Golden Visa properties', 'Read investor visa guide'];
+const GOLDEN_VISA_ACTION = {
+  SHOW_PROPERTIES: 'show_golden_visa_properties',
+  READ_GUIDE: 'read_investor_visa_guide',
+};
+const GOLDEN_VISA_ACTION_LABELS = {
+  [GOLDEN_VISA_ACTION.SHOW_PROPERTIES]: 'Show properties from AED 2M',
+  [GOLDEN_VISA_ACTION.READ_GUIDE]: 'Read investor visa guide',
+};
+const GOLDEN_VISA_INFO_OPTIONS = [
+  GOLDEN_VISA_ACTION_LABELS[GOLDEN_VISA_ACTION.SHOW_PROPERTIES],
+  GOLDEN_VISA_ACTION_LABELS[GOLDEN_VISA_ACTION.READ_GUIDE],
+];
+const GOLDEN_VISA_PRIMARY_SOURCE =
+  /dubai\s+updates\s+investor\s+visa|investor\s+visa|golden\s+visa/i;
+const GOLDEN_VISA_SECONDARY_SOURCE = /buying\s+property\s+in\s+dubai\s+as\s+a\s+foreigner/i;
+const GOLDEN_VISA_EXCLUDE_SOURCE =
+  /freehold|leasehold|downtown\s+jebel\s+ali|jebel\s+ali(?!\s+investor)/i;
 
 function isGoldenVisaMention(text) {
+  if (isShowGoldenVisaPropertiesAction(text) || isReadInvestorVisaGuideAction(text)) return true;
   return /\b(golden\s+visa|investor\s+visa|10[-\s]?year\s+(?:golden\s+)?visa)\b/i.test(
     String(text || '')
   );
@@ -2766,6 +2783,8 @@ function isShowGoldenVisaPropertiesAction(text) {
     .replace(/[.!?]/g, '');
   if (!raw) return false;
   return (
+    /^show properties from aed 2m$/.test(raw) ||
+    /^show properties from aed 2 million$/.test(raw) ||
     /^show golden visa properties$/.test(raw) ||
     /^show me golden visa properties$/.test(raw) ||
     /^golden visa properties$/.test(raw) ||
@@ -2779,6 +2798,105 @@ function isReadInvestorVisaGuideAction(text) {
     .toLowerCase()
     .replace(/[.!?]/g, '');
   return /^read investor visa guide$/.test(raw) || /^investor visa guide$/.test(raw);
+}
+
+function goldenVisaActionIdFromMessage(text) {
+  if (isShowGoldenVisaPropertiesAction(text)) return GOLDEN_VISA_ACTION.SHOW_PROPERTIES;
+  if (isReadInvestorVisaGuideAction(text)) return GOLDEN_VISA_ACTION.READ_GUIDE;
+  return null;
+}
+
+function copyGoldenVisaFlow(flow = {}) {
+  return {
+    shownActions: uniqueIdList(flow.shownActions || []),
+    completedActions: uniqueIdList(flow.completedActions || []),
+  };
+}
+
+function markGoldenVisaAction(flow = {}, { shown = [], completed = [] } = {}) {
+  const next = copyGoldenVisaFlow(flow);
+  for (const id of shown) {
+    if (id && !next.shownActions.includes(id)) next.shownActions.push(id);
+  }
+  for (const id of completed) {
+    if (id && !next.completedActions.includes(id)) next.completedActions.push(id);
+    if (id && !next.shownActions.includes(id)) next.shownActions.push(id);
+  }
+  return next;
+}
+
+function goldenVisaInfoOptions(flow = {}) {
+  const completed = new Set(copyGoldenVisaFlow(flow).completedActions);
+  return GOLDEN_VISA_INFO_OPTIONS.filter((label) => {
+    if (label === GOLDEN_VISA_ACTION_LABELS[GOLDEN_VISA_ACTION.READ_GUIDE]) {
+      return !completed.has(GOLDEN_VISA_ACTION.READ_GUIDE);
+    }
+    if (label === GOLDEN_VISA_ACTION_LABELS[GOLDEN_VISA_ACTION.SHOW_PROPERTIES]) {
+      return !completed.has(GOLDEN_VISA_ACTION.SHOW_PROPERTIES);
+    }
+    return true;
+  });
+}
+
+function goldenVisaInitialReply() {
+  return [
+    "Based on Rocky Real Estate's current investor visa guide, the 10-year Golden Visa property investment threshold is AED 2 million.",
+    'The investment may be in one property or multiple properties that together meet the required amount.',
+    "If you're considering the property-investment route, I can show you current Rocky listings priced from AED 2 million.",
+  ].join('\n\n');
+}
+
+function goldenVisaGuideDetailReply() {
+  return [
+    "Here are the key points from Rocky's investor visa guide:",
+    '',
+    '• Two-year investor visa:',
+    '  sole property owners may not need a minimum property value under the current guide.',
+    '',
+    '• Joint ownership:',
+    '  each investor must meet the applicable ownership requirement stated in the Rocky guide.',
+    '',
+    '• Five-year investor visa:',
+    '  AED 1 million property investment, subject to the conditions stated in the guide.',
+    '',
+    '• Ten-year Golden Visa:',
+    '  minimum AED 2 million property investment, which may be across one property or multiple properties.',
+    '',
+    'The residency is renewable, subject to the applicable requirements.',
+  ].join('\n');
+}
+
+function filterGoldenVisaRelatedSources(sources = []) {
+  const cleaned = (sources || []).filter((s) => s && s.url && !isHomepageUrl(s.url));
+  const scored = cleaned
+    .map((s) => {
+      const title = String(s.title || '');
+      const url = String(s.url || '');
+      const hay = `${title} ${url}`;
+      if (GOLDEN_VISA_EXCLUDE_SOURCE.test(hay) && !GOLDEN_VISA_PRIMARY_SOURCE.test(hay)) {
+        return null;
+      }
+      let score = 0;
+      if (GOLDEN_VISA_PRIMARY_SOURCE.test(hay)) score += 10;
+      if (/dubai\s+updates\s+investor\s+visa/i.test(hay)) score += 5;
+      if (GOLDEN_VISA_SECONDARY_SOURCE.test(hay)) score += 4;
+      if (/\bvisa\b/i.test(hay)) score += 1;
+      if (score <= 0) return null;
+      return { ...titledSource(s), score };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.score - a.score);
+
+  const ordered = [];
+  const seen = new Set();
+  for (const item of scored) {
+    const key = normalizeContentUrl(item.url);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    ordered.push({ title: item.title, url: item.url });
+    if (ordered.length >= 2) break;
+  }
+  return ordered;
 }
 
 /** True when the visitor wants listings for Golden Visa investment — not info-only. */
@@ -2823,8 +2941,25 @@ function applyGoldenVisaSearchDefaults(filters, message = '') {
   return filters;
 }
 
-function goldenVisaInfoOptions() {
-  return GOLDEN_VISA_INFO_OPTIONS.slice();
+function buildGoldenVisaInfoResult(profile = {}, { detailGuide = false } = {}) {
+  const flow = copyGoldenVisaFlow(profile.goldenVisaFlow);
+  let nextFlow;
+  let reply;
+  if (detailGuide) {
+    nextFlow = markGoldenVisaAction(flow, { completed: [GOLDEN_VISA_ACTION.READ_GUIDE] });
+    reply = goldenVisaGuideDetailReply();
+  } else {
+    nextFlow = markGoldenVisaAction(flow, {
+      shown: [GOLDEN_VISA_ACTION.SHOW_PROPERTIES, GOLDEN_VISA_ACTION.READ_GUIDE],
+    });
+    reply = goldenVisaInitialReply();
+  }
+  return {
+    reply,
+    options: goldenVisaInfoOptions(nextFlow),
+    goldenVisaFlow: nextFlow,
+    sources: [],
+  };
 }
 
 function isContentKnowledgeTopic(text) {
@@ -3237,8 +3372,8 @@ function buildSearchAcknowledgement(next = {}, { previous = {}, message = '' } =
   if (isShowMoreRequest(message)) return '';
   if (parseEmptyResultChoice(message)?.budget) return '';
   if (next.goldenVisaSearch && (isGoldenVisaPropertySearchIntent(message) || isShowGoldenVisaPropertiesAction(message))) {
-    const minLabel = formatAed(next.budgetMin || GOLDEN_VISA_MIN_AED);
-    return `Certainly. Based on Rocky Real Estate's current investor visa guide, the property investment threshold for the 10-year Golden Visa is ${minLabel}.`;
+    // Property-search turn — skip the long eligibility preamble; composeSearchReply covers the count.
+    return '';
   }
   if (isBudgetOnlyFollowUp(previous, next, message)) {
     return budgetKeepAcknowledgement(next);
@@ -5283,23 +5418,14 @@ function composeSearchReply(ctx = {}) {
       const count = Number(ctx.exactMatchCount);
       const offPlanCount = Number(ctx.inventoryCounts?.offPlanCount) || 0;
       const minLabel = formatAed(filters.budgetMin || GOLDEN_VISA_MIN_AED);
-      if (!ack) {
-        lines.push(
-          `Certainly. Based on Rocky Real Estate's current investor visa guide, the property investment threshold for the 10-year Golden Visa is ${formatAed(GOLDEN_VISA_MIN_AED)}.`
-        );
-      }
+      // Chip / follow-up search: keep to 1–2 sentences before property cards.
       if (Number.isFinite(count) && count > 0 && offPlanCount > 0) {
         lines.push(
           `I found ${count} ready properties from ${minLabel} and ${offPlanCount} off-plan options from ${minLabel}.`
         );
       } else {
-        const summary = matchingCountSummary(count, filters);
-        if (summary) lines.push(summary);
+        lines.push(`I found ${Number.isFinite(count) ? count : 0} properties currently listed from ${minLabel}.`);
       }
-      lines.push(
-        `These properties meet the ${minLabel} minimum property-value filter used for this Golden Visa property search. Final visa eligibility remains subject to the applicable ownership and authority requirements.`
-      );
-      lines.push('Would you like me to narrow these by area, property type, or bedroom count?');
       return stripExposedUrlsFromReply(lines.filter(Boolean).join('\n\n').replace(/\n\n+/g, '\n\n'));
     }
     const count = Number(ctx.exactMatchCount);
@@ -6334,6 +6460,9 @@ async function searchContent({ query }) {
       sourceType: row.sourceType,
     }))
   );
+  const sources = isGoldenVisaMention(q)
+    ? filterGoldenVisaRelatedSources(ranked.length ? ranked : rows)
+    : ranked;
 
   const shortChunks = rows.map((row) => ({
     sourceType: row.sourceType,
@@ -6352,13 +6481,13 @@ async function searchContent({ query }) {
   }));
 
   const primaryCta =
-    ranked[0] && ranked[0].title
-      ? `Read more: “${ranked[0].title}” (use the related page button).`
+    !isGoldenVisaMention(q) && sources[0] && sources[0].title
+      ? `Read more: “${sources[0].title}” (use the related page button).`
       : null;
 
   return {
     propertyCards: [],
-    sources: ranked,
+    sources,
     leadCaptured: false,
     profilePatch: {},
     modelPayload: {
@@ -6625,11 +6754,20 @@ module.exports = {
   isGoldenVisaPropertySearchIntent,
   isShowGoldenVisaPropertiesAction,
   isReadInvestorVisaGuideAction,
+  goldenVisaActionIdFromMessage,
+  copyGoldenVisaFlow,
+  markGoldenVisaAction,
   parseGoldenVisaMinInvestment,
   applyGoldenVisaSearchDefaults,
   goldenVisaInfoOptions,
+  goldenVisaInitialReply,
+  goldenVisaGuideDetailReply,
+  buildGoldenVisaInfoResult,
+  filterGoldenVisaRelatedSources,
   GOLDEN_VISA_MIN_AED,
   GOLDEN_VISA_INFO_OPTIONS,
+  GOLDEN_VISA_ACTION,
+  GOLDEN_VISA_ACTION_LABELS,
   isNonPlaceLocationToken,
   shouldSkipPropertySearch,
   isVagueConfirm,

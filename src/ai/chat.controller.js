@@ -20,7 +20,7 @@ const {
   buildViewingLeadIntent,
   logViewingDebug,
 } = require('./chat.tools');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, shouldResetOnListingIntent, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, isGoldenVisaMention, isGoldenVisaPropertySearchIntent, isShowGoldenVisaPropertiesAction, goldenVisaInfoOptions, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, isChangeBedroomsAction, bedroomChangeQuestion, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion, listingSearchResetPatch, isExplicitSearchReset, hasInProgressListingSearch, hasActiveListingSearch, isCurrentListingReference, buildSearchAcknowledgement, joinAckAndQuestion, stripExposedUrlsFromReply } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, shouldResetOnListingIntent, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, isGoldenVisaMention, isGoldenVisaPropertySearchIntent, isShowGoldenVisaPropertiesAction, isReadInvestorVisaGuideAction, goldenVisaInfoOptions, goldenVisaInitialReply, goldenVisaGuideDetailReply, buildGoldenVisaInfoResult, markGoldenVisaAction, copyGoldenVisaFlow, filterGoldenVisaRelatedSources, GOLDEN_VISA_ACTION, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, isChangeBedroomsAction, bedroomChangeQuestion, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion, listingSearchResetPatch, isExplicitSearchReset, hasInProgressListingSearch, hasActiveListingSearch, isCurrentListingReference, buildSearchAcknowledgement, joinAckAndQuestion, stripExposedUrlsFromReply } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -70,15 +70,39 @@ function contentReplyOrFallback(chunks = [], sources = [], usedSearchContent = f
   return '';
 }
 
-function enrichGoldenVisaInfoReply(reply, message) {
+function enrichGoldenVisaInfoReply(reply, message, profile = {}, sources = []) {
+  if (isReadInvestorVisaGuideAction(message)) {
+    const built = buildGoldenVisaInfoResult(profile, { detailGuide: true });
+    return {
+      reply: built.reply,
+      options: built.options,
+      goldenVisaFlow: built.goldenVisaFlow,
+      sources: filterGoldenVisaRelatedSources(sources).slice(0, 1),
+    };
+  }
   if (!isGoldenVisaMention(message) || isGoldenVisaPropertySearchIntent(message)) {
-    return { reply, options: null };
+    return { reply, options: null, goldenVisaFlow: null, sources: null };
   }
-  let next = String(reply || '').trim();
-  if (next && !/listings priced from AED 2|Show Golden Visa properties/i.test(next)) {
-    next = `${next}\n\nIf you are considering the property-investment route, I can also show you Rocky listings priced from AED 2 million.`;
-  }
-  return { reply: next, options: goldenVisaInfoOptions() };
+  const built = buildGoldenVisaInfoResult(profile, { detailGuide: false });
+  return {
+    // Prefer the concise UX template over a long model dump.
+    reply: built.reply,
+    options: built.options,
+    goldenVisaFlow: built.goldenVisaFlow,
+    // One article chip only — do not also name it again in the body.
+    sources: filterGoldenVisaRelatedSources(sources).slice(0, 1),
+  };
+}
+
+function applyGoldenVisaGuideAction(message, profile) {
+  if (!isReadInvestorVisaGuideAction(message)) return null;
+  const built = buildGoldenVisaInfoResult(profile, { detailGuide: true });
+  return {
+    type: 'clarify',
+    profile: mergeProfile(profile, { goldenVisaFlow: built.goldenVisaFlow }),
+    reply: built.reply,
+    options: built.options,
+  };
 }
 
 function getOpenAI() {
@@ -1046,6 +1070,9 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
   const changeBedrooms = applyChangeBedroomsAction(message, profile);
   if (changeBedrooms) return changeBedrooms;
 
+  const goldenVisaGuide = applyGoldenVisaGuideAction(message, profile);
+  if (goldenVisaGuide) return goldenVisaGuide;
+
   // Property-type change takes priority over any pending clarification state
   const typeChange = applyPropertyTypeChange(message, profile);
   if (typeChange) return typeChange;
@@ -1369,9 +1396,15 @@ function applyNewLocationSearch(message, profile) {
 function applyListingFilterUpdate(message, profile) {
   const result = qualifyListingSearch(message, profile);
   if (!result) return null;
+  const patch = { ...result.profilePatch };
+  if (isShowGoldenVisaPropertiesAction(message)) {
+    patch.goldenVisaFlow = markGoldenVisaAction(profile.goldenVisaFlow, {
+      completed: [GOLDEN_VISA_ACTION.SHOW_PROPERTIES],
+    });
+  }
   return {
     type: result.type,
-    profile: mergeProfile(profile, result.profilePatch),
+    profile: mergeProfile(profile, patch),
     reply: result.reply,
     options: result.options,
     inputType: result.inputType || null,
@@ -2323,13 +2356,24 @@ const chat = async (req, res) => {
       throwIfAborted(abortController.signal);
 
       let reply = String(result.reply || '').trim() || FRIENDLY_CHAT_ERROR;
-      const goldenVisaInfo = enrichGoldenVisaInfoReply(reply, message);
+      const goldenVisaInfo = enrichGoldenVisaInfoReply(
+        reply,
+        message,
+        result.profile || profile,
+        result.sources || []
+      );
       if (goldenVisaInfo.options && !(result.propertyCards || []).length) {
         reply = goldenVisaInfo.reply || reply;
-        if (!result.options) {
-          result.options = goldenVisaInfo.options;
-          result.requiresClarification = true;
-          result.select = PURPOSE_SELECT;
+        result.options = goldenVisaInfo.options;
+        result.requiresClarification = true;
+        result.select = PURPOSE_SELECT;
+        if (Array.isArray(goldenVisaInfo.sources)) {
+          result.sources = goldenVisaInfo.sources;
+        }
+        if (goldenVisaInfo.goldenVisaFlow) {
+          result.profile = mergeProfile(result.profile || profile, {
+            goldenVisaFlow: goldenVisaInfo.goldenVisaFlow,
+          });
         }
       }
       const suggestedCta = result.options

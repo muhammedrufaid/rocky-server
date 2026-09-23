@@ -61,6 +61,10 @@ const conversationSchema = new mongoose.Schema(
         purpose: { type: String, default: null, trim: true },
         furnished: { type: String, default: null, trim: true },
       },
+      goldenVisaFlow: {
+        shownActions: { type: [String], default: [] },
+        completedActions: { type: [String], default: [] },
+      },
       shownPropertyIds: { type: [String], default: [] },
       slotFlow: {
         awaiting: { type: String, default: null, trim: true },
