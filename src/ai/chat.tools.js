@@ -599,7 +599,11 @@ function clearsAllAmenities(text) {
     .toLowerCase()
     .replace(/[.!?]/g, '');
   if (!raw) return false;
-  if (/^(any|any amenities?|no amenities?|no amenity preference|amenities? (don'?t|do not) matter)$/i.test(raw)) {
+  // Never treat bare "Any" (bedroom/location chip) as clearing amenities.
+  if (raw === 'any' || raw === 'all' || raw === 'anywhere' || raw === 'skip') return false;
+  if (
+    /^(any amenities?|no amenities?|no amenity preference|amenities? (don'?t|do not) matter)$/i.test(raw)
+  ) {
     return true;
   }
   return /\b(any|no|without)\s+amenities?\b|\bamenities?\s+(don'?t|do\s+not)\s+matter\b|\bno\s+amenity\s+(preference|filter|requirement)s?\b/.test(
@@ -3692,6 +3696,7 @@ function buildRefinementAcknowledgement(previous = {}, next = {}) {
     !!normalizePurpose(previous.purpose) &&
     !!normalizePurpose(next.purpose) &&
     normalizePurpose(previous.purpose) !== normalizePurpose(next.purpose);
+  const typeWord = pluraliseType(nextType || prevType || 'property').toLowerCase();
 
   if (locChanged && !bedsChanged && !typeChanged && !purposeChanged) {
     return `Sure — I'll keep your ${keepSearchLabel(previous)} search and switch the location to ${nextLoc}.`;
@@ -3705,8 +3710,8 @@ function buildRefinementAcknowledgement(previous = {}, next = {}) {
       else if (normalizePurpose(next.purpose) === 'Buy') keepBits.push('buy');
       const keep = keepBits.join(' + ');
       return keep
-        ? `Got it — I'll switch this to studio apartments and keep ${keep}.`
-        : `Got it — I'll switch this to studio apartments and keep the rest of your search.`;
+        ? `Got it — I'll switch this to studio ${typeWord} and keep ${keep}.`
+        : `Got it — I'll switch this to studio ${typeWord} and keep the rest of your search.`;
     }
     const keepBits = [];
     if (nextLoc) keepBits.push(nextLoc);
@@ -3715,7 +3720,7 @@ function buildRefinementAcknowledgement(previous = {}, next = {}) {
     else if (normalizePurpose(next.purpose) === 'Buy') keepBits.push('buy');
     const keep = keepBits.join(' + ');
     return keep
-      ? `Sure — I'll switch this to ${nextBeds}-bedroom apartments and keep ${keep}.`
+      ? `Sure — I'll switch this to ${nextBeds}-bedroom ${typeWord} and keep ${keep}.`
       : `Sure — I'll update this to ${nextBeds}-bedroom and keep the rest of your search.`;
   }
   if (typeChanged && !locChanged && !purposeChanged) {
@@ -3736,6 +3741,7 @@ function buildRefinementAcknowledgement(previous = {}, next = {}) {
     }
     return "Sure — I'll switch this to a purchase search and keep the rest of your search.";
   }
+  // Confirmation text always reflects the actual stored search state.
   const looking = describeLookingForPhrase(next);
   if (!looking) return '';
   return `${searchAckOpener(next)} — you're looking for ${looking}.`;
@@ -4569,6 +4575,53 @@ function extractSearchPatch(message, previous = {}, { awaiting } = {}) {
   if (!raw) return changes;
   // UI action — do not treat as a bedroom/budget/location patch.
   if (isChangeBedroomsAction(raw)) return changes;
+
+  // Slot chip replies patch ONLY the awaited field — never touch amenities/type/etc.
+  const slotWords = raw.replace(/[.!?]/g, '').trim().split(/\s+/).filter(Boolean).length;
+  const shortSlotReply = slotWords > 0 && slotWords <= 4;
+  if (awaiting === 'purpose' && shortSlotReply && (isPurposeChipReply(raw) || parsePurposeFromMessage(raw, previous))) {
+    const purpose = parsePurposeFromMessage(raw, previous);
+    if (purpose) changes.purpose = purpose;
+    return changes;
+  }
+  if (awaiting === 'bedrooms' && shortSlotReply) {
+    const beds = parseBedroomChoice(raw);
+    if (beds) {
+      changes.bedrooms = beds;
+      return changes;
+    }
+  }
+  if (awaiting === 'propertyType' && shortSlotReply) {
+    const types = parsePropertyTypesFromMessage(raw);
+    if (types.length) {
+      changes.types = types;
+      return changes;
+    }
+  }
+  if ((awaiting === 'location' || awaiting === 'nearbyArea') && shortSlotReply) {
+    const standaloneAny =
+      /^(any|all|anywhere|skip|no preference|any area|any location)$/i.test(raw.replace(/[.!?]/g, ''));
+    if (standaloneAny || isUnrestrictedLocationPhrase(raw)) {
+      changes.locationAny = true;
+      return changes;
+    }
+    const location = parseLocationFromMessage(raw) || parseLocationReply(raw);
+    if (location) {
+      changes.location = location;
+      return changes;
+    }
+  }
+  if (awaiting === 'budget' && shortSlotReply) {
+    if (isStandaloneAnyBudgetReply(raw) || /^any budget$/i.test(raw.replace(/[.!?]/g, ''))) {
+      changes.budget = { any: true };
+      return changes;
+    }
+    const budget = parseBudgetFromMessage(message, { requireBudgetContext: true });
+    if (budget) {
+      changes.budget = budget;
+      return changes;
+    }
+  }
 
   if (isGoldenVisaPropertySearchIntent(raw) || isShowGoldenVisaPropertiesAction(raw)) {
     changes.purpose = 'Buy';

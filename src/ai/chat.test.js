@@ -30,6 +30,7 @@ const {
   isExplicitPropertySearchIntent,
   isContentKnowledgeTopic,
   parseAmenitiesFromMessage,
+  clearsAllAmenities,
   isGoldenVisaMention,
   isGoldenVisaPropertySearchIntent,
   isShowGoldenVisaPropertiesAction,
@@ -281,6 +282,53 @@ test('amenity memory survives purpose type bedrooms and any-area answers', () =>
   assert.deepEqual(finalFilters.amenities, ['swimming_pool']);
   assert.deepEqual(listingQueryOpts(finalFilters, '').filters.amenities, ['swimming_pool']);
   assert.match(getSystemPrompt({ intent: null }), /amenities\/features/i);
+});
+
+test('search memory rule: each action patches only the requested field', () => {
+  const base = {
+    ...emptySearchFilters(),
+    purpose: 'Buy',
+    type: 'Villa',
+    types: ['Villa'],
+    bedrooms: 3,
+    bedroomsResolved: true,
+    location: 'Dubai Hills',
+    amenities: ['swimming_pool'],
+  };
+
+  const only = (msg, awaiting, keys) => {
+    const next = applyMessageToSearchFilters(base, msg, { awaiting });
+    const changed = Object.keys(base).filter(
+      (k) => JSON.stringify(base[k] ?? null) !== JSON.stringify(next[k] ?? null)
+    );
+    assert.deepEqual(changed.sort(), keys.sort(), msg);
+    return next;
+  };
+
+  only('Buy', 'purpose', []); // already Buy
+  only('Rent', 'purpose', ['purpose']);
+  only('Villa', 'propertyType', []); // already Villa
+  only('Apartment', 'propertyType', ['type', 'types']);
+  only('1 Bed', 'bedrooms', ['bedrooms']);
+  only('2 Beds', 'bedrooms', ['bedrooms']);
+  const anyBeds = only('Any', 'bedrooms', ['bedrooms', 'bedroomsAny']);
+  assert.equal(anyBeds.bedrooms, null);
+  assert.equal(anyBeds.bedroomsAny, true);
+  assert.deepEqual(anyBeds.amenities, ['swimming_pool']);
+  only('Any area', 'location', ['location', 'locationAny']);
+  only('Change bedrooms', null, []);
+  only('Explore 15 off-plan properties', null, ['purpose']);
+
+  assert.equal(clearsAllAmenities('Any'), false);
+  assert.equal(clearsAllAmenities('any amenities'), true);
+
+  const ack = buildSearchAcknowledgement(
+    { ...base, bedrooms: 2 },
+    { previous: base, message: '2 Beds' }
+  );
+  assert.match(ack, /2-bedroom villas/i);
+  assert.equal(/apartments/i.test(ack), false);
+  assert.match(getSystemPrompt({ intent: null }), /SEARCH MEMORY RULE/i);
 });
 
 test('Golden Visa property requests search BUY from AED 2M and preserve memory', async (t) => {
