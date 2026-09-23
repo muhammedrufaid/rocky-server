@@ -2962,13 +2962,122 @@ function buildGoldenVisaInfoResult(profile = {}, { detailGuide = false } = {}) {
   };
 }
 
+function isExplicitPropertySearchIntent(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  if (isShowMoreRequest(raw) || isShowGoldenVisaPropertiesAction(raw)) return true;
+  if (isGoldenVisaPropertySearchIntent(raw)) return true;
+  if (isPropertyUiAction(raw) || isBookViewingAction(raw)) return false;
+  if (parseSellIntent(raw)) return false;
+  const lower = raw.toLowerCase();
+  // FAQ / process questions about selling off-plan are content, not listing search.
+  if (/\b(can\s+i\s+sell|before\s+completion|how\s+(?:do|can)\s+i\s+sell)\b/.test(lower)) return false;
+  if (
+    /\b(show|find|search|get)\s+(me\s+)?(a\s+|an\s+|some\s+|any\s+)?(\d+\s*(?:bed|br|bhk)\s+|studio\s+)?(villas?|apartments?|townhouses?|penthouses?|propert(?:y|ies)|homes?|listings?|offices?|shops?|warehouses?)\b/.test(
+      lower
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(i\s+(?:need|want)|looking\s+(?:for|to)|want\s+to\s+(?:buy|rent|purchase)|need\s+to\s+(?:buy|rent))\b/.test(lower) &&
+    /\b(villas?|apartments?|townhouses?|penthouses?|propert(?:y|ies)|homes?|listings?|studio|bed|br|bhk|office|shop)\b/.test(
+      lower
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(for\s+rent|to\s+rent|for\s+sale|to\s+buy)\b/.test(lower) &&
+    (parsePropertyTypesFromMessage(raw).length > 0 ||
+      parseBedroomChoice(raw) ||
+      /\b(propert(?:y|ies)|homes?|listings?)\b/.test(lower))
+  ) {
+    return true;
+  }
+  // Off-plan listing intent needs an explicit find/show/want/need signal — not FAQ wording alone.
+  if (
+    /\boff[-\s]?plan\b/.test(lower) &&
+    /\b(show|find|search|looking|want|need|explore)\b/.test(lower) &&
+    /\b(propert(?:y|ies)|homes?|listings?|villas?|apartments?|townhouses?)\b/.test(lower)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Informational RE questions must answer from Rocky content first —
+ * never open with Buy / Rent / Off-plan clarification.
+ */
+function isInformationalRealEstateQuery(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  if (isExplicitPropertySearchIntent(raw)) return false;
+  if (isReadInvestorVisaGuideAction(raw)) return true;
+
+  const lower = raw.toLowerCase();
+  if (
+    /\b(best|top|good|great|recommended|popular)\s+(communities|areas|neighbourhoods|neighborhoods|places|locations)\b/.test(
+      lower
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(communities|areas|neighbourhoods|neighborhoods|places)\s+(for|to)\s+(families|family|living|live|invest(?:ment|ing)?|expats?|couples|kids)\b/.test(
+      lower
+    )
+  ) {
+    return true;
+  }
+  if (/\b(family[-\s]?friendly|good\s+for\s+families|areas?\s+for\s+families|best\s+for\s+families)\b/.test(lower)) {
+    return true;
+  }
+  if (
+    /\b(which|what)\s+(areas?|communities|neighbourhoods|neighborhoods)\b/.test(lower) ||
+    /\bwhere\s+(?:should|to|can)\s+(?:i|we)\s+(?:live|buy|invest|look)\b/.test(lower) ||
+    /\b(area|community)\s+comparisons?\b/.test(lower) ||
+    /\bcompare\s+(?:these\s+)?(areas?|communities)\b/.test(lower)
+  ) {
+    return true;
+  }
+  if (
+    /\b(schools?|lifestyle|amenities|community\s+guide|area\s+guide|living\s+in|what'?s\s+it\s+like)\b/.test(lower)
+  ) {
+    return true;
+  }
+  if (
+    /\b(freehold|leasehold|mortgage|residency|visa|golden\s+visa|investor\s+visa|foreigner|foreigners|expat)\b/.test(
+      lower
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(can\s+(?:i|we|foreigners?|expats?)\s+buy|buying\s+property\s+(?:in\s+dubai\s+)?as\s+a\s+foreigner|difference\s+between\s+freehold)\b/.test(
+      lower
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(investment\s+guides?|guides?\s+to\s+(?:buying|investing)|tips?\s+for\s+(?:buyers?|investors?|families))\b/.test(
+      lower
+    )
+  ) {
+    return true;
+  }
+  return isContentKnowledgeTopic(raw);
+}
+
 function isContentKnowledgeTopic(text) {
   const raw = String(text || '')
     .trim()
     .toLowerCase();
   if (!raw) return false;
-  // Golden Visa listing requests are property search, not content-only.
-  if (isGoldenVisaPropertySearchIntent(raw)) return false;
+  // Golden Visa listing requests / explicit listing requests are property search.
+  if (isExplicitPropertySearchIntent(raw) || isGoldenVisaPropertySearchIntent(raw)) return false;
   if (isReadInvestorVisaGuideAction(raw)) return true;
   if (/\b(show|find|search)\s+(me\s+)?(villas?|apartments?|townhouses?|properties|homes?|listings?)\b/.test(raw)) {
     return false;
@@ -2977,6 +3086,14 @@ function isContentKnowledgeTopic(text) {
   if (isServicesCatalogQuestion(raw)) return true;
   // Property-management lead flow owns these — not blog Q&A.
   if (isMultiPropertyServiceQuery(raw) || matchesServiceInquiryPhrase(raw)) return false;
+  if (
+    /\b(best|top|good)\s+(communities|areas|neighbourhoods|neighborhoods|places)\b/.test(raw) ||
+    /\b(family[-\s]?friendly|for\s+families|areas?\s+for\s+families|communities\s+for\s+families)\b/.test(raw) ||
+    /\b(which|what)\s+(areas?|communities)\b/.test(raw) ||
+    /\b(freehold|leasehold|mortgage|schools?|lifestyle|residency|foreigner|foreigners)\b/.test(raw)
+  ) {
+    return true;
+  }
   return /\b(golden\s+visa|investor\s+visa|visa\s+eligib|buying\s+costs?|cost\s+of\s+buying|cost\s+to\s+buy|costs?\s+involved|transfer\s+fee|dld|mortgage|service\s+charge|rera|freehold|leasehold|flexi\s*rent|flexible\s+rent|payment\s+plans?|financ(?:e|ing|ial)?|payable\s+options?|installments?|roi|invest(?:ing|ment|or)?|summer|winter|spring|autumn|season|prepare|tips?|advice|faq|area\s+guide|tell\s+me\s+about|what\s+is|what\s+are|what\s+should\s+i\s+know|before\s+(?:renting|buying|leasing)|what'?s\s+(?:it\s+like|the\s+latest)|how\s+(?:can|do|to|does|much)|need\s+to\s+know|can\s+i\s+sell|before\s+completion|transaction|market\s+(?:stats?|data|overview)|quarter\s*[1234]|q\s*[1234]|blog|article|posts?|living\s+in|office\s+hours|book\s+(?:a\s+)?viewing|services?\s+(?:do\s+you|you\s+offer|offered|does)|do\s+you\s+(?:offer|help|provide)|company|founded|founder|years?\s+(?:in\s+)?(?:business|operation)|who\s+(?:founded|are\s+you|is\s+rocky)|areas?\s+(?:do\s+you\s+)?cover|contact\s+(?:us|for))\b/.test(
     raw
   );
@@ -3467,6 +3584,14 @@ function isExplicitSearchReset(text) {
 function qualifyListingSearch(message, profile = {}) {
   if (isPropertyUiAction(message)) return null;
   if (parseSellIntent(message) || isServiceInquiryMessage(message)) return null;
+  // Content-first: informational RE questions never enter Buy/Rent/Off-plan intake.
+  if (
+    isInformationalRealEstateQuery(message) &&
+    !LISTING_SLOT_AWAITING.has(profile.slotFlow?.awaiting) &&
+    !isExplicitPropertySearchIntent(message)
+  ) {
+    return null;
+  }
   if (isExplicitSearchReset(message)) {
     const next = applyMessageToSearchFilters(emptySearchFilters(), message);
     const missing = nextMissingListingSlot(next);
@@ -3736,6 +3861,7 @@ function isAmbiguousListingQuery(text) {
   const raw = String(text || '').trim().toLowerCase();
   if (!raw) return false;
   if (isPropertyUiAction(raw)) return false;
+  if (isInformationalRealEstateQuery(raw)) return false;
   if (parseSellIntent(raw)) return false;
   if (parsePurposeFromMessage(raw)) return false;
   if (parseBedroomChoice(raw)) return false;
@@ -3780,7 +3906,7 @@ function isListingFollowUp(text) {
   if (isPropertyUiAction(raw)) return false;
   if (parseSellIntent(raw) || isSellCta(raw)) return false;
   if (isGoldenVisaPropertySearchIntent(raw) || isShowGoldenVisaPropertiesAction(raw)) return true;
-  if (isContentKnowledgeTopic(raw)) return false;
+  if (isInformationalRealEstateQuery(raw) || isContentKnowledgeTopic(raw)) return false;
   if (isMultiPropertyServiceQuery(raw) || matchesServiceInquiryPhrase(raw)) return false;
   if (parsePurposeFromMessage(raw)) return true;
   if (isShowMoreRequest(raw)) return true;
@@ -3811,7 +3937,7 @@ function isGeneralKnowledgeQuery(text) {
     .toLowerCase();
   if (!raw) return false;
   if (isServiceInquiryMessage(raw)) return false;
-  if (isContentKnowledgeTopic(raw)) return true;
+  if (isInformationalRealEstateQuery(raw) || isContentKnowledgeTopic(raw)) return true;
   if (isListingFollowUp(raw)) return false;
   return /\b(property\s+management|tell\s+me\s+about|what\s+is|what\s+are|how\s+do(?:es)?|explain|need\s+to\s+know\s+about)\b/.test(
     raw
@@ -4418,6 +4544,7 @@ function listingStartOptions(intent, profile = {}, message = '') {
 function shouldSkipPropertySearch(text) {
   if (!String(text || '').trim()) return false;
   if (parseSellIntent(text) || isSellCta(text)) return true;
+  if (isInformationalRealEstateQuery(text) && !isExplicitPropertySearchIntent(text)) return true;
   if (isListingFollowUp(text) || isVagueConfirm(text)) return false;
   return isGeneralKnowledgeQuery(text);
 }
@@ -6750,6 +6877,8 @@ module.exports = {
   isListingFollowUp,
   isGeneralKnowledgeQuery,
   isContentKnowledgeTopic,
+  isInformationalRealEstateQuery,
+  isExplicitPropertySearchIntent,
   isGoldenVisaMention,
   isGoldenVisaPropertySearchIntent,
   isShowGoldenVisaPropertiesAction,

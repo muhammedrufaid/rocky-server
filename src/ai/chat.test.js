@@ -26,6 +26,9 @@ const {
   parseSellServiceLocationChoice,
   sellServiceLocationReply,
   isGeneralKnowledgeQuery,
+  isInformationalRealEstateQuery,
+  isExplicitPropertySearchIntent,
+  isContentKnowledgeTopic,
   isGoldenVisaMention,
   isGoldenVisaPropertySearchIntent,
   isShowGoldenVisaPropertiesAction,
@@ -183,6 +186,45 @@ test('content questions skip property search (flexi rent, summer, golden visa)',
     assert.equal(isListingFollowUp(phrase), false, phrase);
     assert.equal(isServiceInquiryMessage(phrase), false, phrase);
   }
+});
+
+test('content-first routing: informational RE questions never open Buy/Rent/Off-plan', () => {
+  const informational = [
+    'Best communities for families in Dubai',
+    'best areas to live in Dubai',
+    'best areas for investment',
+    'Golden Visa',
+    'buying property in Dubai as a foreigner',
+    'freehold areas',
+    'mortgage information',
+    'Which areas are good for families?',
+    'What is the difference between freehold and leasehold?',
+    'Can foreigners buy property in Dubai?',
+    'How do I get a Golden Visa?',
+  ];
+  for (const phrase of informational) {
+    assert.equal(isInformationalRealEstateQuery(phrase), true, `info:${phrase}`);
+    assert.equal(isExplicitPropertySearchIntent(phrase), false, `not-search:${phrase}`);
+    assert.equal(isListingFollowUp(phrase), false, `follow-up:${phrase}`);
+    assert.equal(isAmbiguousListingQuery(phrase), false, `ambiguous:${phrase}`);
+    assert.equal(shouldSkipPropertySearch(phrase), true, `skip:${phrase}`);
+    assert.equal(qualifyListingSearch(phrase, {}), null, `qualify:${phrase}`);
+  }
+
+  const listingIntent = [
+    'Show me apartments in Dubai Marina',
+    'I need a 2-bedroom apartment to rent',
+    'Find villas under AED 3M',
+    'I want an off-plan property in Dubai South',
+  ];
+  for (const phrase of listingIntent) {
+    assert.equal(isInformationalRealEstateQuery(phrase), false, `not-info:${phrase}`);
+    assert.equal(isExplicitPropertySearchIntent(phrase), true, `search:${phrase}`);
+  }
+
+  assert.match(purposeClarificationReply(), /buy, rent, or explore off-plan/i);
+  assert.match(getSystemPrompt({ intent: null }), /CONTENT-FIRST QUERY ROUTING/i);
+  assert.match(getSystemPrompt({ intent: null }), /Never ask.*Buy \/ Rent \/ Off-plan as the first response/i);
 });
 
 test('Golden Visa property requests search BUY from AED 2M and preserve memory', async (t) => {

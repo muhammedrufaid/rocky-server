@@ -20,7 +20,7 @@ const {
   buildViewingLeadIntent,
   logViewingDebug,
 } = require('./chat.tools');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, shouldResetOnListingIntent, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, isGoldenVisaMention, isGoldenVisaPropertySearchIntent, isShowGoldenVisaPropertiesAction, isReadInvestorVisaGuideAction, goldenVisaInfoOptions, goldenVisaInitialReply, goldenVisaGuideDetailReply, buildGoldenVisaInfoResult, markGoldenVisaAction, copyGoldenVisaFlow, filterGoldenVisaRelatedSources, GOLDEN_VISA_ACTION, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, isChangeBedroomsAction, bedroomChangeQuestion, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion, listingSearchResetPatch, isExplicitSearchReset, hasInProgressListingSearch, hasActiveListingSearch, isCurrentListingReference, buildSearchAcknowledgement, joinAckAndQuestion, stripExposedUrlsFromReply } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, shouldResetOnListingIntent, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, isInformationalRealEstateQuery, isExplicitPropertySearchIntent, isGoldenVisaMention, isGoldenVisaPropertySearchIntent, isShowGoldenVisaPropertiesAction, isReadInvestorVisaGuideAction, goldenVisaInfoOptions, goldenVisaInitialReply, goldenVisaGuideDetailReply, buildGoldenVisaInfoResult, markGoldenVisaAction, copyGoldenVisaFlow, filterGoldenVisaRelatedSources, GOLDEN_VISA_ACTION, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, isChangeBedroomsAction, bedroomChangeQuestion, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion, listingSearchResetPatch, isExplicitSearchReset, hasInProgressListingSearch, hasActiveListingSearch, isCurrentListingReference, buildSearchAcknowledgement, joinAckAndQuestion, stripExposedUrlsFromReply } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -961,6 +961,16 @@ function applyShowMore(message, profile) {
 
 function applyConversationIntent(message, profile, explicitIntent = null) {
   const requestedIntent = normalizeIntentValue(explicitIntent);
+  // Content-first: never open Buy/Rent/Off-plan from informational RE questions.
+  if (
+    !requestedIntent &&
+    isInformationalRealEstateQuery(message) &&
+    !isExplicitPropertySearchIntent(message) &&
+    !isPurposeChipReply(message) &&
+    !isExplicitIntentStarter(message)
+  ) {
+    return null;
+  }
   const detected = requestedIntent || parseConversationIntent(message);
   if (!detected) return null;
 
@@ -1427,7 +1437,13 @@ function bedroomClarifyIfNeeded(message, profile) {
   ) {
     return null;
   }
-  if (shouldSkipPropertySearch(message) || isGeneralKnowledgeQuery(message)) return null;
+  if (
+    isInformationalRealEstateQuery(message) ||
+    shouldSkipPropertySearch(message) ||
+    isGeneralKnowledgeQuery(message)
+  ) {
+    return null;
+  }
   const result = qualifyListingSearch(message, profile);
   if (!result || result.type !== 'clarify') return null;
   return {
@@ -1758,7 +1774,10 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   const snapshotMeta = () => metaFromLoopState(propertyCards, sources, viewAllMatching, presentation);
 
   const shouldPrefetchRockyContent =
-    (isContentKnowledgeTopic(userMessage) || isGeneralKnowledgeQuery(userMessage)) &&
+    (isInformationalRealEstateQuery(userMessage) ||
+      isContentKnowledgeTopic(userMessage) ||
+      isGeneralKnowledgeQuery(userMessage)) &&
+    !isExplicitPropertySearchIntent(userMessage) &&
     !isListingFollowUp(userMessage) &&
     !isShowMoreRequest(userMessage) &&
     !isPropertyUiAction(userMessage) &&
@@ -1927,7 +1946,10 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
       !usedSearchContent &&
       !contentPrefetched &&
       !usedSearchProperties &&
-      (isContentKnowledgeTopic(userMessage) || isGeneralKnowledgeQuery(userMessage)) &&
+      (isInformationalRealEstateQuery(userMessage) ||
+        isContentKnowledgeTopic(userMessage) ||
+        isGeneralKnowledgeQuery(userMessage)) &&
+      !isExplicitPropertySearchIntent(userMessage) &&
       !isListingFollowUp(userMessage) &&
       !isShowMoreRequest(userMessage) &&
       !isPropertyUiAction(userMessage) &&
