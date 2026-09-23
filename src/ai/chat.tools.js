@@ -2924,6 +2924,15 @@ function locationClarificationReply() {
   return 'Which area or community are you interested in?';
 }
 
+const LOCATION_QUICK_REPLIES = [
+  { label: 'Dubai Marina', value: 'Dubai Marina' },
+  { label: 'Jumeirah Village Circle', value: 'Jumeirah Village Circle' },
+  { label: 'Business Bay', value: 'Business Bay' },
+  { label: 'Dubai South', value: 'Dubai South' },
+  { label: 'Dubai Media City', value: 'Dubai Media City' },
+  { label: 'Any', value: 'ANY' },
+];
+
 function budgetClarificationReply(filters = {}) {
   if (isRentalPurpose(filters.purpose)) return 'What is your rental budget?';
   return 'What is your budget?';
@@ -3127,7 +3136,9 @@ function listingSlotQuestion(slot, filters = {}) {
   if (slot === 'location') {
     return {
       reply: locationClarificationReply(),
-      options: undefined,
+      options: LOCATION_QUICK_REPLIES.map((item) => item.label),
+      quickReplies: LOCATION_QUICK_REPLIES.map((item) => ({ ...item })),
+      inputType: 'location',
       awaiting: 'location',
     };
   }
@@ -3189,6 +3200,8 @@ function qualifyListingSearch(message, profile = {}) {
         profilePatch: patch,
         reply: question.reply,
         options: question.options,
+        inputType: question.inputType || null,
+        quickReplies: question.quickReplies || null,
         missing,
       };
     }
@@ -3335,6 +3348,8 @@ function qualifyListingSearch(message, profile = {}) {
       profilePatch: patch,
       reply: joinAckAndQuestion(ack, question.reply),
       options: question.options,
+      inputType: question.inputType || null,
+      quickReplies: question.quickReplies || null,
       missing,
     };
   }
@@ -4305,6 +4320,8 @@ function missingSlotResult(slot, effectiveFilters, { previous, message } = {}) {
     [flag]: true,
     clarificationReply: joinAckAndQuestion(ack, question.reply),
     options: question.options,
+    inputType: question.inputType || null,
+    quickReplies: question.quickReplies || null,
     requiresClarification: true,
     select: PURPOSE_SELECT,
     modelPayload: {

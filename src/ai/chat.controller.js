@@ -87,6 +87,10 @@ function buildPathCPayload(result, reply, suggestedCta) {
     payload.options = result.options;
     payload.select = result.select || PURPOSE_SELECT;
   }
+  if (result.inputType) payload.inputType = result.inputType;
+  if (Array.isArray(result.quickReplies) && result.quickReplies.length) {
+    payload.quickReplies = result.quickReplies;
+  }
   return attachPropertySearchMeta(payload, result);
 }
 
@@ -374,6 +378,8 @@ function listingSlotResponse(profile, filters, extraPatch = {}) {
     profile: mergeProfile(profile, patch),
     reply: joinAckAndQuestion(ack, question.reply),
     options: question.options,
+    inputType: question.inputType || null,
+    quickReplies: question.quickReplies || null,
   };
 }
 
@@ -1294,6 +1300,8 @@ function applyListingFilterUpdate(message, profile) {
     profile: mergeProfile(profile, result.profilePatch),
     reply: result.reply,
     options: result.options,
+    inputType: result.inputType || null,
+    quickReplies: result.quickReplies || null,
   };
 }
 
@@ -1320,6 +1328,8 @@ function bedroomClarifyIfNeeded(message, profile) {
     profile: mergeProfile(profile, result.profilePatch),
     reply: result.reply,
     options: result.options,
+    inputType: result.inputType || null,
+    quickReplies: result.quickReplies || null,
   };
 }
 
@@ -1415,7 +1425,7 @@ async function maybeCaptureViewingLead(sessionId, profile) {
   return { profile: nextProfile, leadCaptured: !!result.leadCaptured, result };
 }
 
-async function clarificationResponse(res, { reply, profile, conversation, message, options, leadCaptured = false }) {
+async function clarificationResponse(res, { reply, profile, conversation, message, options, inputType, quickReplies, leadCaptured = false }) {
   const safeReply = String(reply || '').trim() || FRIENDLY_CHAT_ERROR;
   conversation.messages.push({ role: 'user', content: message, createdAt: new Date() });
   conversation.messages.push({ role: 'assistant', content: safeReply, createdAt: new Date() });
@@ -1433,6 +1443,8 @@ async function clarificationResponse(res, { reply, profile, conversation, messag
     body.options = options;
     body.select = PURPOSE_SELECT;
   }
+  if (inputType) body.inputType = inputType;
+  if (Array.isArray(quickReplies) && quickReplies.length) body.quickReplies = quickReplies;
   return res.status(200).json(body);
 }
 
@@ -1515,6 +1527,8 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage, previo
       viewAllMatching: null,
       requiresClarification: true,
       options: result.options || PURPOSE_OPTIONS,
+      inputType: result.inputType || null,
+      quickReplies: result.quickReplies || null,
       select: PURPOSE_SELECT,
     };
   }
@@ -1625,6 +1639,8 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   let viewAllMatching = null;
   let presentation = null;
   let clarificationOptions = null;
+  let clarificationInputType = null;
+  let clarificationQuickReplies = null;
   let usedSearchContent = false;
   let usedSearchProperties = false;
   let lastContentChunks = [];
@@ -1851,6 +1867,8 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
           lastSearchNeedsSlot = true;
           slotClarifyReply = result.clarificationReply || purposeClarificationReply();
           clarificationOptions = result.options || PURPOSE_OPTIONS;
+          clarificationInputType = result.inputType || null;
+          clarificationQuickReplies = result.quickReplies || null;
           if (result.effectiveFilters) {
             const nextFilters = copySearchFilters(result.effectiveFilters);
             if (!nextFilters.purpose && profile.lastSearchFilters?.purpose) {
@@ -1909,6 +1927,8 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         viewAllMatching: null,
         requiresClarification: true,
         options: clarificationOptions || PURPOSE_OPTIONS,
+        inputType: clarificationInputType,
+        quickReplies: clarificationQuickReplies,
         select: PURPOSE_SELECT,
         hasMore: false,
         nextCursor: null,
@@ -2023,6 +2043,8 @@ const chat = async (req, res) => {
         conversation,
         message,
         options: slotResult.options,
+        inputType: slotResult.inputType,
+        quickReplies: slotResult.quickReplies,
         leadCaptured,
       });
     }
@@ -2040,6 +2062,8 @@ const chat = async (req, res) => {
           conversation,
           message,
           options: bedroomGate.options,
+          inputType: bedroomGate.inputType,
+          quickReplies: bedroomGate.quickReplies,
         });
       }
     }
@@ -2098,6 +2122,10 @@ const chat = async (req, res) => {
         payload.requiresClarification = true;
         payload.options = forced.options;
         payload.select = forced.select || PURPOSE_SELECT;
+      }
+      if (forced.inputType) payload.inputType = forced.inputType;
+      if (Array.isArray(forced.quickReplies) && forced.quickReplies.length) {
+        payload.quickReplies = forced.quickReplies;
       }
       attachPropertySearchMeta(payload, forced);
       return res.status(200).json(payload);
