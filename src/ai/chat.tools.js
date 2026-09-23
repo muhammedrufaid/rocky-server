@@ -5980,11 +5980,23 @@ function contentSearchKeywords(query) {
 function scoreKeywordContentHit(doc, tokens = []) {
   const title = String(doc.title || '').toLowerCase();
   const url = String(doc.url || '').toLowerCase();
+  const slug = String(doc.slug || '').toLowerCase();
+  const excerpt = String(doc.excerpt || '').toLowerCase();
+  const category = String(doc.category || '').toLowerCase();
+  const tags = (Array.isArray(doc.tags) ? doc.tags : []).map((t) => String(t || '').toLowerCase()).join(' ');
+  const headings = (Array.isArray(doc.headings) ? doc.headings : [])
+    .map((h) => String(h || '').toLowerCase())
+    .join(' ');
   const content = String(doc.content || '').toLowerCase();
   let score = 0.55;
   for (const token of tokens) {
-    if (title.includes(token)) score += 0.12;
-    if (url.includes(token) || url.includes(token.replace(/\s+/g, '-'))) score += 0.08;
+    const slugToken = token.replace(/\s+/g, '-');
+    if (title.includes(token)) score += 0.14;
+    if (slug.includes(token) || slug.includes(slugToken)) score += 0.12;
+    if (url.includes(token) || url.includes(slugToken)) score += 0.08;
+    if (headings.includes(token)) score += 0.1;
+    if (excerpt.includes(token)) score += 0.06;
+    if (tags.includes(token) || category.includes(token)) score += 0.06;
     if (content.includes(token)) score += 0.03;
   }
   return Math.min(0.99, score);
@@ -5992,10 +6004,17 @@ function scoreKeywordContentHit(doc, tokens = []) {
 
 function contentRowKey(row = {}) {
   const sourceId = String(row.sourceId || '').trim();
-  if (sourceId) return `${row.sourceType || ''}|${sourceId}`;
+  const hash = String(row.embeddingHash || '').trim();
+  if (sourceId && hash) return `${row.sourceType || ''}|${sourceId}|${hash}`;
+  const contentFinger = String(row.content || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120)
+    .toLowerCase();
+  if (sourceId) return `${row.sourceType || ''}|${sourceId}|${contentFinger}`;
   return `${row.sourceType || ''}|${normalizeContentUrl(row.url)}|${String(row.title || '')
     .trim()
-    .toLowerCase()}`;
+    .toLowerCase()}|${contentFinger}`;
 }
 
 function mergeContentSearchRows(vectorRows = [], keywordRows = [], limit = CONTENT_LIMIT) {
@@ -6018,14 +6037,35 @@ async function keywordSearchContent(query, limit = CONTENT_LIMIT) {
   if (!tokens.length) return [];
   const fieldClauses = tokens.flatMap((token) => {
     const rx = new RegExp(escapeRegex(token), 'i');
-    return [{ title: rx }, { url: rx }, { content: rx }];
+    return [
+      { title: rx },
+      { url: rx },
+      { slug: rx },
+      { excerpt: rx },
+      { category: rx },
+      { tags: rx },
+      { headings: rx },
+      { content: rx },
+    ];
   });
   const docs = await ChatbotKnowledge.find({
     sourceType: { $in: ROCKY_CONTENT_SOURCE_TYPES },
     $or: fieldClauses,
   })
-    .select({ sourceType: 1, sourceId: 1, title: 1, url: 1, content: 1 })
-    .limit(Math.max(limit * 3, 12))
+    .select({
+      sourceType: 1,
+      sourceId: 1,
+      title: 1,
+      url: 1,
+      content: 1,
+      slug: 1,
+      excerpt: 1,
+      category: 1,
+      tags: 1,
+      headings: 1,
+      embeddingHash: 1,
+    })
+    .limit(Math.max(limit * 4, 16))
     .lean();
 
   return (docs || [])
@@ -6035,6 +6075,12 @@ async function keywordSearchContent(query, limit = CONTENT_LIMIT) {
       title: doc.title,
       url: doc.url,
       content: doc.content,
+      slug: doc.slug,
+      excerpt: doc.excerpt,
+      category: doc.category,
+      tags: doc.tags,
+      headings: doc.headings,
+      embeddingHash: doc.embeddingHash,
       score: scoreKeywordContentHit(doc, tokens),
     }))
     .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
@@ -6044,17 +6090,16 @@ async function keywordSearchContent(query, limit = CONTENT_LIMIT) {
 function contentAnswerInstruction(hasChunks) {
   if (hasChunks) {
     return [
-      'CRITICAL: Rocky internal content was found. Answer ONLY from these chunks — Rocky content has priority over generic knowledge.',
-      'Use the key fact that answers the visitor\'s LATEST question in at most 2 short sentences (~40 words).',
-      'Mention the relevant Rocky article/page naturally when useful. Related page buttons are already attached — do not paste raw URLs.',
-      'Do NOT ask permission to pull up or fetch the article. Do NOT say there was a hiccup fetching content.',
-      'Do NOT invent facts missing from the chunks. Combine only relevant overlapping facts if multiple chunks match.',
-      'End with one short helpful next step when appropriate (for example "Would you like more details?").',
+      'INTERNAL KNOWLEDGE FIRST — MANDATORY: Rocky internal content was found. Answer ONLY from these chunks as the primary source.',
+      'Do NOT answer from generic model knowledge first. Do NOT use vague filler like "Typically...", "Requirements may vary...", or "You should check authorities..." when these chunks contain a specific answer.',
+      'Preserve exact thresholds, visa durations, eligibility requirements, dates, ownership rules, and fees from the chunks accurately.',
+      'Answer the visitor\'s LATEST question in at most 2–3 short sentences. Mention the Rocky article/page by title and point them to the related page button/CTA already attached — do not paste raw URLs.',
+      'Do NOT ask whether they want you to find or pull up the article. Use it automatically. Do NOT invent facts missing from the chunks.',
     ].join(' ');
   }
   return [
     'No sufficiently relevant Rocky internal content was found.',
-    'If this is a normal real-estate informational question, answer briefly from general real-estate knowledge.',
+    'Only now may you answer briefly from general real-estate knowledge.',
     'Do NOT claim the answer came from Rocky Real Estate.',
     'For legal, immigration, visa, tax, mortgage, regulatory, or government-rule questions, clearly note that requirements can change and should be verified with the relevant authority.',
     'Keep the reply concise and useful. Do not invent Rocky-specific policies or fees.',
@@ -6105,6 +6150,12 @@ async function searchContent({ query }) {
           title: 1,
           url: 1,
           content: 1,
+          slug: 1,
+          excerpt: 1,
+          category: 1,
+          tags: 1,
+          headings: 1,
+          embeddingHash: 1,
           score: 1,
         },
       },
@@ -6136,9 +6187,22 @@ async function searchContent({ query }) {
     sourceType: row.sourceType,
     title: row.title,
     url: row.url,
-    // Keep only a short excerpt so the model cannot dump a long blog into the reply.
-    content: String(row.content || '').replace(/\s+/g, ' ').trim().slice(0, 420),
+    slug: row.slug || null,
+    category: row.category || null,
+    tags: Array.isArray(row.tags) ? row.tags.slice(0, 8) : [],
+    headings: Array.isArray(row.headings) ? row.headings.slice(0, 8) : [],
+    excerpt: String(row.excerpt || '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 280),
+    // Keep enough text to preserve exact thresholds / durations without dumping full articles.
+    content: String(row.content || '').replace(/\s+/g, ' ').trim().slice(0, 900),
   }));
+
+  const primaryCta =
+    ranked[0] && ranked[0].title
+      ? `Read more: “${ranked[0].title}” (use the related page button).`
+      : null;
 
   return {
     propertyCards: [],
@@ -6149,6 +6213,7 @@ async function searchContent({ query }) {
       count: rows.length,
       chunks: shortChunks,
       hasRockyContent: rows.length > 0,
+      primaryCta,
       instruction: contentAnswerInstruction(rows.length > 0),
     },
   };

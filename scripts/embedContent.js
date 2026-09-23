@@ -92,11 +92,16 @@ function chunkText(text) {
 }
 
 function blogBlocksToText(content) {
-  if (!Array.isArray(content)) return '';
-  return content
+  if (!Array.isArray(content)) return { body: '', headings: [] };
+  const headings = [];
+  const parts = content
     .map((block) => {
       if (!block || typeof block !== 'object') return '';
-      if (typeof block.text === 'string' && block.text.trim()) return block.text.trim();
+      const type = String(block.type || '').toLowerCase();
+      if (typeof block.text === 'string' && block.text.trim()) {
+        if (/heading|title|h[1-6]/.test(type)) headings.push(block.text.trim());
+        return block.text.trim();
+      }
       if (Array.isArray(block.items)) {
         return block.items
           .map((item) => String(item || '').trim())
@@ -105,8 +110,8 @@ function blogBlocksToText(content) {
       }
       return '';
     })
-    .filter(Boolean)
-    .join('\n\n');
+    .filter(Boolean);
+  return { body: parts.join('\n\n'), headings };
 }
 
 function collectSources() {
@@ -123,7 +128,15 @@ function documentsToChunks(blogs, areaGuides, faqs, services, companyInfos = [])
   const docs = [];
 
   for (const blog of blogs) {
-    const body = [blog.title, blog.subtitle, blog.description, blogBlocksToText(blog.content)]
+    const { body: blockBody, headings } = blogBlocksToText(blog.content);
+    const tags = Array.isArray(blog.keywords) ? blog.keywords.filter(Boolean).map(String) : [];
+    const metaLines = [
+      blog.slug ? `Slug: ${blog.slug}` : '',
+      blog.category ? `Category: ${blog.category}` : '',
+      tags.length ? `Tags: ${tags.join(', ')}` : '',
+      headings.length ? `Headings: ${headings.join(' | ')}` : '',
+    ].filter(Boolean);
+    const body = [blog.title, blog.subtitle, blog.description, ...metaLines, blockBody]
       .filter(Boolean)
       .join('\n\n');
     const chunks = chunkText(body);
@@ -132,7 +145,12 @@ function documentsToChunks(blogs, areaGuides, faqs, services, companyInfos = [])
         sourceType: 'blog',
         sourceId: String(blog._id),
         title: blog.title,
-        url: joinUrl(blog.path),
+        url: joinUrl(blog.path || (blog.slug ? `/blogs/${blog.slug}` : '')),
+        slug: blog.slug || '',
+        excerpt: blog.description || '',
+        category: blog.category || '',
+        tags,
+        headings,
         content,
         chunkIndex: index,
       });
@@ -140,18 +158,28 @@ function documentsToChunks(blogs, areaGuides, faqs, services, companyInfos = [])
   }
 
   for (const guide of areaGuides) {
-    const highlights = (guide.keyHighlights || [])
+    const highlightTitles = (guide.keyHighlights || [])
       .map((h) => (h && h.title ? h.title : ''))
+      .filter(Boolean);
+    const metaLines = [
+      guide.slug ? `Slug: ${guide.slug}` : '',
+      highlightTitles.length ? `Headings: ${highlightTitles.join(' | ')}` : '',
+    ].filter(Boolean);
+    const body = [guide.title, guide.about, ...metaLines, highlightTitles.join('\n')]
       .filter(Boolean)
-      .join('\n');
-    const body = [guide.title, guide.about, highlights].filter(Boolean).join('\n\n');
+      .join('\n\n');
     const chunks = chunkText(body);
     chunks.forEach((content, index) => {
       docs.push({
         sourceType: 'area_guide',
         sourceId: String(guide._id),
         title: guide.title,
-        url: joinUrl(guide.path),
+        url: joinUrl(guide.path || (guide.slug ? `/area-guides/${guide.slug}` : '')),
+        slug: guide.slug || '',
+        excerpt: String(guide.about || '').slice(0, 280),
+        category: 'area_guide',
+        tags: [],
+        headings: highlightTitles,
         content,
         chunkIndex: index,
       });
@@ -159,7 +187,16 @@ function documentsToChunks(blogs, areaGuides, faqs, services, companyInfos = [])
   }
 
   for (const faq of faqs) {
-    const body = chunkText(`Q: ${faq.question}\nA: ${faq.answer}`);
+    const body = chunkText(
+      [
+        faq.slug ? `Slug: ${faq.slug}` : '',
+        faq.page ? `Category: ${faq.page}` : '',
+        `Q: ${faq.question}`,
+        `A: ${faq.answer}`,
+      ]
+        .filter(Boolean)
+        .join('\n')
+    );
     const pagePath = faq.page === 'home' ? '/' : `/${faq.page}`;
     body.forEach((content, index) => {
       docs.push({
@@ -167,6 +204,11 @@ function documentsToChunks(blogs, areaGuides, faqs, services, companyInfos = [])
         sourceId: String(faq._id),
         title: faq.question,
         url: joinUrl(pagePath),
+        slug: faq.slug || '',
+        excerpt: String(faq.answer || '').slice(0, 280),
+        category: faq.page || '',
+        tags: [],
+        headings: [],
         content,
         chunkIndex: index,
       });
@@ -175,13 +217,25 @@ function documentsToChunks(blogs, areaGuides, faqs, services, companyInfos = [])
 
   for (const service of services) {
     const overview = Array.isArray(service.overview) ? service.overview.join('\n') : '';
+    const subTitles = (service.subservices || []).map((s) => s?.title).filter(Boolean);
     const subservices = (service.subservices || [])
       .map((s) => {
         const points = Array.isArray(s.points) ? s.points.join('\n') : '';
         return [s.title, s.description, points].filter(Boolean).join('\n');
       })
       .join('\n\n');
-    const body = [service.title, service.description, service.overviewHeading, overview, subservices]
+    const metaLines = [
+      service.slug ? `Slug: ${service.slug}` : '',
+      subTitles.length ? `Headings: ${subTitles.join(' | ')}` : '',
+    ].filter(Boolean);
+    const body = [
+      service.title,
+      service.description,
+      ...metaLines,
+      service.overviewHeading,
+      overview,
+      subservices,
+    ]
       .filter(Boolean)
       .join('\n\n');
     const chunks = chunkText(body);
@@ -191,6 +245,11 @@ function documentsToChunks(blogs, areaGuides, faqs, services, companyInfos = [])
         sourceId: String(service._id),
         title: service.title,
         url: joinUrl(`/services/${service.slug}`),
+        slug: service.slug || '',
+        excerpt: service.description || '',
+        category: 'service',
+        tags: [],
+        headings: [service.overviewHeading, ...subTitles].filter(Boolean),
         content,
         chunkIndex: index,
       });
@@ -209,6 +268,11 @@ function documentsToChunks(blogs, areaGuides, faqs, services, companyInfos = [])
         sourceId: String(info._id),
         title: info.topic || info.question,
         url: '',
+        slug: '',
+        excerpt: String(info.answer || '').slice(0, 280),
+        category: info.category || '',
+        tags: info.topic ? [String(info.topic)] : [],
+        headings: [],
         content,
         chunkIndex: index,
       });
@@ -257,6 +321,7 @@ async function upsertChunks(chunks) {
 
   const keepHashesBySource = new Map();
   const toEmbed = [];
+  const metaOps = [];
 
   for (const chunk of chunks) {
     const sourceKey = `${chunk.sourceType}:${chunk.sourceId}`;
@@ -264,7 +329,30 @@ async function upsertChunks(chunks) {
     keepHashesBySource.get(sourceKey).add(chunk.embeddingHash);
 
     const key = `${chunk.sourceType}:${chunk.sourceId}:${chunk.embeddingHash}`;
-    if (!existingByKey.has(key)) toEmbed.push(chunk);
+    if (!existingByKey.has(key)) {
+      toEmbed.push(chunk);
+    } else {
+      metaOps.push({
+        updateOne: {
+          filter: {
+            sourceType: chunk.sourceType,
+            sourceId: chunk.sourceId,
+            embeddingHash: chunk.embeddingHash,
+          },
+          update: {
+            $set: {
+              title: chunk.title,
+              url: chunk.url,
+              slug: chunk.slug || '',
+              excerpt: chunk.excerpt || '',
+              category: chunk.category || '',
+              tags: chunk.tags || [],
+              headings: chunk.headings || [],
+            },
+          },
+        },
+      });
+    }
   }
 
   console.log(`Chunks: ${chunks.length} total, ${toEmbed.length} new, ${chunks.length - toEmbed.length} unchanged`);
@@ -272,6 +360,11 @@ async function upsertChunks(chunks) {
   if (dryRun) {
     console.log('[dry-run] skipping embeds and writes');
     return;
+  }
+
+  if (metaOps.length) {
+    await ChatbotKnowledge.bulkWrite(metaOps);
+    console.log(`Synced metadata on ${metaOps.length} existing chunks`);
   }
 
   for (let i = 0; i < toEmbed.length; i += BATCH_SIZE) {
@@ -293,6 +386,11 @@ async function upsertChunks(chunks) {
             title: chunk.title,
             url: chunk.url,
             content: chunk.content,
+            slug: chunk.slug || '',
+            excerpt: chunk.excerpt || '',
+            category: chunk.category || '',
+            tags: chunk.tags || [],
+            headings: chunk.headings || [],
             embedding: embeddings[idx],
           },
         },

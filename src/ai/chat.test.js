@@ -344,7 +344,7 @@ test('content search keywords drop stop words and keep topic tokens', () => {
   assert.equal(contentSearchKeywords('a the to').length, 0);
 });
 
-test('content search merge prefers higher score and dedupes by source', () => {
+test('content search merge keeps distinct chunks and prefers higher score', () => {
   const merged = mergeContentSearchRows(
     [
       {
@@ -352,7 +352,8 @@ test('content search merge prefers higher score and dedupes by source', () => {
         sourceId: '1',
         title: 'Golden Visa',
         url: 'https://www.rockyrealestate.com/blogs/golden-visa',
-        content: 'vector hit',
+        content: 'vector hit about AED 2 million threshold',
+        embeddingHash: 'hash-a',
         score: 0.8,
       },
     ],
@@ -362,7 +363,8 @@ test('content search merge prefers higher score and dedupes by source', () => {
         sourceId: '1',
         title: 'Golden Visa',
         url: 'https://www.rockyrealestate.com/blogs/golden-visa',
-        content: 'keyword hit',
+        content: 'keyword hit about AED 2 million threshold',
+        embeddingHash: 'hash-a',
         score: 0.92,
       },
       {
@@ -371,6 +373,7 @@ test('content search merge prefers higher score and dedupes by source', () => {
         title: 'Visa FAQ',
         url: 'https://www.rockyrealestate.com/faqs/visa',
         content: 'faq',
+        embeddingHash: 'hash-b',
         score: 0.7,
       },
     ],
@@ -379,16 +382,17 @@ test('content search merge prefers higher score and dedupes by source', () => {
   assert.equal(merged.length, 2);
   assert.equal(merged[0].sourceId, '1');
   assert.equal(merged[0].score, 0.92);
-  assert.equal(merged[0].content, 'keyword hit');
+  assert.match(merged[0].content, /keyword hit/i);
   assert.equal(merged[1].sourceId, '2');
 });
 
-test('content answer instruction prioritizes Rocky hits and forbids pull-up/hiccup', () => {
+test('content answer instruction prioritizes Rocky hits and forbids vague filler', () => {
   const withHits = contentAnswerInstruction(true);
-  assert.match(withHits, /Rocky internal content was found/i);
-  assert.match(withHits, /priority over generic/i);
-  assert.match(withHits, /Do NOT ask permission to pull up/i);
-  assert.match(withHits, /hiccup/i);
+  assert.match(withHits, /INTERNAL KNOWLEDGE FIRST/i);
+  assert.match(withHits, /Answer ONLY from these chunks/i);
+  assert.match(withHits, /Typically/i);
+  assert.match(withHits, /Preserve exact thresholds/i);
+  assert.match(withHits, /Do NOT ask whether they want you to find/i);
   const withoutHits = contentAnswerInstruction(false);
   assert.match(withoutHits, /No sufficiently relevant Rocky/i);
   assert.match(withoutHits, /Do NOT claim the answer came from Rocky/i);
@@ -398,9 +402,9 @@ test('content answer instruction prioritizes Rocky hits and forbids pull-up/hicc
 test('system prompt encodes Rocky knowledge-retrieval priority', () => {
   const prompt = getSystemPrompt({});
   assert.match(prompt, /KNOWLEDGE RETRIEVAL/i);
-  assert.match(prompt, /MUST call search_content first/i);
-  assert.match(prompt, /Would you like me to pull up the Rocky article/i);
-  assert.match(prompt, /Internal Rocky content has priority/i);
+  assert.match(prompt, /INTERNAL KNOWLEDGE FIRST/i);
+  assert.match(prompt, /Typically/i);
+  assert.match(prompt, /absolute priority over generic model knowledge/i);
 });
 
 // --- Sell flow ---

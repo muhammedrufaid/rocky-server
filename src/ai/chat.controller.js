@@ -1709,8 +1709,76 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   let lastContentChunks = [];
   let searchContentHits = 0;
   let lastSearchPagination = null;
+  let contentPrefetched = false;
 
   const snapshotMeta = () => metaFromLoopState(propertyCards, sources, viewAllMatching, presentation);
+
+  const shouldPrefetchRockyContent =
+    (isContentKnowledgeTopic(userMessage) || isGeneralKnowledgeQuery(userMessage)) &&
+    !isListingFollowUp(userMessage) &&
+    !isShowMoreRequest(userMessage) &&
+    !isPropertyUiAction(userMessage) &&
+    !isBookViewingAction(userMessage);
+
+  // INTERNAL KNOWLEDGE FIRST — search Rocky Mongo content before any model answer.
+  if (shouldPrefetchRockyContent) {
+    try {
+      const prefetch = await executeTool(
+        'search_content',
+        { query: userMessage },
+        {
+          sessionId,
+          lastSearchFilters: profile.lastSearchFilters,
+          leadAlreadyCaptured: !!profile.leadCaptured,
+          slotFlow: profile.slotFlow,
+          userMessage,
+          intent: profile.intent,
+          shownPropertyIds: profile.shownPropertyIds,
+        }
+      );
+      usedSearchContent = true;
+      contentPrefetched = true;
+      const chunks = Array.isArray(prefetch.modelPayload?.chunks) ? prefetch.modelPayload.chunks : [];
+      if (chunks.length) {
+        lastContentChunks = chunks;
+        searchContentHits += 1;
+      }
+      if (prefetch.sources?.length) sources.push(...prefetch.sources);
+      const toolCallId = 'prefetch_search_content';
+      messages.push({
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          {
+            id: toolCallId,
+            type: 'function',
+            function: {
+              name: 'search_content',
+              arguments: JSON.stringify({ query: userMessage }),
+            },
+          },
+        ],
+      });
+      messages.push({
+        role: 'tool',
+        tool_call_id: toolCallId,
+        content: JSON.stringify({
+          count: prefetch.modelPayload?.count ?? chunks.length,
+          chunks,
+          hasRockyContent: !!prefetch.modelPayload?.hasRockyContent,
+          primaryCta: prefetch.modelPayload?.primaryCta || null,
+          instruction:
+            prefetch.modelPayload?.instruction ||
+            (chunks.length
+              ? 'Rocky content was found. Answer only from these chunks. Preserve exact facts. Do not use vague filler. Mention the article CTA.'
+              : 'No Rocky content matched. You may use brief general real-estate knowledge without claiming it is from Rocky.'),
+        }),
+      });
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      console.error('Rocky content prefetch failed:', err?.message || err);
+    }
+  }
 
   const completionParams = (forceContentAnswer, contentOnlyReply, hasToolResults, forceSearchContent) => ({
     model,
@@ -1809,10 +1877,11 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
       hasToolResults && usedSearchContent && !usedSearchProperties && propertyCards.length === 0;
     // After search_content (hits or empty), force a text answer — models otherwise re-call
     // search_content until MAX_TOOL_ROUNDS and the user sees "could not finish".
-    const forceContentAnswer = contentOnlyReply;
+    const forceContentAnswer = contentOnlyReply || (contentPrefetched && round === 0);
     const forceSearchContent =
       round === 0 &&
       !usedSearchContent &&
+      !contentPrefetched &&
       !usedSearchProperties &&
       (isContentKnowledgeTopic(userMessage) || isGeneralKnowledgeQuery(userMessage)) &&
       !isListingFollowUp(userMessage) &&
