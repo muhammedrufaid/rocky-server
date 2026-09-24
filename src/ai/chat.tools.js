@@ -2273,12 +2273,13 @@ function foundListingsReply(filters = {}, total = 0, { isShowMore = false, newCo
   let purposeBit = 'for sale';
   if (purpose === 'Rent') purposeBit = 'for rent';
   if (purpose === 'Off-plan') purposeBit = 'off-plan';
+  const readyPrefix = purpose === 'Buy' ? 'ready ' : '';
   const purposeSuffix = purpose === 'Off-plan' ? '' : ` ${purposeBit}`;
   if (isShowMore) {
     const budgetBit = describeBudgetPossessive(filters);
     return `Here are more ${beds}${type}${area}${budgetBit}.`.replace(/\s+/g, ' ').trim();
   }
-  return `I found ${count} ${beds}${type}${purposeSuffix}${area}. Would you like the details?`
+  return `I found ${count} ${readyPrefix}${beds}${type}${purposeSuffix}${area}.`
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -2349,12 +2350,16 @@ function matchingSegmentPhrase(filters = {}) {
 }
 
 function exactNoMatchLine(filters = {}) {
-  const loc = hasLocationConstraint(filters) ? ` in ${String(filters.location).trim()}` : '';
+  const loc = hasLocationConstraint(filters)
+    ? ` in ${describeCmsLocations(filters) || String(filters.location).trim()}`
+    : '';
   const budget = describeBudgetConstraint(filters);
+  const purpose = normalizePurpose(filters.purpose);
   const segment = matchingSegmentPhrase(filters);
   const amenity = describeAmenitiesClause(filters);
   const suffix = amenity ? ' matching your current search' : '';
-  return `I couldn't find any ${segment}${amenity}${loc}${budget ? ` ${budget}` : ''}${suffix}.`
+  const readyPrefix = purpose === 'Buy' ? 'ready ' : '';
+  return `I couldn't find any ${readyPrefix}${segment}${amenity}${loc}${budget ? ` ${budget}` : ''}${suffix}.`
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -3812,26 +3817,12 @@ function buildRefinementAcknowledgement(previous = {}, next = {}) {
     return `Sure — I'll keep your ${keepSearchLabel(previous)} search and switch the location to ${nextLoc}.`;
   }
   if (bedsChanged && !locChanged && !typeChanged && !purposeChanged) {
-    if (nextBeds === 0) {
-      const keepBits = [];
-      if (nextLoc) keepBits.push(nextLoc);
-      if (normalizePurpose(next.purpose) === 'Rent') keepBits.push('rent');
-      else if (normalizePurpose(next.purpose) === 'Off-plan') keepBits.push('off-plan');
-      else if (normalizePurpose(next.purpose) === 'Buy') keepBits.push('buy');
-      const keep = keepBits.join(' + ');
-      return keep
-        ? `Got it — I'll switch this to studio ${typeWord} and keep ${keep}.`
-        : `Got it — I'll switch this to studio ${typeWord} and keep the rest of your search.`;
+    const bedLabel =
+      nextBeds === 0 ? `studio ${typeWord}` : `${nextBeds}-bedroom ${typeWord}`;
+    if (nextLoc) {
+      return `Sure — I'll update the search to ${bedLabel} in ${nextLoc}.`;
     }
-    const keepBits = [];
-    if (nextLoc) keepBits.push(nextLoc);
-    if (normalizePurpose(next.purpose) === 'Rent') keepBits.push('rent');
-    else if (normalizePurpose(next.purpose) === 'Off-plan') keepBits.push('off-plan');
-    else if (normalizePurpose(next.purpose) === 'Buy') keepBits.push('buy');
-    const keep = keepBits.join(' + ');
-    return keep
-      ? `Sure — I'll switch this to ${nextBeds}-bedroom ${typeWord} and keep ${keep}.`
-      : `Sure — I'll update this to ${nextBeds}-bedroom and keep the rest of your search.`;
+    return `Sure — I'll update the search to ${bedLabel}.`;
   }
   if (typeChanged && !locChanged && !purposeChanged) {
     return `Sure — I'll switch this to ${String(nextType).toLowerCase()}s and keep the rest of your search.`;
@@ -5583,11 +5574,30 @@ function parseAlternativeChip(text, currentFilters = {}) {
   const raw = String(text || '').trim();
   if (!raw) return null;
 
+  // "View N …" dynamic zero-result alternatives
+  const viewMatch = raw.match(/^view\s+(\d+)\s+(.+)$/i);
+  if (viewMatch) {
+    const rest = viewMatch[2].trim();
+    const offPlan = /\boff[-\s]?plan\b/i.test(rest);
+    const bedsChoice = parseBedroomChoice(rest);
+    const typeChange = parsePropertyTypeChange(rest) || firstPropertyTypeIn(rest);
+    const patch = {};
+    if (offPlan) patch.purpose = 'Off-plan';
+    if (bedsChoice && !bedsChoice.any) patch.bedroomChoice = bedsChoice;
+    if (typeChange && !offPlan) patch.type = typeChange;
+    if (Object.keys(patch).length) return patch;
+  }
+
   // "Try N BR" / "Try Studio" / "Try 4+ BR" — bedroom change only
   const tryBr = raw.match(/^try\s+(.+)$/i);
   if (tryBr) {
     const choice = parseBedroomChoice(tryBr[1]);
     if (choice) return { bedroomChoice: choice };
+  }
+
+  // "Explore N off-plan …" legacy chip
+  if (/^explore\s+\d+\s+off[-\s]?plan\b/i.test(raw) || /^view\s+\d+\s+off[-\s]?plan\b/i.test(raw)) {
+    return { purpose: 'Off-plan' };
   }
 
   // Typed "what about villas" / "show me villas" → property type change
@@ -5698,76 +5708,92 @@ async function buildNearbyAreaChips(effectiveFilters) {
     .map((c) => ({ label: c.label, patch: c.patch }));
 }
 
-async function buildAlternativeChips(effectiveFilters, { nearbyOnly = false } = {}) {
+async function buildAlternativeChips(effectiveFilters, { nearbyOnly = false, inventoryCounts = null } = {}) {
   if (nearbyOnly) {
     return buildNearbyAreaChips(effectiveFilters);
   }
 
-  const purpose = effectiveFilters.purpose;
+  const purpose = normalizePurpose(effectiveFilters.purpose);
   const location = (effectiveFilters.location || '').trim();
   const type = effectiveFilters.type || null;
+  const chips = [];
 
-  const candidates = [];
-
-  // A — nearby areas with same type + same bedrooms
-  if (hasLocationConstraint(effectiveFilters)) {
-    const nearbyAreas = nearbyAreaOptions(location);
-    for (const area of nearbyAreas.slice(0, 3)) {
-      candidates.push({
-        label: nearbyAreaChipLabel(area, effectiveFilters),
-        patch: { location: area },
+  // 1 — same location + type + bedrooms, alternate ready/off-plan
+  if (purpose === 'Buy' && hasLocationConstraint(effectiveFilters)) {
+    let offPlanCount = Number(inventoryCounts?.offPlanCount);
+    if (!Number.isFinite(offPlanCount)) {
+      const offPlanFilters = copySearchFilters(effectiveFilters);
+      offPlanFilters.purpose = 'Off-plan';
+      offPlanCount = await countByFilters(offPlanFilters, location);
+    }
+    if (offPlanCount > 0) {
+      chips.push({
+        type: 'offplan',
+        count: offPlanCount,
+        label: viewOffPlanAlternativeLabel(offPlanCount, effectiveFilters),
+        patch: { purpose: 'Off-plan' },
         priority: 1,
       });
     }
   }
 
-  // B — same location + alternative property types
-  const altTypes = alternativeTypesFor(type).slice(0, 2);
-  for (const altType of altTypes) {
-    candidates.push({
-      label: altTypeChipLabel(altType, effectiveFilters),
-      patch: { type: altType },
-      priority: 2,
+  // 2 — same location + type + nearest bedroom counts (live counts only)
+  if (requiresBedroomsForSearch(effectiveFilters) && hasLocationConstraint(effectiveFilters)) {
+    const byBeds = await probeSameAreaBedroomCounts(effectiveFilters);
+    const current = isBedroomsSet(effectiveFilters.bedrooms)
+      ? Number(effectiveFilters.bedrooms)
+      : null;
+    const ranked = [...byBeds].sort((a, b) => {
+      if (current == null) return b.count - a.count;
+      return Math.abs(a.bedrooms - current) - Math.abs(b.bedrooms - current) || b.count - a.count;
     });
-  }
-
-  // C — adjacent bedroom counts at same location + same type
-  if (requiresBedroomsForSearch(effectiveFilters)) {
-    const adjBeds = adjacentBedroomCounts(effectiveFilters);
-    for (const adj of adjBeds) {
-      candidates.push({
-        label: adj.label,
-        patch: { bedroomChoice: { exact: adj.exact } },
-        priority: 3,
+    for (const row of ranked.slice(0, 3)) {
+      chips.push({
+        type: 'bedroom',
+        bedrooms: row.bedrooms,
+        count: row.count,
+        label: viewBedroomAlternativeLabel(row.count, row.bedrooms, effectiveFilters),
+        patch: {
+          bedroomChoice: row.bedrooms >= 4 ? { min: 4 } : { exact: row.bedrooms },
+        },
+        priority: 2,
       });
     }
   }
 
-  // Probe each candidate concurrently
-  const probed = await Promise.all(
-    candidates.map(async (cand) => {
-      const testFilters = { ...effectiveFilters };
-      if (cand.patch.location) testFilters.location = cand.patch.location;
-      if (cand.patch.type) testFilters.type = cand.patch.type;
-      if (cand.patch.bedroomChoice) {
-        const tmpFilters = { ...testFilters };
-        applyBedroomChoice(tmpFilters, cand.patch.bedroomChoice);
-        testFilters.bedrooms = tmpFilters.bedrooms;
-        testFilters.bedroomsMin = tmpFilters.bedroomsMin;
-        testFilters.bedroomsAny = tmpFilters.bedroomsAny;
-        testFilters.bedroomsResolved = true;
-      }
-      const search = (testFilters.location || '').toString().trim();
-      const count = await countByFilters({ ...testFilters, purpose }, search);
-      return { ...cand, count };
-    })
-  );
+  // 3 — same location + related property types (only if few bedroom/off-plan hits)
+  if (chips.length < 2) {
+    const altTypes = alternativeTypesFor(type).slice(0, 2);
+    const probedTypes = await Promise.all(
+      altTypes.map(async (altType) => {
+        const testFilters = copySearchFilters(effectiveFilters);
+        applyTypesToFilters(testFilters, [altType]);
+        const count = await countByFilters(testFilters, location || '');
+        return {
+          type: 'propertyType',
+          count,
+          label: count > 0 ? `View ${count} ${altTypeChipLabel(altType, effectiveFilters).toLowerCase()}` : null,
+          patch: { type: altType },
+          priority: 3,
+        };
+      })
+    );
+    for (const row of probedTypes.filter((c) => c.count > 0 && c.label)) {
+      chips.push(row);
+    }
+  }
 
-  const hits = probed
-    .filter((c) => c.count > 0)
-    .sort((a, b) => a.priority - b.priority || b.count - a.count);
-
-  return hits.slice(0, MAX_ALT_CHIPS).map((c) => ({ label: c.label, patch: c.patch }));
+  // 4 — nearby areas only when same-area inventory is empty (caller sets nearbyOnly)
+  return chips
+    .sort((a, b) => a.priority - b.priority || b.count - a.count)
+    .slice(0, MAX_ALT_CHIPS)
+    .map((c) => ({
+      label: c.label,
+      patch: c.patch,
+      type: c.type,
+      count: c.count,
+      bedrooms: c.bedrooms,
+    }));
 }
 
 function canonicalSearchState(filters = {}) {
@@ -5857,10 +5883,12 @@ function searchChangeSummary(previous = {}, next = {}) {
   const prevBeds = previous.bedrooms;
   const nextBeds = next.bedrooms;
   if (isBedroomsSet(prevBeds) && isBedroomsSet(nextBeds) && Number(prevBeds) !== Number(nextBeds)) {
+    const nextLoc = String(next.location || '').trim();
+    const typeWord = pluraliseType(typesFromFilters(next)[0] || typesFromFilters(previous)[0] || 'property').toLowerCase();
+    const bedLabel =
+      Number(nextBeds) === 0 ? `studio ${typeWord}` : `${Number(nextBeds)}-bedroom ${typeWord}`;
     changes.push(
-      Number(nextBeds) === 0
-        ? 'switching this to studio apartments'
-        : `updating the search to ${Number(nextBeds)} bedrooms`
+      nextLoc ? `updating the search to ${bedLabel} in ${nextLoc}` : `updating the search to ${bedLabel}`
     );
   }
   const prevType = String(typesFromFilters(previous)[0] || '').toLowerCase();
@@ -5953,13 +5981,15 @@ function matchingCountSummary(count, filters = {}) {
     const minLabel = formatAed(filters.budgetMin || GOLDEN_VISA_MIN_AED);
     return `I found ${n} properties currently listed from ${minLabel} that fit this investment range.`;
   }
-  if (purpose === 'Buy') {
-    return `I found ${n} ready ${n === 1 ? 'property' : 'properties'} for sale.`;
-  }
-  const loc = hasLocationConstraint(filters) ? String(filters.location).trim() : '';
+  const loc = hasLocationConstraint(filters)
+    ? describeCmsLocations(filters) || String(filters.location).trim()
+    : '';
   const area = loc ? ` in ${loc}` : '';
   const segment = describeBedsAndType(filters, { plural: n !== 1 });
   const amenity = describeAmenitiesClause(filters);
+  if (purpose === 'Buy') {
+    return `I found ${n} ready ${segment} for sale${area}${amenity}.`.replace(/\s+/g, ' ').trim();
+  }
   if (purpose === 'Off-plan') {
     return `I found ${n} off-plan ${segment}${area}${amenity}.`.replace(/\s+/g, ' ').trim();
   }
@@ -5977,29 +6007,55 @@ function alternativeInventoryLine(ctx = {}) {
   const offPlanCount = Number(ctx.inventoryCounts?.offPlanCount);
   if (purpose !== 'Buy' || !Number.isFinite(offPlanCount) || offPlanCount <= 0) return '';
   const filters = ctx.filters || {};
+  const typeWord = describeTypePhrase(filters, offPlanCount);
+  const beds = describeBedroomPhrase(filters).trim();
+  const bedsType = beds ? `${beds} ${typeWord}` : typeWord;
+  const loc = hasLocationConstraint(filters)
+    ? describeCmsLocations(filters) || String(filters.location).trim()
+    : '';
+  const where = loc ? ` in ${loc}` : ' in the area';
   if (filters.goldenVisaSearch) {
     const ready = Number(ctx.exactMatchCount);
     const minLabel = formatAed(filters.budgetMin || GOLDEN_VISA_MIN_AED);
     if (Number.isFinite(ready) && ready > 0) {
       return `I found ${ready} ready properties from ${minLabel} and ${offPlanCount} off-plan options from ${minLabel}.`;
     }
-    return `There are also ${offPlanCount} off-plan options from ${minLabel}.`;
+    return `However, there are ${offPlanCount} off-plan ${bedsType} currently available from ${minLabel}. Would you like to view these alternatives?`
+      .replace(/\s+/g, ' ')
+      .trim();
   }
-  const loc = hasLocationConstraint(filters) ? String(filters.location).trim() : '';
-  const where = loc ? ` in ${loc}` : '';
-  return `There are also ${offPlanCount} off-plan option${offPlanCount === 1 ? '' : 's'}${where} if you'd like to explore them.`;
+  if (Number(ctx.exactMatchCount) > 0) {
+    return `However, there are also ${offPlanCount} off-plan ${bedsType} currently available${where}.`
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+  return `However, there are ${offPlanCount} off-plan ${bedsType} currently available${where}. Would you like to view these alternatives?`
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-function exploreOffPlanChip(count) {
+function exploreOffPlanChip(count, filters = {}) {
   const n = Number(count);
   if (!Number.isFinite(n) || n <= 0) return null;
-  return `Explore ${n} off-plan ${n === 1 ? 'property' : 'properties'}`;
+  const typeWord = describeTypePhrase(filters, n);
+  const beds = describeBedroomPhrase(filters).trim();
+  if (beds) {
+    return `View ${n} off-plan ${beds} ${typeWord}`.replace(/\s+/g, ' ').trim();
+  }
+  return `View ${n} off-plan ${typeWord}`.replace(/\s+/g, ' ').trim();
 }
 
 function withOffPlanExploreOption(options = [], ctx = {}) {
   const purpose = normalizePurpose(ctx.filters?.purpose);
-  const chip = purpose === 'Buy' ? exploreOffPlanChip(ctx.inventoryCounts?.offPlanCount) : null;
+  const chip =
+    purpose === 'Buy' ? exploreOffPlanChip(ctx.inventoryCounts?.offPlanCount, ctx.filters || {}) : null;
   if (!chip) return options;
+  if ((options || []).some((opt) => String(opt).toLowerCase() === chip.toLowerCase())) {
+    return options;
+  }
+  if ((options || []).some((opt) => /^view\s+\d+\s+off-plan\b/i.test(String(opt)))) {
+    return options;
+  }
   return [chip, ...options.filter((opt) => opt !== chip)];
 }
 
@@ -6128,29 +6184,9 @@ function composeSearchReply(ctx = {}) {
     lines.push(exactNoMatchLine(filters));
   }
 
-  const alternative = alternativeInventoryLine(ctx);
-  if (alternative) lines.push(alternative);
-
-  const alts = ctx.sameAreaAlternatives || {};
-  const byBeds = Array.isArray(alts.byBedrooms) ? alts.byBedrooms.filter((item) => item.count > 0) : [];
-  if (ctx.outcome !== SEARCH_OUTCOME.BUDGET_TOO_LOW && byBeds.length) {
-    lines.push('The closest alternatives in this area are:');
-    byBeds.slice(0, 4).forEach((item) => {
-      lines.push(`- ${item.count} ${item.label}`);
-    });
-  }
-
-  const nearby = Array.isArray(ctx.nearbyInventory) ? ctx.nearbyInventory.filter((item) => item.count > 0) : [];
-  if (nearby.length) {
-    lines.push(`If you'd like to keep this search, nearby areas with current inventory include:`);
-    nearby.slice(0, 3).forEach((item) => {
-      const extra =
-        item.readyCount && item.offPlanCount
-          ? ` — ${item.readyCount} ready, ${item.offPlanCount} off-plan`
-          : ` — ${item.count} ${item.count === 1 ? 'property' : 'properties'}`;
-      lines.push(`- ${item.name}${extra}`);
-    });
-  }
+  const structuredAlts = buildStructuredZeroResultAlternatives(ctx);
+  const narrative = zeroResultAlternativesNarrative(ctx, structuredAlts);
+  if (narrative) lines.push(narrative);
 
   if (ctx.outcome === SEARCH_OUTCOME.BUDGET_TOO_LOW) {
     const overall = formatSearchSnapshotLines(ctx.overallMarketStats || {}, filters, { scope: 'overall' });
@@ -6161,6 +6197,128 @@ function composeSearchReply(ctx = {}) {
   }
 
   return stripExposedUrlsFromReply(lines.filter(Boolean).join('\n\n').replace(/\n\n+/g, '\n\n'));
+}
+
+function bedroomWordLabel(n) {
+  if (n === 0) return 'studio';
+  if (n === 1) return 'one-bedroom';
+  if (n === 2) return 'two-bedroom';
+  if (n === 3) return 'three-bedroom';
+  if (n === 4) return 'four-bedroom';
+  return `${n}-bedroom`;
+}
+
+function viewBedroomAlternativeLabel(count, bedrooms, filters = {}) {
+  const n = Number(count);
+  const typeWord = describeTypePhrase(filters, n);
+  if (bedrooms === 0) return `View ${n} studio ${typeWord}`.replace(/\s+/g, ' ').trim();
+  return `View ${n} ${bedroomWordLabel(bedrooms)} ${typeWord}`.replace(/\s+/g, ' ').trim();
+}
+
+function viewOffPlanAlternativeLabel(count, filters = {}) {
+  return exploreOffPlanChip(count, filters);
+}
+
+function buildStructuredZeroResultAlternatives(ctx = {}) {
+  const filters = ctx.filters || {};
+  const purpose = normalizePurpose(filters.purpose);
+  const out = [];
+  const byBeds = Array.isArray(ctx.sameAreaAlternatives?.byBedrooms)
+    ? ctx.sameAreaAlternatives.byBedrooms.filter((item) => Number(item.count) > 0)
+    : [];
+  const offPlanCount = Number(ctx.inventoryCounts?.offPlanCount) || 0;
+
+  if (purpose === 'Buy' && offPlanCount > 0) {
+    out.push({
+      type: 'offplan',
+      count: offPlanCount,
+      label: viewOffPlanAlternativeLabel(offPlanCount, filters),
+      patch: { purpose: 'Off-plan' },
+    });
+  }
+
+  const current = isBedroomsSet(filters.bedrooms) ? Number(filters.bedrooms) : null;
+  const sortedBeds = [...byBeds].sort((a, b) => {
+    if (current == null) return b.count - a.count;
+    const da = Math.abs(Number(a.bedrooms) - current);
+    const db = Math.abs(Number(b.bedrooms) - current);
+    return da - db || b.count - a.count;
+  });
+  for (const row of sortedBeds.slice(0, 3)) {
+    out.push({
+      type: 'bedroom',
+      bedrooms: row.bedrooms,
+      count: row.count,
+      label: viewBedroomAlternativeLabel(row.count, row.bedrooms, filters),
+      patch: {
+        bedroomChoice: row.bedrooms >= 4 ? { min: 4 } : { exact: row.bedrooms },
+      },
+    });
+  }
+  return out;
+}
+
+function zeroResultAlternativesNarrative(ctx = {}, structured = []) {
+  if (ctx.outcome === SEARCH_OUTCOME.BUDGET_TOO_LOW) return '';
+  const filters = ctx.filters || {};
+  const purpose = normalizePurpose(filters.purpose);
+  const loc = hasLocationConstraint(filters)
+    ? describeCmsLocations(filters) || String(filters.location).trim()
+    : '';
+  const where = loc ? ` in ${loc}` : ' in the area';
+  const areaPhrase = loc ? 'in the area' : 'matching this search';
+  const alts = Array.isArray(structured) ? structured : [];
+  if (!alts.length) {
+    // Fall back to legacy nearby-area prose only when no same-area stock exists.
+    const nearby = Array.isArray(ctx.nearbyInventory)
+      ? ctx.nearbyInventory.filter((item) => item.count > 0)
+      : [];
+    if (!nearby.length) return '';
+    const names = nearby.slice(0, 3).map((item) => item.name);
+    if (names.length === 1) {
+      return `Nearby, there are current listings in ${names[0]}. Would you like to view options there?`;
+    }
+    return `Nearby areas with current inventory include ${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}. Would you like to expand the search?`;
+  }
+
+  const bedAlts = alts.filter((a) => a.type === 'bedroom');
+  const offPlanAlt = alts.find((a) => a.type === 'offplan');
+  const typeWord = describeTypePhrase(filters, 2);
+
+  if (alts.length === 1 && bedAlts.length === 1) {
+    const row = bedAlts[0];
+    const phrase = bedroomCountLabel(row.bedrooms, typeWord);
+    return (
+      `However, there are ${row.count} ready ${phrase} currently available ${areaPhrase}. ` +
+      `I can show you those instead.`
+    ).replace(/\s+/g, ' ').trim();
+  }
+
+  if (alts.length === 1 && offPlanAlt && purpose === 'Buy') {
+    return (
+      `However, there are ${offPlanAlt.count} off-plan ${describeTypePhrase(filters, offPlanAlt.count)} currently available${where}. ` +
+      `Would you like to explore those options?`
+    )
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  const bullets = [];
+  for (const row of bedAlts) {
+    bullets.push(`• ${row.count} ready ${bedroomCountLabel(row.bedrooms, typeWord)}`);
+  }
+  if (offPlanAlt) {
+    const beds = describeBedroomPhrase(filters).trim();
+    const offLabel = beds
+      ? `${offPlanAlt.count} off-plan ${beds} ${describeTypePhrase(filters, offPlanAlt.count)}`
+      : `${offPlanAlt.count} off-plan ${describeTypePhrase(filters, offPlanAlt.count)}`;
+    bullets.push(`• ${offLabel}`.replace(/\s+/g, ' ').trim());
+  }
+
+  return (
+    `The closest available options are:\n${bullets.join('\n')}\n\n` +
+    `Would you like to view one of these alternatives?`
+  );
 }
 
 function situationActionChips(ctx = {}) {
@@ -6355,14 +6513,42 @@ async function emptyResultsResult(effectiveFilters, { previousFilters = {}, user
     userMessage,
   });
   const locationEmpty = !!location && (context.sameAreaAlternatives?.totalInArea || 0) === 0;
-  const alternatives = await buildAlternativeChips(effectiveFilters, { nearbyOnly: locationEmpty });
+  const alternatives = await buildAlternativeChips(effectiveFilters, {
+    nearbyOnly: locationEmpty,
+    inventoryCounts: context.inventoryCounts,
+  });
+  const structuredAlternatives = locationEmpty
+    ? alternatives.map((a) => ({
+        type: a.type || 'nearby',
+        count: a.count,
+        label: a.label,
+        bedrooms: a.bedrooms,
+        patch: a.patch,
+      }))
+    : buildStructuredZeroResultAlternatives(context);
+  // Prefer chips from live probes; fall back to structured list when probes are empty.
+  const actionAlts = alternatives.length
+    ? alternatives
+    : structuredAlternatives.map((a) => ({ label: a.label, patch: a.patch, type: a.type, count: a.count }));
+  context.zeroResultAlternatives = {
+    exactCount: 0,
+    alternatives: (actionAlts.length ? actionAlts : structuredAlternatives).map((a) => ({
+      type: a.type || (a.patch?.purpose === 'Off-plan' ? 'offplan' : a.patch?.bedroomChoice ? 'bedroom' : 'other'),
+      bedrooms: a.bedrooms ?? a.patch?.bedroomChoice?.exact ?? a.patch?.bedroomChoice?.min ?? null,
+      count: a.count ?? null,
+      label: a.label,
+    })),
+  };
   const reply = composeSearchReply(context);
   let options;
   let slotAwaiting = 'emptyResults';
   if (budgetTooLow) {
     options = budgetTooLowOptions(effectiveFilters);
-  } else if (alternatives.length > 0) {
-    options = alternatives.map((a) => a.label);
+  } else if (actionAlts.length > 0) {
+    const utility = situationActionChips(context).filter(
+      (opt) => !actionAlts.some((a) => String(a.label).toLowerCase() === String(opt).toLowerCase())
+    );
+    options = [...actionAlts.map((a) => a.label), ...utility];
     slotAwaiting = 'alternatives';
   } else {
     options = situationActionChips(context);
@@ -6376,7 +6562,10 @@ async function emptyResultsResult(effectiveFilters, { previousFilters = {}, user
     profilePatch: {
       ...profilePatchFromPropertyFilters(effectiveFilters),
       lastSearchFilters: effectiveFilters,
-      slotFlow: { awaiting: slotAwaiting, alternatives: alternatives.length ? JSON.stringify(alternatives) : null },
+      slotFlow: {
+        awaiting: slotAwaiting,
+        alternatives: actionAlts.length ? JSON.stringify(actionAlts) : null,
+      },
     },
     viewAllMatching: null,
     effectiveFilters,
@@ -6385,6 +6574,7 @@ async function emptyResultsResult(effectiveFilters, { previousFilters = {}, user
     intent: purposeToIntent(effectiveFilters.purpose),
     inventoryCounts: context.inventoryCounts || null,
     alternativeInventory: (context.presentation || buildSearchPresentation(context))?.alternativeInventory || null,
+    zeroResultAlternatives: context.zeroResultAlternatives,
     marketStats: context.marketStats || null,
     overallMarketStats: context.overallMarketStats || null,
     marketStatsScope: context.marketStatsScope || null,

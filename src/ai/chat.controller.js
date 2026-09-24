@@ -20,7 +20,7 @@ const {
   buildViewingLeadIntent,
   logViewingDebug,
 } = require('./chat.tools');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, shouldResetOnListingIntent, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, isInformationalRealEstateQuery, isExplicitPropertySearchIntent, isGoldenVisaMention, isGoldenVisaPropertySearchIntent, isShowGoldenVisaPropertiesAction, isReadInvestorVisaGuideAction, goldenVisaInfoOptions, goldenVisaInitialReply, goldenVisaGuideDetailReply, buildGoldenVisaInfoResult, markGoldenVisaAction, copyGoldenVisaFlow, filterGoldenVisaRelatedSources, GOLDEN_VISA_ACTION, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, isChangeBedroomsAction, bedroomChangeQuestion, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion, listingSearchResetPatch, isExplicitSearchReset, hasInProgressListingSearch, hasActiveListingSearch, isCurrentListingReference, buildSearchAcknowledgement, joinAckAndQuestion, stripExposedUrlsFromReply, canonicalSearchState, isCmsPropertyHandoffMessage, hasRecommendedLocations, isCmsHandoffAwaiting, copyRecommendedLocations, CMS_HANDOFF_PURPOSE, CMS_HANDOFF_LOCATION, SEARCH_SOURCE_CMS, probeCmsLocationInventory, purposeOptionFromInventory, locationInventoryOptions, cmsHandoffIntroReply, cmsHandoffLocationReply, parseCmsAllAreasChoice, matchRecommendedLocation, applyCmsLocationsToFilters } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, shouldResetOnListingIntent, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, normalizePurpose, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, isInformationalRealEstateQuery, isExplicitPropertySearchIntent, isGoldenVisaMention, isGoldenVisaPropertySearchIntent, isShowGoldenVisaPropertiesAction, isReadInvestorVisaGuideAction, goldenVisaInfoOptions, goldenVisaInitialReply, goldenVisaGuideDetailReply, buildGoldenVisaInfoResult, markGoldenVisaAction, copyGoldenVisaFlow, filterGoldenVisaRelatedSources, GOLDEN_VISA_ACTION, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, isChangeBedroomsAction, bedroomChangeQuestion, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion, listingSearchResetPatch, isExplicitSearchReset, hasInProgressListingSearch, hasActiveListingSearch, isCurrentListingReference, buildSearchAcknowledgement, joinAckAndQuestion, stripExposedUrlsFromReply, canonicalSearchState, isCmsPropertyHandoffMessage, hasRecommendedLocations, isCmsHandoffAwaiting, copyRecommendedLocations, CMS_HANDOFF_PURPOSE, CMS_HANDOFF_LOCATION, SEARCH_SOURCE_CMS, probeCmsLocationInventory, purposeOptionFromInventory, locationInventoryOptions, cmsHandoffIntroReply, cmsHandoffLocationReply, parseCmsAllAreasChoice, matchRecommendedLocation, applyCmsLocationsToFilters } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -194,6 +194,7 @@ function attachPropertySearchMeta(payload, source = {}) {
   if (Array.isArray(source.suggestedActions)) payload.suggestedActions = source.suggestedActions;
   if (source.alternativeInventory) payload.alternativeInventory = source.alternativeInventory;
   if (source.inventoryCounts) payload.inventoryCounts = source.inventoryCounts;
+  if (source.zeroResultAlternatives) payload.zeroResultAlternatives = source.zeroResultAlternatives;
   return payload;
 }
 
@@ -1294,12 +1295,18 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
     // Apply the patch to lastSearchFilters
     const next = copySearchFilters(last);
     if (chipPatch.location) next.location = chipPatch.location;
-    if (chipPatch.type) next.type = chipPatch.type;
+    if (chipPatch.type) {
+      applyTypesToFilters(next, [chipPatch.type]);
+    }
+    if (chipPatch.purpose) {
+      next.purpose = normalizePurpose(chipPatch.purpose) || chipPatch.purpose;
+    }
     if (chipPatch.bedroomChoice) {
       applyBedroomChoice(next, chipPatch.bedroomChoice);
     } else if (
       chipPatch.location &&
       !chipPatch.type &&
+      !chipPatch.purpose &&
       nearbyAreaOptions(last.location).some(
         (a) => a.toLowerCase() === String(chipPatch.location).trim().toLowerCase()
       )
@@ -1317,7 +1324,10 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
     const patch = { lastSearchFilters: next, slotFlow: { awaiting: null, alternatives: null } };
     if (chipPatch.bedroomChoice?.exact != null) patch.bedrooms = chipPatch.bedroomChoice.exact;
     if (chipPatch.bedroomChoice?.min != null) patch.bedrooms = chipPatch.bedroomChoice.min;
-    if (chipPatch.type) patch.purpose = resolvedPurpose;   // ensure purpose stays
+    if (chipPatch.purpose || chipPatch.type) {
+      patch.purpose = resolvedPurpose;
+      patch.intent = purposeToIntent(resolvedPurpose) || profile.intent;
+    }
 
     return {
       type: 'continue',
@@ -2583,6 +2593,7 @@ const chat = async (req, res) => {
         suggestedActions: forced.suggestedActions || forced.options || null,
         alternativeInventory: forced.alternativeInventory || null,
         inventoryCounts: forced.inventoryCounts || null,
+        zeroResultAlternatives: forced.zeroResultAlternatives || null,
       };
       if (forced.options) {
         payload.requiresClarification = true;
