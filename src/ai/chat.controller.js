@@ -20,7 +20,7 @@ const {
   buildViewingLeadIntent,
   logViewingDebug,
 } = require('./chat.tools');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, shouldResetOnListingIntent, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, isInformationalRealEstateQuery, isExplicitPropertySearchIntent, isGoldenVisaMention, isGoldenVisaPropertySearchIntent, isShowGoldenVisaPropertiesAction, isReadInvestorVisaGuideAction, goldenVisaInfoOptions, goldenVisaInitialReply, goldenVisaGuideDetailReply, buildGoldenVisaInfoResult, markGoldenVisaAction, copyGoldenVisaFlow, filterGoldenVisaRelatedSources, GOLDEN_VISA_ACTION, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, isChangeBedroomsAction, bedroomChangeQuestion, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion, listingSearchResetPatch, isExplicitSearchReset, hasInProgressListingSearch, hasActiveListingSearch, isCurrentListingReference, buildSearchAcknowledgement, joinAckAndQuestion, stripExposedUrlsFromReply, canonicalSearchState } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, shouldResetOnListingIntent, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, isInformationalRealEstateQuery, isExplicitPropertySearchIntent, isGoldenVisaMention, isGoldenVisaPropertySearchIntent, isShowGoldenVisaPropertiesAction, isReadInvestorVisaGuideAction, goldenVisaInfoOptions, goldenVisaInitialReply, goldenVisaGuideDetailReply, buildGoldenVisaInfoResult, markGoldenVisaAction, copyGoldenVisaFlow, filterGoldenVisaRelatedSources, GOLDEN_VISA_ACTION, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, isChangeBedroomsAction, bedroomChangeQuestion, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion, listingSearchResetPatch, isExplicitSearchReset, hasInProgressListingSearch, hasActiveListingSearch, isCurrentListingReference, buildSearchAcknowledgement, joinAckAndQuestion, stripExposedUrlsFromReply, canonicalSearchState, isCmsPropertyHandoffMessage, hasRecommendedLocations, isCmsHandoffAwaiting, copyRecommendedLocations, CMS_HANDOFF_PURPOSE, CMS_HANDOFF_LOCATION, SEARCH_SOURCE_CMS, probeCmsLocationInventory, purposeOptionFromInventory, locationInventoryOptions, cmsHandoffIntroReply, cmsHandoffLocationReply, parseCmsAllAreasChoice, matchRecommendedLocation, applyCmsLocationsToFilters } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -281,6 +281,9 @@ function mergeProfile(current, patch) {
     lastPropertyCards: toStoredPropertyCards(current.lastPropertyCards),
     shownPropertyIds: uniqueIdList(current.shownPropertyIds),
     lastSearchFilters: copySearchFilters(current.lastSearchFilters || emptySearchFilters()),
+    recommendedLocations: copyRecommendedLocations(current.recommendedLocations || []),
+    searchSource: current.searchSource || null,
+    cmsLocationInventory: current.cmsLocationInventory || null,
     slotFlow: {
       awaiting: current.slotFlow?.awaiting || null,
       alternatives: current.slotFlow?.alternatives || null,
@@ -319,6 +322,15 @@ function mergeProfile(current, patch) {
   }
   if (patch.lastSearchFilters) {
     next.lastSearchFilters = copySearchFilters(patch.lastSearchFilters);
+  }
+  if (Array.isArray(patch.recommendedLocations)) {
+    next.recommendedLocations = copyRecommendedLocations(patch.recommendedLocations);
+  }
+  if (patch.searchSource !== undefined) {
+    next.searchSource = patch.searchSource || null;
+  }
+  if (patch.cmsLocationInventory !== undefined) {
+    next.cmsLocationInventory = patch.cmsLocationInventory;
   }
   if (patch.slotFlow) {
     next.slotFlow = {
@@ -1581,7 +1593,17 @@ async function maybeCaptureViewingLead(sessionId, profile) {
   return { profile: nextProfile, leadCaptured: !!result.leadCaptured, result };
 }
 
-async function clarificationResponse(res, { reply, profile, conversation, message, options, inputType, quickReplies, leadCaptured = false }) {
+async function clarificationResponse(res, {
+  reply,
+  profile,
+  conversation,
+  message,
+  options,
+  inputType,
+  quickReplies,
+  leadCaptured = false,
+  locationInventory = null,
+}) {
   const safeReply = String(reply || '').trim() || FRIENDLY_CHAT_ERROR;
   conversation.messages.push({ role: 'user', content: message, createdAt: new Date() });
   conversation.messages.push({ role: 'assistant', content: safeReply, createdAt: new Date() });
@@ -1610,7 +1632,152 @@ async function clarificationResponse(res, { reply, profile, conversation, messag
   }
   if (inputType) body.inputType = inputType;
   if (Array.isArray(quickReplies) && quickReplies.length) body.quickReplies = quickReplies;
+  if (locationInventory) body.locationInventory = locationInventory;
   return res.status(200).json(body);
+}
+
+/**
+ * CMS article communities → property search (do not restart the generic wizard).
+ */
+async function resolveCmsPropertyHandoff(message, profile = {}) {
+  const awaiting = profile.slotFlow?.awaiting;
+  const recommended = copyRecommendedLocations(profile.recommendedLocations || []);
+  const inHandoffSlot = isCmsHandoffAwaiting(awaiting);
+  const handoffStart = isCmsPropertyHandoffMessage(message) && recommended.length > 0;
+
+  if (!inHandoffSlot && !handoffStart) return null;
+  if (!recommended.length && !inHandoffSlot) return null;
+
+  if (handoffStart || (awaiting === CMS_HANDOFF_PURPOSE && isCmsPropertyHandoffMessage(message))) {
+    const inventory = await probeCmsLocationInventory(recommended);
+    const options = purposeOptionFromInventory(inventory);
+    const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    last.source = SEARCH_SOURCE_CMS;
+    last.purpose = null;
+    last.location = null;
+    last.locations = [];
+    last.locationAny = false;
+    return {
+      type: 'clarify',
+      profile: mergeProfile(profile, {
+        recommendedLocations: recommended,
+        searchSource: SEARCH_SOURCE_CMS,
+        cmsLocationInventory: inventory,
+        lastSearchFilters: last,
+        purpose: null,
+        intent: null,
+        slotFlow: { awaiting: CMS_HANDOFF_PURPOSE, alternatives: null, lastAskedField: 'intent' },
+        resetShownPropertyIds: true,
+      }),
+      reply: cmsHandoffIntroReply(recommended),
+      options,
+      locationInventory: null,
+    };
+  }
+
+  if (awaiting === CMS_HANDOFF_PURPOSE) {
+    const purpose = parsePurposeFromMessage(message);
+    if (!purpose) {
+      if (!isVagueConfirm(message)) return null;
+      const inventory = profile.cmsLocationInventory || (await probeCmsLocationInventory(recommended));
+      return {
+        type: 'clarify',
+        profile: mergeProfile(profile, {
+          cmsLocationInventory: inventory,
+          slotFlow: { awaiting: CMS_HANDOFF_PURPOSE, alternatives: null },
+        }),
+        reply: cmsHandoffIntroReply(recommended),
+        options: purposeOptionFromInventory(inventory),
+      };
+    }
+
+    let inventory = profile.cmsLocationInventory;
+    if (!Array.isArray(inventory) || !inventory.length) {
+      inventory = await probeCmsLocationInventory(recommended);
+    }
+    const { options, locationInventory } = locationInventoryOptions(purpose, inventory);
+    if (!options.length) {
+      return {
+        type: 'clarify',
+        profile: mergeProfile(profile, {
+          cmsLocationInventory: inventory,
+          slotFlow: { awaiting: CMS_HANDOFF_PURPOSE, alternatives: null },
+        }),
+        reply: `I couldn't find live ${purpose.toLowerCase()} listings across those communities right now. Would you like to try Buy, Rent, or Off-plan instead?`,
+        options: purposeOptionFromInventory(inventory),
+      };
+    }
+
+    const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    last.purpose = purpose;
+    last.source = SEARCH_SOURCE_CMS;
+    return {
+      type: 'clarify',
+      profile: mergeProfile(profile, {
+        purpose,
+        intent: purposeToIntent(purpose),
+        searchSource: SEARCH_SOURCE_CMS,
+        cmsLocationInventory: inventory,
+        lastSearchFilters: last,
+        slotFlow: { awaiting: CMS_HANDOFF_LOCATION, alternatives: null, lastAskedField: 'location' },
+      }),
+      reply: cmsHandoffLocationReply(purpose),
+      options,
+      quickReplies: options.map((o) => ({
+        label: o.label,
+        value: o.allAreas ? o.label : o.value || o.name || o.label,
+      })),
+      inputType: 'location',
+      locationInventory,
+    };
+  }
+
+  if (awaiting === CMS_HANDOFF_LOCATION) {
+    const allAreas = parseCmsAllAreasChoice(message, recommended);
+    const single = matchRecommendedLocation(message, recommended);
+    const matched = allAreas || (single ? [single] : null);
+
+    if (!matched || !matched.length) {
+      const purpose = profile.lastSearchFilters?.purpose || profile.purpose || 'Buy';
+      let inventory = profile.cmsLocationInventory;
+      if (!Array.isArray(inventory) || !inventory.length) {
+        inventory = await probeCmsLocationInventory(recommended);
+      }
+      const { options, locationInventory } = locationInventoryOptions(purpose, inventory);
+      return {
+        type: 'clarify',
+        profile: mergeProfile(profile, {
+          cmsLocationInventory: inventory,
+          slotFlow: { awaiting: CMS_HANDOFF_LOCATION, alternatives: null },
+        }),
+        reply: cmsHandoffLocationReply(purpose),
+        options,
+        quickReplies: options.map((o) => ({
+          label: o.label,
+          value: o.allAreas ? o.label : o.value || o.name || o.label,
+        })),
+        inputType: 'location',
+        locationInventory,
+      };
+    }
+
+    let last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    last.source = SEARCH_SOURCE_CMS;
+    last = applyCmsLocationsToFilters(last, matched);
+    if (!last.purpose) {
+      last.purpose = profile.purpose || null;
+    }
+
+    return listingSlotResponse(profile, last, {
+      purpose: last.purpose,
+      intent: purposeToIntent(last.purpose) || profile.intent,
+      searchSource: SEARCH_SOURCE_CMS,
+      recommendedLocations: recommended,
+      preferredAreas: matched.map((m) => m.name),
+    });
+  }
+
+  return null;
 }
 
 async function polishListingReply(fallback, context, userMessage, previousSearch) {
@@ -2275,6 +2442,23 @@ const chat = async (req, res) => {
       applyTypesToFilters(last, mergePropertyTypes(typesFromFilters(last), requestTypes, message));
       profile = mergeProfile(profile, { lastSearchFilters: last });
     }
+    const cmsHandoff = await resolveCmsPropertyHandoff(message, profile);
+    if (cmsHandoff?.type === 'clarify') {
+      return clarificationResponse(res, {
+        reply: cmsHandoff.reply,
+        profile: cmsHandoff.profile,
+        conversation,
+        message,
+        options: cmsHandoff.options,
+        inputType: cmsHandoff.inputType,
+        quickReplies: cmsHandoff.quickReplies,
+        locationInventory: cmsHandoff.locationInventory || null,
+      });
+    }
+    if (cmsHandoff?.type === 'continue' && cmsHandoff.profile) {
+      profile = cmsHandoff.profile;
+    }
+
     const slotResult = resolvePendingSlots(
       message,
       profile,
@@ -2324,6 +2508,7 @@ const chat = async (req, res) => {
         inputType: slotResult.inputType,
         quickReplies: slotResult.quickReplies,
         leadCaptured,
+        locationInventory: slotResult.locationInventory || null,
       });
     }
 

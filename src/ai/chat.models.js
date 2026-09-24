@@ -47,6 +47,7 @@ const conversationSchema = new mongoose.Schema(
       },
       lastSearchFilters: {
         location: { type: String, default: null, trim: true },
+        locations: { type: [String], default: [] },
         locationAny: { type: Boolean, default: false },
         bedrooms: { type: Number, default: null },
         bedroomsMin: { type: Number, default: null },
@@ -61,7 +62,21 @@ const conversationSchema = new mongoose.Schema(
         purpose: { type: String, default: null, trim: true },
         furnished: { type: String, default: null, trim: true },
         amenities: { type: [String], default: [] },
+        source: { type: String, default: null, trim: true },
       },
+      recommendedLocations: {
+        type: [
+          {
+            name: { type: String, default: '', trim: true },
+            shortName: { type: String, default: null, trim: true },
+            searchValue: { type: String, default: null, trim: true },
+            aliases: { type: [String], default: [] },
+          },
+        ],
+        default: [],
+      },
+      searchSource: { type: String, default: null, trim: true },
+      cmsLocationInventory: { type: mongoose.Schema.Types.Mixed, default: null },
       goldenVisaFlow: {
         shownActions: { type: [String], default: [] },
         completedActions: { type: [String], default: [] },

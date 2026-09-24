@@ -3,6 +3,28 @@ const propertyDbService = require('../services/propertyDbService');
 const { Lead } = require('./chat.models');
 const ChatbotKnowledge = require('../models/ChatbotKnowledge');
 const { formatAed } = require('./chat.format');
+const cmsHandoff = require('./chat.cmsHandoff');
+const {
+  extractRecommendedLocationsFromChunks,
+  copyRecommendedLocations,
+  isCmsPropertyHandoffMessage,
+  hasRecommendedLocations,
+  isCmsHandoffAwaiting,
+  isCmsSearchSource,
+  CMS_HANDOFF_PURPOSE,
+  CMS_HANDOFF_LOCATION,
+  SEARCH_SOURCE_CMS,
+  SEARCH_SOURCE_DIRECT,
+  probeCmsLocationInventory,
+  purposeOptionFromInventory,
+  locationInventoryOptions,
+  cmsHandoffIntroReply,
+  cmsHandoffLocationReply,
+  parseCmsAllAreasChoice,
+  matchRecommendedLocation,
+  applyCmsLocationsToFilters,
+  describeCmsLocations,
+} = cmsHandoff;
 
 const VECTOR_INDEX_NAME = process.env.CHATBOT_VECTOR_INDEX || 'chatbot_knowledge_vector_index';
 const VECTOR_MIN_SCORE = Number(process.env.CHAT_VECTOR_MIN_SCORE) || 0.75;
@@ -714,6 +736,7 @@ function describeAmenitiesClause(filters = {}) {
 function emptySearchFilters() {
   return {
     location: null,
+    locations: [],
     locationAny: false,
     bedrooms: null,
     bedroomsMin: null,
@@ -728,6 +751,7 @@ function emptySearchFilters() {
     furnished: null,
     amenities: [],
     goldenVisaSearch: false,
+    source: null,
   };
 }
 
@@ -799,8 +823,12 @@ function copySearchFilters(filters = {}) {
   const locationAny =
     filters.locationAny === true || isUnrestrictedLocationPhrase(filters.location);
   const location = locationAny ? null : sanitizeSearchLocation(filters.location);
+  const locations = Array.isArray(filters.locations)
+    ? filters.locations.map((v) => String(v || '').trim()).filter(Boolean)
+    : [];
   return {
     location,
+    locations: locationAny ? [] : locations.length ? locations : location ? [location] : [],
     locationAny,
     bedrooms: filters.bedrooms ?? null,
     bedroomsMin: filters.bedroomsMin ?? null,
@@ -819,6 +847,7 @@ function copySearchFilters(filters = {}) {
     furnished: filters.furnished || null,
     amenities: normalizeAmenityList(filters.amenities),
     goldenVisaSearch: filters.goldenVisaSearch === true,
+    source: filters.source || null,
   };
 }
 
@@ -1762,12 +1791,13 @@ function isSellCta(text) {
 
 const SELL_AREA_ALIASES = [
   { match: /\b(al\s+)?barsha\b/i, canonical: 'Al Barsha' },
-  { match: /\bdubai\s+hills\b/i, canonical: 'Dubai Hills' },
+  { match: /\bdubai\s+hills(\s+estate)?\b/i, canonical: 'Dubai Hills Estate' },
+  { match: /\bal\s+furjan\b|\bfurjan\b/i, canonical: 'Al Furjan' },
   { match: /\bdubai\s+south\b/i, canonical: 'Dubai South' },
   { match: /\bdubai\s+marina\b/i, canonical: 'Dubai Marina' },
   { match: /\barabian\s+ranches\b/i, canonical: 'Arabian Ranches' },
   { match: /\bbusiness\s+bay\b/i, canonical: 'Business Bay' },
-  { match: /\bjvc\b|\bjumeirah\s+village\s+circle\b/i, canonical: 'JVC' },
+  { match: /\bjvc\b|\bjumeirah\s+village\s+circle\b/i, canonical: 'Jumeirah Village Circle' },
   { match: /\bsheikh\s+zayed\s+road\b|\bszr\b/i, canonical: 'Sheikh Zayed Road' },
   { match: /\bjebel\s+ali\b/i, canonical: 'Jebel Ali' },
   { match: /\bpalm\s+jumeirah\b/i, canonical: 'Palm Jumeirah' },
@@ -2858,7 +2888,11 @@ function getRequiredSearchFields(profileOrFilters = {}) {
   const filters = profileOrFilters.lastSearchFilters
     ? copySearchFilters(profileOrFilters.lastSearchFilters)
     : copySearchFilters(profileOrFilters);
-  const required = ['intent', 'propertyType'];
+  const required = ['intent'];
+  // CMS community handoff skips property-type — purpose → locations → bedrooms → results.
+  if (!isCmsSearchSource(filters) && filters.source !== SEARCH_SOURCE_CMS) {
+    required.push('propertyType');
+  }
   if (requiresBedroomsForSearch(filters)) required.push('bedrooms');
   if (!filters.locationAny) required.push('location');
   return required;
@@ -2873,7 +2907,12 @@ function getMissingSearchFields(state = {}) {
     if (field === 'intent' && !normalizePurpose(filters.purpose)) missing.push('intent');
     if (field === 'propertyType' && !typesFromFilters(filters).length) missing.push('propertyType');
     if (field === 'bedrooms' && !isBedroomsResolved(filters)) missing.push('bedrooms');
-    if (field === 'location' && !filters.locationAny && !String(filters.location || '').trim()) {
+    if (
+      field === 'location' &&
+      !filters.locationAny &&
+      !String(filters.location || '').trim() &&
+      !(Array.isArray(filters.locations) && filters.locations.length)
+    ) {
       missing.push('location');
     }
   }
@@ -2943,6 +2982,8 @@ function hasInProgressListingSearch(profile = {}) {
     !!String(last.location || '').trim() ||
     last.locationAny === true ||
     LISTING_SLOT_AWAITING.has(awaiting) ||
+    awaiting === CMS_HANDOFF_PURPOSE ||
+    awaiting === CMS_HANDOFF_LOCATION ||
     awaiting === 'emptyResults' ||
     awaiting === 'alternatives' ||
     awaiting === 'nearbyArea'
@@ -3026,12 +3067,20 @@ function sanitizeSearchLocation(value) {
 
 function hasLocationConstraint(filters = {}) {
   if (filters.locationAny === true) return false;
+  if (Array.isArray(filters.locations) && filters.locations.filter(Boolean).length > 0) return true;
   const loc = sanitizeSearchLocation(filters.location);
   return !!loc;
 }
 
 function describeLocationClause(filters = {}, { fallback = '' } = {}) {
   if (!hasLocationConstraint(filters)) return fallback ? ` ${fallback}` : '';
+  const multi = Array.isArray(filters.locations)
+    ? filters.locations.map((v) => String(v || '').trim()).filter(Boolean)
+    : [];
+  if (multi.length > 1) {
+    const phrase = describeCmsLocations({ locations: multi, location: filters.location });
+    return phrase ? ` in ${phrase}` : fallback ? ` ${fallback}` : '';
+  }
   const loc = String(filters.location || '').trim();
   return loc ? ` in ${loc}` : fallback ? ` ${fallback}` : '';
 }
@@ -3872,6 +3921,15 @@ function listingSlotQuestion(slot, filters = {}) {
     };
   }
   if (slot === 'location') {
+    // CMS handoff: never fall back to generic Dubai Marina / Business Bay chips.
+    if (isCmsSearchSource(filters) && Array.isArray(filters.locations) && filters.locations.length) {
+      return {
+        reply: locationClarificationReply(),
+        options: filters.locations.slice(),
+        inputType: 'location',
+        awaiting: 'location',
+      };
+    }
     return {
       reply: locationClarificationReply(),
       options: LOCATION_QUICK_REPLIES.map((item) => item.label),
@@ -3897,6 +3955,8 @@ const LISTING_SLOT_AWAITING = new Set([
   'location',
   'budget',
   'listingIntake',
+  CMS_HANDOFF_PURPOSE,
+  CMS_HANDOFF_LOCATION,
 ]);
 
 function isExplicitSearchReset(text) {
@@ -4170,6 +4230,13 @@ function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
       : locationChanged
         ? coalesceFilter(incomingLocation, null)
         : coalesceFilter(incomingLocation, last.location),
+    locations: incomingAny
+      ? []
+      : Array.isArray(filters.locations) && filters.locations.length
+        ? filters.locations.map((v) => String(v || '').trim()).filter(Boolean)
+        : Array.isArray(last.locations)
+          ? last.locations.map((v) => String(v || '').trim()).filter(Boolean)
+          : [],
     locationAny: incomingAny || (!locationProvided && last.locationAny === true),
     bedrooms: last.bedrooms ?? null,
     bedroomsMin: last.bedroomsMin ?? null,
@@ -4186,6 +4253,7 @@ function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
     })(),
     purpose: last.purpose || null,
     goldenVisaSearch: last.goldenVisaSearch === true || filters.goldenVisaSearch === true,
+    source: filters.source || last.source || null,
   };
   if (locationProvided) merged.locationAny = false;
   applyTypesToFilters(merged, preservedTypes);
@@ -5049,7 +5117,20 @@ function listingQueryOpts(filters, search) {
   if (Array.isArray(filters.excludeRefNos) && filters.excludeRefNos.length) {
     queryFilters.excludeRefNos = uniqueIdList(filters.excludeRefNos);
   }
-  return { page: 1, limit: PROPERTY_LIMIT, search, filters: queryFilters };
+  if (isCmsSearchSource(filters) || filters.source === SEARCH_SOURCE_CMS) {
+    queryFilters.propertyStatus = 'Live';
+  }
+  const multiLocations = Array.isArray(filters.locations)
+    ? filters.locations.map((v) => String(v || '').trim()).filter(Boolean)
+    : [];
+  let resolvedSearch = search;
+  if (multiLocations.length > 1) {
+    queryFilters.locations = multiLocations;
+    resolvedSearch = '';
+  } else if (multiLocations.length === 1 && !String(resolvedSearch || '').trim()) {
+    resolvedSearch = multiLocations[0];
+  }
+  return { page: 1, limit: PROPERTY_LIMIT, search: resolvedSearch, filters: queryFilters };
 }
 
 async function fetchByPurpose(purpose, opts) {
@@ -5714,7 +5795,18 @@ function canonicalSearchState(filters = {}) {
         : isBedroomsSet(filters.bedroomsMin)
           ? Number(filters.bedroomsMin)
           : null,
-    location: hasLocationConstraint(filters) ? String(filters.location).trim() : null,
+    location: hasLocationConstraint(filters)
+      ? Array.isArray(filters.locations) && filters.locations.length > 1
+        ? filters.locations.map((v) => String(v).trim()).filter(Boolean)
+        : String(filters.location).trim()
+      : null,
+    locations:
+      Array.isArray(filters.locations) && filters.locations.length
+        ? filters.locations.map((v) => String(v).trim()).filter(Boolean)
+        : hasLocationConstraint(filters)
+          ? [String(filters.location).trim()]
+          : [],
+    source: filters.source || null,
     minPrice,
     maxPrice,
     minBudget: minPrice,
@@ -6545,13 +6637,16 @@ async function searchProperties(
   }
 
   const search = hasLocationConstraint(effectiveFilters)
-    ? String(effectiveFilters.location).trim()
+    ? Array.isArray(effectiveFilters.locations) && effectiveFilters.locations.length > 1
+      ? ''
+      : String(effectiveFilters.location || effectiveFilters.locations?.[0] || '').trim()
     : '';
   console.log(
     'search_properties executing:',
     JSON.stringify({
       purpose,
       location: search || null,
+      locations: effectiveFilters.locations || [],
       locationAny: !!effectiveFilters.locationAny,
       type: effectiveFilters.type || null,
       types: typesFromFilters(effectiveFilters),
@@ -7062,16 +7157,24 @@ async function searchContent({ query }) {
   }));
 
   // Related pages are returned as `sources` chips — never instruct "Read more: Title" in prose.
+  const recommendedLocations = extractRecommendedLocationsFromChunks(shortChunks);
+  const profilePatch = {};
+  if (recommendedLocations.length) {
+    profilePatch.recommendedLocations = recommendedLocations;
+    profilePatch.searchSource = SEARCH_SOURCE_CMS;
+  }
+
   return {
     propertyCards: [],
     sources,
     leadCaptured: false,
-    profilePatch: {},
+    profilePatch,
     modelPayload: {
       count: rows.length,
       chunks: shortChunks,
       hasRockyContent: rows.length > 0,
       primaryCta: null,
+      recommendedLocations,
       instruction: contentAnswerInstruction(rows.length > 0),
     },
   };
@@ -7418,4 +7521,23 @@ module.exports = {
   noAdditionalSegmentReply,
   noMoreExactOptions: exactResultsExhaustedOptions,
   noMoreExactMatchesReply: exactResultsExhaustedReply,
+  extractRecommendedLocationsFromChunks,
+  copyRecommendedLocations,
+  isCmsPropertyHandoffMessage,
+  hasRecommendedLocations,
+  isCmsHandoffAwaiting,
+  isCmsSearchSource,
+  CMS_HANDOFF_PURPOSE,
+  CMS_HANDOFF_LOCATION,
+  SEARCH_SOURCE_CMS,
+  SEARCH_SOURCE_DIRECT,
+  probeCmsLocationInventory,
+  purposeOptionFromInventory,
+  locationInventoryOptions,
+  cmsHandoffIntroReply,
+  cmsHandoffLocationReply,
+  parseCmsAllAreasChoice,
+  matchRecommendedLocation,
+  applyCmsLocationsToFilters,
+  describeCmsLocations,
 };

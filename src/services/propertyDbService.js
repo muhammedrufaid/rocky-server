@@ -166,7 +166,18 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
     match.push({ [key]: value });
   });
 
-  if (q) {
+  // Multi-community OR (CMS handoff "All N areas") — each location matches any search field.
+  const locationList = Array.isArray(filters.locations)
+    ? filters.locations.map((v) => String(v || '').trim()).filter(Boolean)
+    : [];
+  if (locationList.length > 1) {
+    match.push({
+      $or: locationList.flatMap((loc) => {
+        const re = new RegExp(escapeRegex(loc), 'i');
+        return SEARCH_FIELDS.map((f) => ({ [f]: re }));
+      }),
+    });
+  } else if (q) {
     const re = new RegExp(escapeRegex(q), 'i');
     match.push({ $or: SEARCH_FIELDS.map((f) => ({ [f]: re })) });
   }
