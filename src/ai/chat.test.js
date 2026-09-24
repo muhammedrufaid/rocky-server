@@ -152,6 +152,15 @@ const {
   emptyViewingRequest,
   VIEWING_NEUTRAL_OPTIONS,
   VIEWING_WEEKEND_OPTIONS,
+  extractRecommendedLocationsFromChunks,
+  isCmsPropertyHandoffMessage,
+  copyRecommendedLocations,
+  applyCmsLocationsToFilters,
+  parseCmsAllAreasChoice,
+  matchRecommendedLocation,
+  purposeOptionFromInventory,
+  locationInventoryOptions,
+  SEARCH_SOURCE_CMS,
 } = require('./chat.tools');
 const { Lead } = require('./chat.models');
 const propertyDbService = require('../services/propertyDbService');
@@ -4442,3 +4451,140 @@ test('no exact match includes same-area bedroom counts from the database', async
 });
 
 
+
+// --- CMS → property-search handoff ---
+
+test('CMS handoff extracts communities from RAG chunks not assistant prose', () => {
+  const chunks = [
+    {
+      title: 'Best Communities for Families in Dubai',
+      content:
+        'Families often look at Dubai Hills Estate, Jumeirah Village Circle (JVC), and Al Furjan for schools and parks.',
+      headings: ['Dubai Hills Estate', 'JVC', 'Al Furjan'],
+    },
+  ];
+  const locs = extractRecommendedLocationsFromChunks(chunks);
+  const names = locs.map((l) => l.name);
+  assert.equal(names.includes('Dubai Hills Estate'), true);
+  assert.equal(names.includes('Jumeirah Village Circle'), true);
+  assert.equal(names.includes('Al Furjan'), true);
+  assert.equal(locs.find((l) => l.name === 'Jumeirah Village Circle')?.shortName, 'JVC');
+});
+
+test('CMS handoff detector matches follow-up property asks', () => {
+  assert.equal(
+    isCmsPropertyHandoffMessage('Yes, can you pull the properties based on the locations'),
+    true
+  );
+  assert.equal(isCmsPropertyHandoffMessage('show me properties there'), true);
+  assert.equal(isCmsPropertyHandoffMessage('explore these areas'), true);
+  assert.equal(isCmsPropertyHandoffMessage('Best Communities for Families in Dubai'), false);
+  assert.equal(isCmsPropertyHandoffMessage('Buy'), false);
+});
+
+test('CMS handoff skips propertyType in required fields', () => {
+  const input = {
+    purpose: 'Buy',
+    source: SEARCH_SOURCE_CMS,
+    location: 'Al Furjan',
+    locations: ['Al Furjan'],
+  };
+  const required = getRequiredSearchFields(input);
+  assert.equal(required.includes('propertyType'), false);
+  assert.equal(required.includes('bedrooms'), true);
+  const missing = getMissingSearchFields({
+    ...input,
+    bedrooms: 3,
+    bedroomsResolved: true,
+  });
+  assert.deepEqual(missing, []);
+});
+
+test('CMS handoff preserves all areas and aliases', () => {
+  const recommended = copyRecommendedLocations([
+    { name: 'Dubai Hills Estate', searchValue: 'dubai-hills-estate' },
+    {
+      name: 'Jumeirah Village Circle',
+      shortName: 'JVC',
+      aliases: ['JVC', 'Jumeirah Village Circle (JVC)'],
+      searchValue: 'jumeirah-village-circle',
+    },
+    { name: 'Al Furjan', searchValue: 'al-furjan' },
+  ]);
+  assert.equal(matchRecommendedLocation('JVC', recommended)?.name, 'Jumeirah Village Circle');
+  assert.equal(matchRecommendedLocation('Al Furjan', recommended)?.name, 'Al Furjan');
+  const all = parseCmsAllAreasChoice('All 3 areas', recommended);
+  assert.equal(all?.length, 3);
+  const filters = applyCmsLocationsToFilters(emptySearchFilters(), all);
+  assert.equal(filters.source, SEARCH_SOURCE_CMS);
+  assert.deepEqual(filters.locations, [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
+});
+
+test('CMS handoff purpose options disable zero-inventory categories', () => {
+  const inventory = [
+    {
+      location: 'Al Furjan',
+      buy: { count: 9, startingPrice: 1250000, averagePrice: 1560000 },
+      rent: { count: 0, startingPrice: null, averagePrice: null },
+      offPlan: { count: 0, startingPrice: null, averagePrice: null },
+    },
+  ];
+  const options = purposeOptionFromInventory(inventory);
+  const buy = options.find((o) => o.value === 'Buy');
+  const rent = options.find((o) => o.value === 'Rent');
+  const off = options.find((o) => o.value === 'Off-plan');
+  assert.equal(buy.enabled, true);
+  assert.equal(rent.enabled, false);
+  assert.match(rent.label, /No current listings/i);
+  assert.equal(off.enabled, false);
+});
+
+test('CMS handoff location inventory options include All N areas', () => {
+  const inventory = [
+    {
+      location: 'Dubai Hills Estate',
+      shortName: null,
+      buy: { count: 12, startingPrice: 1400000, averagePrice: 2100000 },
+      rent: { count: 0 },
+      offPlan: { count: 0 },
+    },
+    {
+      location: 'Jumeirah Village Circle',
+      shortName: 'JVC',
+      buy: { count: 28, startingPrice: 610000, averagePrice: 1070000 },
+      rent: { count: 0 },
+      offPlan: { count: 0 },
+    },
+    {
+      location: 'Al Furjan',
+      buy: { count: 9, startingPrice: 1250000, averagePrice: 1560000 },
+      rent: { count: 0 },
+      offPlan: { count: 0 },
+    },
+  ];
+  const { options, locationInventory } = locationInventoryOptions('Buy', inventory);
+  assert.equal(locationInventory.type, 'location_inventory');
+  assert.equal(locationInventory.intent, 'buy');
+  assert.equal(locationInventory.locations.length, 3);
+  assert.equal(options.some((o) => o.allAreas), true);
+  assert.match(options.find((o) => o.allAreas).label, /All 3 areas/);
+  assert.match(options[0].label, /from AED/i);
+});
+
+test('CMS handoff multi-location listingQueryOpts uses locations filter', () => {
+  const filters = applyCmsLocationsToFilters(
+    { ...emptySearchFilters(), purpose: 'Buy', source: SEARCH_SOURCE_CMS, bedrooms: 3, bedroomsResolved: true },
+    [
+      { name: 'Dubai Hills Estate' },
+      { name: 'Al Furjan' },
+    ]
+  );
+  const opts = listingQueryOpts(filters, '');
+  assert.deepEqual(opts.filters.locations, ['Dubai Hills Estate', 'Al Furjan']);
+  assert.equal(opts.search, '');
+  assert.equal(opts.filters.propertyStatus, 'Live');
+});

@@ -823,12 +823,12 @@ function copySearchFilters(filters = {}) {
   const locationAny =
     filters.locationAny === true || isUnrestrictedLocationPhrase(filters.location);
   const location = locationAny ? null : sanitizeSearchLocation(filters.location);
-  const locations = Array.isArray(filters.locations)
+  const explicitLocations = Array.isArray(filters.locations)
     ? filters.locations.map((v) => String(v || '').trim()).filter(Boolean)
     : [];
   return {
     location,
-    locations: locationAny ? [] : locations.length ? locations : location ? [location] : [],
+    locations: locationAny ? [] : explicitLocations,
     locationAny,
     bedrooms: filters.bedrooms ?? null,
     bedroomsMin: filters.bedroomsMin ?? null,
@@ -1791,13 +1791,13 @@ function isSellCta(text) {
 
 const SELL_AREA_ALIASES = [
   { match: /\b(al\s+)?barsha\b/i, canonical: 'Al Barsha' },
-  { match: /\bdubai\s+hills(\s+estate)?\b/i, canonical: 'Dubai Hills Estate' },
+  { match: /\bdubai\s+hills(\s+estate)?\b/i, canonical: 'Dubai Hills' },
   { match: /\bal\s+furjan\b|\bfurjan\b/i, canonical: 'Al Furjan' },
   { match: /\bdubai\s+south\b/i, canonical: 'Dubai South' },
   { match: /\bdubai\s+marina\b/i, canonical: 'Dubai Marina' },
   { match: /\barabian\s+ranches\b/i, canonical: 'Arabian Ranches' },
   { match: /\bbusiness\s+bay\b/i, canonical: 'Business Bay' },
-  { match: /\bjvc\b|\bjumeirah\s+village\s+circle\b/i, canonical: 'Jumeirah Village Circle' },
+  { match: /\bjvc\b|\bjumeirah\s+village\s+circle\b/i, canonical: 'JVC' },
   { match: /\bsheikh\s+zayed\s+road\b|\bszr\b/i, canonical: 'Sheikh Zayed Road' },
   { match: /\bjebel\s+ali\b/i, canonical: 'Jebel Ali' },
   { match: /\bpalm\s+jumeirah\b/i, canonical: 'Palm Jumeirah' },

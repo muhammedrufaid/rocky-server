@@ -1671,6 +1671,9 @@ async function resolveCmsPropertyHandoff(message, profile = {}) {
       }),
       reply: cmsHandoffIntroReply(recommended),
       options,
+      quickReplies: options
+        .filter((o) => o.enabled !== false)
+        .map((o) => ({ label: o.label, value: o.value || o.label })),
       locationInventory: null,
     };
   }

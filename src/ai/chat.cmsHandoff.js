@@ -286,6 +286,12 @@ function isCmsPropertyHandoffMessage(text) {
   if (!raw) return false;
 
   if (
+    /\b(explore|compare|check)\s+(these|those|the)\s+(areas?|communities|locations)\b/.test(raw)
+  ) {
+    return true;
+  }
+
+  if (
     /\b(show|pull|find|get|explore|compare|check|list)\b[\s\S]{0,40}\b(propert(?:y|ies)|listing(?:s)?|option(?:s)?|inventory)\b/.test(
       raw
     ) &&
