@@ -782,6 +782,9 @@ test('content answer instruction prioritizes Rocky hits and forbids vague filler
   assert.match(withHits, /Typically/i);
   assert.match(withHits, /Preserve exact thresholds/i);
   assert.match(withHits, /Do NOT ask whether they want you to find/i);
+  assert.match(withHits, /never open with 'Rocky:'/i);
+  assert.match(withHits, /do not duplicate that CTA/i);
+  assert.doesNotMatch(withHits, /Mention the Rocky article\/page by title/i);
   const withoutHits = contentAnswerInstruction(false);
   assert.match(withoutHits, /No sufficiently relevant Rocky/i);
   assert.match(withoutHits, /Do NOT claim the answer came from Rocky/i);
@@ -794,6 +797,8 @@ test('system prompt encodes Rocky knowledge-retrieval priority', () => {
   assert.match(prompt, /INTERNAL KNOWLEDGE FIRST/i);
   assert.match(prompt, /Typically/i);
   assert.match(prompt, /absolute priority over generic model knowledge/i);
+  assert.match(prompt, /Never open with "Rocky:"/i);
+  assert.match(prompt, /titled chips\/buttons/i);
 });
 
 // --- Sell flow ---

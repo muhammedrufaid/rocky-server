@@ -191,13 +191,21 @@ function rankRelatedContentSources(sources = []) {
     const key = normalizeContentUrl(item.url);
     if (!key || seen.has(key)) return;
     seen.add(key);
-    ordered.push({ title: item.title, url: item.url });
+    ordered.push({ title: item.title, url: item.url, sourceType: item.sourceType || null });
   };
 
   for (const kind of ['blog', 'area_guide', 'company_info', 'faq', 'service', 'listing', 'other']) {
     for (const item of byKind[kind]) pick(item);
   }
-  return ordered;
+  return ordered.map((item) => {
+    const kind = contentSourceKind(item);
+    return {
+      title: item.title,
+      url: item.url,
+      type: kind === 'area_guide' ? 'areaGuide' : kind === 'company_info' ? 'companyInfo' : kind,
+      sourceType: item.sourceType || null,
+    };
+  });
 }
 
 function buildListingUrl(property) {
@@ -6942,8 +6950,10 @@ function contentAnswerInstruction(hasChunks) {
       'INTERNAL KNOWLEDGE FIRST — MANDATORY: Rocky internal content was found. Answer ONLY from these chunks as the primary source.',
       'Do NOT answer from generic model knowledge first. Do NOT use vague filler like "Typically...", "Requirements may vary...", or "You should check authorities..." when these chunks contain a specific answer.',
       'Preserve exact thresholds, visa durations, eligibility requirements, dates, ownership rules, and fees from the chunks accurately.',
-      'Answer the visitor\'s LATEST question in at most 2–3 short sentences. Mention the Rocky article/page by title and point them to the related page button/CTA already attached — do not paste raw URLs.',
-      'Do NOT ask whether they want you to find or pull up the article. Use it automatically. Do NOT invent facts missing from the chunks.',
+      "Answer the visitor's LATEST question directly in at most 2–3 short sentences. Lead with the facts (communities, rules, fees) — never open with 'Rocky:', 'Read more:', 'According to Rocky:', or 'From our Rocky content:'.",
+      'Do NOT paste "Read more" or the article title as a search-result style lead-in. A related-page button/chip is already attached below the reply — do not duplicate that CTA in the prose, and do not paste raw URLs.',
+      'Do NOT ask whether they want you to find or pull up the article. Use the chunks automatically. Do NOT invent facts missing from the chunks.',
+      'End with one short optional next step (e.g. exploring properties in a named community) when it fits.',
     ].join(' ');
   }
   return [
@@ -7051,11 +7061,7 @@ async function searchContent({ query }) {
     content: String(row.content || '').replace(/\s+/g, ' ').trim().slice(0, 900),
   }));
 
-  const primaryCta =
-    !isGoldenVisaMention(q) && sources[0] && sources[0].title
-      ? `Read more: “${sources[0].title}” (use the related page button).`
-      : null;
-
+  // Related pages are returned as `sources` chips — never instruct "Read more: Title" in prose.
   return {
     propertyCards: [],
     sources,
@@ -7065,7 +7071,7 @@ async function searchContent({ query }) {
       count: rows.length,
       chunks: shortChunks,
       hasRockyContent: rows.length > 0,
-      primaryCta,
+      primaryCta: null,
       instruction: contentAnswerInstruction(rows.length > 0),
     },
   };

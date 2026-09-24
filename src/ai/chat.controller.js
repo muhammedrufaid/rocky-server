@@ -42,18 +42,12 @@ function synthesizeContentReply(chunks = [], sources = []) {
       .trim()
       .slice(0, 220)
       .replace(/\s+\S*$/, '');
-    const title = String(first.title || '').trim();
     if (excerpt) {
-      return title
-        ? `${excerpt}. You can read more in “${title}” — would you like more details?`
-        : `${excerpt}. Would you like more details?`;
+      return `${excerpt}. Would you like to explore related properties or get more details?`;
     }
   }
   if ((sources || []).length) {
-    const title = String(sources[0].title || '').trim();
-    return title
-      ? `Here’s what Rocky covers on this in “${title}”. Would you like more details?`
-      : 'Here’s related Rocky information for you — see the links below. Would you like more details?';
+    return 'I found a related Rocky guide for this. Would you like to explore matching properties or get more details?';
   }
   return '';
 }
@@ -62,12 +56,47 @@ function contentReplyOrFallback(chunks = [], sources = [], usedSearchContent = f
   const fromContent = synthesizeContentReply(chunks, sources);
   if (fromContent) return fromContent;
   if ((chunks || []).length || (sources || []).length) {
-    return 'I found related Rocky information for you — see the links below. Would you like more details?';
+    return 'I found related information for you. Would you like more details or help finding matching properties?';
   }
   if (usedSearchContent) {
     return "I don't have a Rocky article that directly covers that. In general for Dubai real estate, requirements can change — please verify with the relevant authority. Would you like help finding properties or speaking with an agent?";
   }
   return '';
+}
+
+/** Strip search-result style lead-ins the model may still emit for CMS answers. */
+function stripContentReplyPrefixes(text) {
+  let out = String(text || '').trim();
+  if (!out) return '';
+  // Repeat a few times in case stacked prefixes appear.
+  for (let i = 0; i < 3; i += 1) {
+    const next = out
+      .replace(/^(?:Rocky\s*:\s*)+/i, '')
+      .replace(/^Read more\s*:\s*[“"']?[^”"'\n.]+[”"']?\s*\.?\s*/i, '')
+      .replace(/^According to Rocky\s*:\s*/i, '')
+      .replace(/^From our Rocky content\s*:\s*/i, '')
+      .replace(/^Rocky notes?\s*:\s*/i, '')
+      .trim();
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+function finalizeAssistantReply(reply, { usedSearchContent = false, usedSearchProperties = false } = {}) {
+  let out = String(reply || '').trim();
+  if (usedSearchContent) out = stripContentReplyPrefixes(out);
+  if (usedSearchProperties) out = stripExposedUrlsFromReply(out);
+  return out;
+}
+
+function attachRelatedContent(payload, sourceList = []) {
+  const related = uniqueBy(sourceList, (s) => s.url || s.title);
+  return {
+    ...payload,
+    sources: related,
+    relatedContent: related,
+  };
 }
 
 function enrichGoldenVisaInfoReply(reply, message, profile = {}, sources = []) {
@@ -123,10 +152,14 @@ function isAbortError(err) {
 
 /** §4.3 Path C JSON / done payload. */
 function buildPathCPayload(result, reply, suggestedCta) {
+  const sources = uniqueBy(result.sources || [], (s) => s.url || s.title);
+  const hasCmsSources = sources.length > 0 && !(result.propertyCards || []).length;
+  const safeReply = hasCmsSources ? stripContentReplyPrefixes(reply) : String(reply || '').trim();
   const payload = {
-    reply,
+    reply: safeReply || String(reply || '').trim(),
     propertyCards: result.propertyCards || [],
-    sources: result.sources || [],
+    sources,
+    relatedContent: sources,
     suggestedCta,
     viewAllMatching: result.viewAllMatching || null,
     // §2.1 — Path C must include leadCaptured (JSON and done).
@@ -1850,7 +1883,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
           instruction:
             prefetch.modelPayload?.instruction ||
             (chunks.length
-              ? 'Rocky content was found. Answer only from these chunks. Preserve exact facts. Do not use vague filler. Mention the article CTA.'
+              ? 'Rocky content was found. Answer only from these chunks. Preserve exact facts. Answer the question directly — never open with Rocky:/Read more:/According to Rocky:. Related pages are attached as chips — do not duplicate Read more in the prose.'
               : 'No Rocky content matched. You may use brief general real-estate knowledge without claiming it is from Rocky.'),
         }),
       });
@@ -1992,17 +2025,19 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
       if (!reply) {
         reply = FRIENDLY_CHAT_ERROR;
       }
-      if (usedSearchProperties) reply = stripExposedUrlsFromReply(reply);
-      return {
-        reply,
-        propertyCards: uniqueBy(propertyCards, (c) => c.id),
-        sources: uniqueBy(sources, (s) => s.url || s.title),
-        leadCaptured,
-        profile,
-        viewAllMatching,
-        presentation,
-        ...(lastSearchPagination || {}),
-      };
+      reply = finalizeAssistantReply(reply, { usedSearchContent, usedSearchProperties });
+      return attachRelatedContent(
+        {
+          reply,
+          propertyCards: uniqueBy(propertyCards, (c) => c.id),
+          leadCaptured,
+          profile,
+          viewAllMatching,
+          presentation,
+          ...(lastSearchPagination || {}),
+        },
+        sources
+      );
     }
 
     for (const call of toolCalls) {
@@ -2192,22 +2227,26 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   }
 
   // Max rounds exhausted — still return useful content if we have it
-  const fallbackReply =
+  const fallbackReply = finalizeAssistantReply(
     contentReplyOrFallback(lastContentChunks, sources, usedSearchContent) ||
-    (usedSearchContent
-      ? FRIENDLY_CHAT_ERROR
-      : 'Sorry, I could not finish that just now. Please try again.');
+      (usedSearchContent
+        ? FRIENDLY_CHAT_ERROR
+        : 'Sorry, I could not finish that just now. Please try again.'),
+    { usedSearchContent, usedSearchProperties }
+  );
 
-  return {
-    reply: fallbackReply,
-    propertyCards: uniqueBy(propertyCards, (c) => c.id),
-    sources: uniqueBy(sources, (s) => s.url || s.title),
-    leadCaptured,
-    profile,
-    viewAllMatching,
-    presentation,
-    ...(lastSearchPagination || {}),
-  };
+  return attachRelatedContent(
+    {
+      reply: fallbackReply,
+      propertyCards: uniqueBy(propertyCards, (c) => c.id),
+      leadCaptured,
+      profile,
+      viewAllMatching,
+      presentation,
+      ...(lastSearchPagination || {}),
+    },
+    sources
+  );
 }
 
 const chat = async (req, res) => {
@@ -2395,6 +2434,7 @@ const chat = async (req, res) => {
       throwIfAborted(abortController.signal);
 
       let reply = String(result.reply || '').trim() || FRIENDLY_CHAT_ERROR;
+      reply = stripContentReplyPrefixes(reply) || reply;
       const goldenVisaInfo = enrichGoldenVisaInfoReply(
         reply,
         message,
