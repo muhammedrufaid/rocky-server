@@ -20,7 +20,7 @@ const {
   buildViewingLeadIntent,
   logViewingDebug,
 } = require('./chat.tools');
-const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, shouldResetOnListingIntent, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, normalizePurpose, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, isInformationalRealEstateQuery, isExplicitPropertySearchIntent, isGoldenVisaMention, isGoldenVisaPropertySearchIntent, isShowGoldenVisaPropertiesAction, isReadInvestorVisaGuideAction, goldenVisaInfoOptions, goldenVisaInitialReply, goldenVisaGuideDetailReply, buildGoldenVisaInfoResult, markGoldenVisaAction, copyGoldenVisaFlow, filterGoldenVisaRelatedSources, GOLDEN_VISA_ACTION, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, isChangeBedroomsAction, bedroomChangeQuestion, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion, listingSearchResetPatch, isExplicitSearchReset, hasInProgressListingSearch, hasActiveListingSearch, isCurrentListingReference, buildSearchAcknowledgement, joinAckAndQuestion, stripExposedUrlsFromReply, canonicalSearchState, isCmsPropertyHandoffMessage, hasRecommendedLocations, isCmsHandoffAwaiting, copyRecommendedLocations, CMS_HANDOFF_PURPOSE, CMS_HANDOFF_LOCATION, SEARCH_SOURCE_CMS, probeCmsLocationInventory, purposeOptionFromInventory, locationInventoryOptions, cmsHandoffIntroReply, cmsHandoffLocationReply, parseCmsAllAreasChoice, matchRecommendedLocation, applyCmsLocationsToFilters } = require('./chat.tools');
+const { TOOL_DEFINITIONS, executeTool, toPropertyCard, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, shouldResetOnListingIntent, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, normalizePurpose, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, isInformationalRealEstateQuery, isExplicitPropertySearchIntent, isGoldenVisaMention, isGoldenVisaPropertySearchIntent, isShowGoldenVisaPropertiesAction, isReadInvestorVisaGuideAction, goldenVisaInfoOptions, goldenVisaInitialReply, goldenVisaGuideDetailReply, buildGoldenVisaInfoResult, markGoldenVisaAction, copyGoldenVisaFlow, filterGoldenVisaRelatedSources, GOLDEN_VISA_ACTION, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, isChangeBedroomsAction, bedroomChangeQuestion, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion, listingSearchResetPatch, isExplicitSearchReset, hasInProgressListingSearch, hasActiveListingSearch, isCurrentListingReference, buildSearchAcknowledgement, joinAckAndQuestion, stripExposedUrlsFromReply, canonicalSearchState, isCmsPropertyHandoffMessage, hasRecommendedLocations, isCmsHandoffAwaiting, copyRecommendedLocations, CMS_HANDOFF_PURPOSE, CMS_HANDOFF_LOCATION, CMS_HANDOFF_PROPERTY_TYPE, CMS_IMMEDIATE_LISTING_THRESHOLD, SEARCH_SOURCE_CMS, probeCmsLocationInventory, probeCmsSegmentFacets, purposeOptionFromInventory, locationInventoryOptions, areaInventorySummaryPayload, communitySummariesFromInventory, cmsCommunityPreviewReply, fetchCmsCommunityPreviewProperties, matchCmsTopicScopeFromProfile, matchCmsTopicScopeFromText, cmsHandoffIntroReply, cmsHandoffLocationReply, cmsHandoffPropertyTypeReply, cmsHandoffBedroomsReply, propertyTypeOptionsFromInventory, bedroomOptionsFromValues, inventoryTotals, parseCmsAllAreasChoice, matchRecommendedLocation, applyCmsLocationsToFilters, ensureCmsAreasOnFilters, ensureActiveAreaScope, getActiveAreas, isAreaScopeLocked, unlockAreaScope, wantsAreaScopeUnlock, hasLocationConstraint, SEARCH_SOURCE_DIRECT, recommendedLocationsFromProfile, recoverRecommendedLocations, VIEW_CONTEXT_COMMUNITY_PROPERTIES, VIEW_CONTEXT_COMMUNITIES_LABEL, isViewContextCommunityPropertiesAction, isViewContextCommunitiesMessage, communitiesForContextKey, buildViewContextCommunitiesAction, buildSourceContextFromRecommended, copySourceContext, propertySearchFromFilters, emptyPropertySearch, copyPropertySearch } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -97,6 +97,23 @@ function attachRelatedContent(payload, sourceList = []) {
     sources: related,
     relatedContent: related,
   };
+}
+
+function withContentCommunityActions(payload, { suggestedActions, quickReplies, primaryCta } = {}) {
+  if (!payload) return payload;
+  if (Array.isArray(suggestedActions) && suggestedActions.length) {
+    payload.suggestedActions = suggestedActions;
+  }
+  if (Array.isArray(quickReplies) && quickReplies.length) {
+    payload.quickReplies = quickReplies;
+    payload.requiresClarification = true;
+    if (!payload.options) {
+      payload.options = quickReplies.map((q) => q.label || q.value).filter(Boolean);
+      payload.select = PURPOSE_SELECT;
+    }
+  }
+  if (primaryCta) payload.primaryCta = primaryCta;
+  return payload;
 }
 
 function enrichGoldenVisaInfoReply(reply, message, profile = {}, sources = []) {
@@ -285,6 +302,10 @@ function mergeProfile(current, patch) {
     recommendedLocations: copyRecommendedLocations(current.recommendedLocations || []),
     searchSource: current.searchSource || null,
     cmsLocationInventory: current.cmsLocationInventory || null,
+    sourceContext: copySourceContext(current.sourceContext),
+    propertySearch: copyPropertySearch(
+      current.propertySearch || propertySearchFromFilters(current.lastSearchFilters || {})
+    ),
     slotFlow: {
       awaiting: current.slotFlow?.awaiting || null,
       alternatives: current.slotFlow?.alternatives || null,
@@ -326,6 +347,17 @@ function mergeProfile(current, patch) {
   }
   if (Array.isArray(patch.recommendedLocations)) {
     next.recommendedLocations = copyRecommendedLocations(patch.recommendedLocations);
+  }
+  if (patch.sourceContext !== undefined) {
+    next.sourceContext = copySourceContext(patch.sourceContext);
+  }
+  if (patch.propertySearch && typeof patch.propertySearch === 'object') {
+    next.propertySearch = copyPropertySearch({
+      ...next.propertySearch,
+      ...patch.propertySearch,
+    });
+  } else if (patch.lastSearchFilters) {
+    next.propertySearch = propertySearchFromFilters(next.lastSearchFilters);
   }
   if (patch.searchSource !== undefined) {
     next.searchSource = patch.searchSource || null;
@@ -433,16 +465,32 @@ function listingSlotResponse(profile, filters, extraPatch = {}) {
     explicitPurpose: explicitPurposeFlag,
     ...rest
   } = extraPatch || {};
-  const next = normalizeSearchProfileAfterPatch(previous, filters || emptySearchFilters(), {
+  let next = normalizeSearchProfileAfterPatch(previous, filters || emptySearchFilters(), {
     explicitPurpose: explicitPurposeFlag === true,
   });
-  const missing = nextMissingListingSlot(next);
+  // Preserve multi-community scope — never let slot patches wipe locations.
+  next = ensureActiveAreaScope(profile, next);
+  if (
+    (!Array.isArray(next.locations) || !next.locations.length) &&
+    !next.locationAny
+  ) {
+    const recovered = recoverRecommendedLocations(profile, {});
+    if (recovered.length) {
+      next = applyCmsLocationsToFilters(next, recovered);
+    }
+  }
+  const missing = nextMissingListingSlot(next, {
+    ...profile,
+    lastSearchFilters: next,
+  });
   const question = missing ? listingSlotQuestion(missing, next) : null;
   const ack = buildSearchAcknowledgement(next, { previous });
   const patch = {
     ...listingSearchResetPatch(previous, next),
     ...rest,
     lastSearchFilters: next,
+    propertySearch: propertySearchFromFilters(next),
+    searchSource: next.source || profile.searchSource || null,
     slotFlow: question
       ? { awaiting: question.awaiting, alternatives: null, lastAskedField: missing }
       : { awaiting: null, alternatives: null, lastAskedField: null },
@@ -453,7 +501,11 @@ function listingSlotResponse(profile, filters, extraPatch = {}) {
     normalizeIntentValue(profile.intent) ||
     purposeToIntent(profile.purpose) ||
     null;
-  if (next.location) patch.preferredAreas = rest.preferredAreas || [next.location];
+  if (Array.isArray(next.locations) && next.locations.length) {
+    patch.preferredAreas = rest.preferredAreas || next.locations.slice();
+  } else if (next.location) {
+    patch.preferredAreas = rest.preferredAreas || [next.location];
+  }
   if (requiresBedroomsForSearch(next)) {
     if (next.bedrooms != null) patch.bedrooms = next.bedrooms;
     else if (next.bedroomsMin != null) patch.bedrooms = next.bedroomsMin;
@@ -465,6 +517,18 @@ function listingSlotResponse(profile, filters, extraPatch = {}) {
     min: next.budgetMin ?? null,
     max: next.budgetMax ?? null,
   };
+  console.log(
+    '[SEARCH_CONTEXT AFTER]',
+    JSON.stringify({
+      action: 'listingSlotResponse',
+      communities: next.locations || [],
+      purpose: next.purpose || null,
+      propertyType: typesFromFilters(next),
+      bedrooms: next.bedroomsAny ? 'any' : next.bedrooms ?? null,
+      missing: missing || null,
+      locked: next.areaScopeLocked === true,
+    })
+  );
   console.log(
     'LISTING_PROFILE_STATE',
     JSON.stringify({
@@ -896,27 +960,49 @@ function applySellFlow(message, profile, history = []) {
 }
 
 function applyRelocationIntent(message, profile) {
-  if (!wantsDifferentLocation(message)) return null;
+  if (!wantsDifferentLocation(message) && !wantsAreaScopeUnlock(message)) return null;
 
   const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
-  if (!last.purpose && !last.location && !last.type && !profile.purpose) return null;
+  if (!last.purpose && !last.location && !last.type && !profile.purpose && !isAreaScopeLocked(profile)) {
+    return null;
+  }
 
+  const named = parseLocationFromMessage(message) || parseLocationReply(message);
+  if (named && (wantsAreaScopeUnlock(message) || wantsDifferentLocation(message))) {
+    const unlocked = unlockAreaScope(last, { location: named });
+    return listingSlotResponse(profile, unlocked, {
+      preferredAreas: [named],
+      searchSource: SEARCH_SOURCE_DIRECT,
+      propertySearch: propertySearchFromFilters(unlocked),
+    });
+  }
+
+  if (isUnrestrictedLocationPhrase(message)) {
+    const unlocked = unlockAreaScope(last, { locationAny: true });
+    return listingSlotResponse(profile, unlocked, {
+      searchSource: SEARCH_SOURCE_DIRECT,
+      propertySearch: propertySearchFromFilters(unlocked),
+    });
+  }
+
+  // Generic "another area" without a named place — unlock and ask.
+  const unlocked = unlockAreaScope(last);
   const newTypes = parsePropertyTypesFromMessage(message);
-  const previousLocation = last.location;
-  last.location = null;
-  if (newTypes.length) applyTypesToFilters(last, newTypes);
-  const resolvedPurpose = last.purpose || profile.purpose || null;
-  if (resolvedPurpose) last.purpose = resolvedPurpose;
+  if (newTypes.length) applyTypesToFilters(unlocked, newTypes);
+  const resolvedPurpose = unlocked.purpose || profile.purpose || null;
+  if (resolvedPurpose) unlocked.purpose = resolvedPurpose;
 
   return {
     type: 'clarify',
     profile: mergeProfile(profile, {
       purpose: resolvedPurpose || profile.purpose,
-      lastSearchFilters: last,
+      lastSearchFilters: unlocked,
+      searchSource: SEARCH_SOURCE_DIRECT,
+      propertySearch: propertySearchFromFilters(unlocked),
       slotFlow: { awaiting: 'location', alternatives: null },
     }),
     reply: locationClarificationReply(),
-    options: nearbyAreaOptions(previousLocation),
+    options: nearbyAreaOptions(last.location),
   };
 }
 
@@ -974,7 +1060,13 @@ function applyPropertyTypeChange(message, profile) {
     });
   }
 
-  if (!last.location && !last.locationAny) {
+  if (!last.location && !last.locationAny && !(Array.isArray(last.locations) && last.locations.length)) {
+    // Restore locked CMS communities before asking for a new area.
+    const scoped = ensureActiveAreaScope(profile, last);
+    if (hasLocationConstraint(scoped)) {
+      Object.assign(last, scoped);
+      return listingSlotResponse(profile, last, { explicitPurpose: !!explicitPurpose });
+    }
     const normalized = listingSlotResponse(profile, last, { explicitPurpose: !!explicitPurpose });
     if (normalized.type === 'clarify') return normalized;
     return {
@@ -1160,8 +1252,21 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
     const purpose = parsePurposeFromMessage(message);
     if (!purpose) return null;
 
-    const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    let last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    last = ensureActiveAreaScope(profile, last);
+    if ((!Array.isArray(last.locations) || !last.locations.length) && !last.locationAny) {
+      const recovered = recoverRecommendedLocations(profile, { message });
+      if (recovered.length) last = applyCmsLocationsToFilters(last, recovered);
+    }
     last.purpose = purpose;
+    console.log(
+      '[SEARCH_ACTION]',
+      JSON.stringify({
+        action: 'selectPurpose',
+        value: purpose,
+        communities: last.locations || [],
+      })
+    );
     return listingSlotResponse(profile, last, {
       purpose,
       intent: purposeToIntent(purpose),
@@ -1177,8 +1282,22 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
       return listingSlotResponse(profile, profile.lastSearchFilters || emptySearchFilters());
     }
 
-    const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    let last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    last = ensureActiveAreaScope(profile, last);
+    if ((!Array.isArray(last.locations) || !last.locations.length) && !last.locationAny) {
+      const recovered = recoverRecommendedLocations(profile, { message });
+      if (recovered.length) last = applyCmsLocationsToFilters(last, recovered);
+    }
+    // "Any" means no bedroom filter — never reset location scope.
     applyBedroomChoice(last, choice);
+    console.log(
+      '[SEARCH_ACTION]',
+      JSON.stringify({
+        action: 'selectBedrooms',
+        value: choice.any ? 'any' : choice.exact ?? choice.min ?? null,
+        communities: last.locations || [],
+      })
+    );
     return listingSlotResponse(profile, last);
   }
 
@@ -1613,6 +1732,9 @@ async function clarificationResponse(res, {
   quickReplies,
   leadCaptured = false,
   locationInventory = null,
+  propertyCards = null,
+  communitySummaries = null,
+  listingsByCommunity = null,
 }) {
   const safeReply = String(reply || '').trim() || FRIENDLY_CHAT_ERROR;
   conversation.messages.push({ role: 'user', content: message, createdAt: new Date() });
@@ -1643,51 +1765,184 @@ async function clarificationResponse(res, {
   if (inputType) body.inputType = inputType;
   if (Array.isArray(quickReplies) && quickReplies.length) body.quickReplies = quickReplies;
   if (locationInventory) body.locationInventory = locationInventory;
+  if (Array.isArray(propertyCards) && propertyCards.length) {
+    body.propertyCards = propertyCards;
+  }
+  if (Array.isArray(communitySummaries)) {
+    body.communitySummaries = communitySummaries;
+    body.totalCount = communitySummaries.reduce((n, row) => n + (Number(row?.count) || 0), 0);
+  }
+  if (listingsByCommunity && typeof listingsByCommunity === 'object') {
+    body.listingsByCommunity = listingsByCommunity;
+  }
   return res.status(200).json(body);
 }
 
 /**
  * CMS article communities → property search (do not restart the generic wizard).
+ * Seeds all recommended areas into lastSearchFilters and never re-asks location
+ * unless the user explicitly changes communities.
  */
-async function resolveCmsPropertyHandoff(message, profile = {}) {
+async function resolveCmsPropertyHandoff(message, profile = {}, history = [], selection = {}) {
   const awaiting = profile.slotFlow?.awaiting;
-  const recommended = copyRecommendedLocations(profile.recommendedLocations || []);
+  const contextKey =
+    String(selection.contextKey || profile.sourceContext?.source || '').trim() || null;
+  const forcedFromAction = isViewContextCommunityPropertiesAction(selection.action);
+  const forcedCommunities = forcedFromAction
+    ? communitiesForContextKey(
+        contextKey || 'best-communities-for-families-dubai',
+        selection.communities || profile.recommendedLocations || []
+      )
+    : [];
+
+  let recommended =
+    forcedCommunities.length > 0
+      ? forcedCommunities
+      : recoverRecommendedLocations(profile, { message, history });
+
+  // Structured badge / contextKey always wins over stale single-location state.
+  if (contextKey && (forcedFromAction || isCmsPropertyHandoffMessage(message))) {
+    const topicForced = communitiesForContextKey(contextKey, recommended);
+    if (topicForced.length) recommended = topicForced;
+  }
+
+  let sourceContext =
+    copySourceContext(profile.sourceContext) ||
+    (recommended.length
+      ? buildSourceContextFromRecommended(recommended, {
+          type: 'community_group',
+          source: contextKey || null,
+        })
+      : null);
+
+  // Handoff phrasing with no persisted communities: try topic recovery from history.
+  if (!recommended.length && (isCmsPropertyHandoffMessage(message) || forcedFromAction)) {
+    recommended = recoverRecommendedLocations(profile, { message, history });
+    if (recommended.length) {
+      sourceContext =
+        copySourceContext(profile.sourceContext) ||
+        buildSourceContextFromRecommended(recommended, {
+          type: 'community_group',
+          source: matchCmsTopicScopeFromProfile({ ...profile, sourceContext })?.id || contextKey,
+        });
+    }
+  }
+
   const inHandoffSlot = isCmsHandoffAwaiting(awaiting);
-  const handoffStart = isCmsPropertyHandoffMessage(message) && recommended.length > 0;
+  const softYesWithContext =
+    isVagueConfirm(message) &&
+    recommended.length > 0 &&
+    !normalizePurpose(profile.purpose || profile.lastSearchFilters?.purpose) &&
+    !inHandoffSlot;
+  const allAreasImplied =
+    !!parseCmsAllAreasChoice(message, recommended) ||
+    isCmsPropertyHandoffMessage(message) ||
+    isViewContextCommunitiesMessage(message) ||
+    forcedFromAction;
+  const handoffStart =
+    (isCmsPropertyHandoffMessage(message) ||
+      isViewContextCommunitiesMessage(message) ||
+      forcedFromAction ||
+      softYesWithContext ||
+      allAreasImplied) &&
+    recommended.length > 0 &&
+    !inHandoffSlot;
+
+  console.log(
+    '[SEARCH_CONTEXT BEFORE]',
+    JSON.stringify({
+      action: forcedFromAction ? selection.action : 'cmsHandoff',
+      message: String(message || '').slice(0, 120),
+      communities: recommended.map((r) => r.name),
+      purpose: profile.purpose || profile.lastSearchFilters?.purpose || null,
+      awaiting: awaiting || null,
+      handoffStart,
+      contextKey: contextKey || null,
+    })
+  );
 
   if (!inHandoffSlot && !handoffStart) return null;
   if (!recommended.length && !inHandoffSlot) return null;
 
+  // --- Start: seed ALL recommended communities, show live inventory, ask purpose ---
   if (handoffStart || (awaiting === CMS_HANDOFF_PURPOSE && isCmsPropertyHandoffMessage(message))) {
+    const topic =
+      matchCmsTopicScopeFromProfile({ ...profile, sourceContext }) ||
+      matchCmsTopicScopeFromText({
+        title: contextKey,
+        slug: contextKey,
+        source: contextKey,
+      });
     const inventory = await probeCmsLocationInventory(recommended);
-    const options = purposeOptionFromInventory(inventory);
-    const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    const allPurposeOptions = purposeOptionFromInventory(inventory);
+    const options = allPurposeOptions.filter((o) => o.enabled !== false && Number(o.count) > 0);
+    let last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    last = ensureCmsAreasOnFilters(last, recommended, sourceContext);
     last.source = SEARCH_SOURCE_CMS;
+    last.areaScopeLocked = true;
     last.purpose = null;
-    last.location = null;
-    last.locations = [];
-    last.locationAny = false;
+    // Do NOT clear locations — they are the active search scope.
+    const areaNames = recommended.map((r) => r.name);
+    const communitySummaries = communitySummariesFromInventory(inventory);
+    const locationInventory = {
+      ...areaInventorySummaryPayload(inventory),
+      communitySummaries,
+      contextKey: topic?.id || sourceContext?.source || contextKey || null,
+      sourceContext: topic?.id || sourceContext?.source || null,
+    };
+
+    let propertyCards = [];
+    let listingsByCommunity = null;
+    let reply = cmsHandoffIntroReply(recommended, inventory);
+
+    // Best Communities for Families: DB-backed summary first, then purpose chips.
+    if (topic?.id === 'best-communities-for-families-dubai' || forcedFromAction) {
+      reply = cmsCommunityPreviewReply(communitySummaries);
+      if (!(Number(communitySummaries.reduce((n, s) => n + (Number(s.count) || 0), 0)) > 0)) {
+        propertyCards = [];
+        listingsByCommunity = {};
+      }
+    }
+
+    const builtSource =
+      sourceContext ||
+      buildSourceContextFromRecommended(recommended, {
+        type: 'community_group',
+        topic: topic || undefined,
+        source: topic?.id || contextKey || null,
+        title: sourceContext?.title || null,
+        slug: sourceContext?.slug || topic?.id || contextKey || null,
+      });
+
     return {
       type: 'clarify',
       profile: mergeProfile(profile, {
         recommendedLocations: recommended,
         searchSource: SEARCH_SOURCE_CMS,
         cmsLocationInventory: inventory,
+        sourceContext: builtSource,
         lastSearchFilters: last,
+        preferredAreas: areaNames,
+        propertySearch: propertySearchFromFilters(last),
         purpose: null,
         intent: null,
+        lastPropertyCards: propertyCards.length ? propertyCards : undefined,
+        shownPropertyIds: propertyCards.map((c) => c.id).filter(Boolean),
         slotFlow: { awaiting: CMS_HANDOFF_PURPOSE, alternatives: null, lastAskedField: 'intent' },
-        resetShownPropertyIds: true,
+        resetShownPropertyIds: !propertyCards.length,
       }),
-      reply: cmsHandoffIntroReply(recommended),
+      reply,
+      // Never surface Buy/Rent/Off-plan chips with zero inventory across the scoped communities.
       options,
-      quickReplies: options
-        .filter((o) => o.enabled !== false)
-        .map((o) => ({ label: o.label, value: o.value || o.label })),
-      locationInventory: null,
+      quickReplies: options.map((o) => ({ label: o.label, value: o.value || o.label })),
+      locationInventory,
+      communitySummaries,
+      listingsByCommunity,
+      propertyCards,
     };
   }
 
+  // --- Purpose step: keep areas, show only communities with inventory for that purpose ---
   if (awaiting === CMS_HANDOFF_PURPOSE) {
     const purpose = parsePurposeFromMessage(message);
     if (!purpose) {
@@ -1699,8 +1954,9 @@ async function resolveCmsPropertyHandoff(message, profile = {}) {
           cmsLocationInventory: inventory,
           slotFlow: { awaiting: CMS_HANDOFF_PURPOSE, alternatives: null },
         }),
-        reply: cmsHandoffIntroReply(recommended),
+        reply: cmsHandoffIntroReply(recommended, inventory),
         options: purposeOptionFromInventory(inventory),
+        locationInventory: areaInventorySummaryPayload(inventory),
       };
     }
 
@@ -1708,30 +1964,98 @@ async function resolveCmsPropertyHandoff(message, profile = {}) {
     if (!Array.isArray(inventory) || !inventory.length) {
       inventory = await probeCmsLocationInventory(recommended);
     }
-    const { options, locationInventory } = locationInventoryOptions(purpose, inventory);
-    if (!options.length) {
+    const totals = inventoryTotals(inventory);
+    const totalKey =
+      purpose === 'Rent' ? 'rent' : purpose === 'Off-plan' ? 'offPlan' : 'buy';
+    if ((Number(totals[totalKey]) || 0) <= 0) {
       return {
         type: 'clarify',
         profile: mergeProfile(profile, {
           cmsLocationInventory: inventory,
           slotFlow: { awaiting: CMS_HANDOFF_PURPOSE, alternatives: null },
         }),
-        reply: `I couldn't find live ${purpose.toLowerCase()} listings across those communities right now. Would you like to try Buy, Rent, or Off-plan instead?`,
+        reply: `I don't currently have live ${purpose.toLowerCase()} listings in those communities.\n\n${cmsHandoffIntroReply(recommended, inventory)}`,
         options: purposeOptionFromInventory(inventory),
+        locationInventory: areaInventorySummaryPayload(inventory),
       };
     }
 
-    const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    let last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
     last.purpose = purpose;
     last.source = SEARCH_SOURCE_CMS;
+    last = ensureCmsAreasOnFilters(last, recommended, sourceContext);
+    // Multi-community scope already locked (e.g. Best Families): keep all areas,
+    // skip "which community?" and continue to property type.
+    if (
+      last.areaScopeLocked === true &&
+      Array.isArray(last.locations) &&
+      last.locations.length > 1
+    ) {
+      const matched = last.locations.map(
+        (n) => matchRecommendedLocation(n, recommended) || { name: n }
+      );
+      return cmsHandoffAfterLocationSelected({
+        profile,
+        last,
+        matched,
+        recommended,
+        sourceContext,
+        inventory,
+        purpose,
+      });
+    }
+    const areaNames =
+      Array.isArray(last.locations) && last.locations.length
+        ? last.locations.slice()
+        : recommended.map((r) => r.name);
+
+    const { options, locationInventory } = locationInventoryOptions(purpose, inventory);
+    const communityOptions = options.filter((o) => !o.allAreas);
+    if (!communityOptions.length) {
+      return {
+        type: 'clarify',
+        profile: mergeProfile(profile, {
+          cmsLocationInventory: inventory,
+          purpose,
+          intent: purposeToIntent(purpose),
+          lastSearchFilters: last,
+          slotFlow: { awaiting: CMS_HANDOFF_PURPOSE, alternatives: null },
+        }),
+        reply: `I don't currently have live ${purpose.toLowerCase()} listings in those communities.\n\n${cmsHandoffIntroReply(recommended, inventory)}`,
+        options: purposeOptionFromInventory(inventory),
+        locationInventory: areaInventorySummaryPayload(inventory),
+      };
+    }
+
+    // Single community with inventory → skip chip and go to property types.
+    if (communityOptions.length === 1) {
+      const only = matchRecommendedLocation(communityOptions[0].name || communityOptions[0].value, recommended) || {
+        name: communityOptions[0].name,
+      };
+      last = applyCmsLocationsToFilters(last, [only]);
+      return cmsHandoffAfterLocationSelected({
+        profile,
+        last,
+        matched: [only],
+        recommended,
+        sourceContext,
+        inventory,
+        purpose,
+      });
+    }
+
     return {
       type: 'clarify',
       profile: mergeProfile(profile, {
-        purpose,
-        intent: purposeToIntent(purpose),
+        recommendedLocations: recommended,
         searchSource: SEARCH_SOURCE_CMS,
         cmsLocationInventory: inventory,
+        sourceContext: sourceContext || buildSourceContextFromRecommended(recommended),
         lastSearchFilters: last,
+        preferredAreas: areaNames,
+        propertySearch: propertySearchFromFilters(last),
+        purpose,
+        intent: purposeToIntent(purpose),
         slotFlow: { awaiting: CMS_HANDOFF_LOCATION, alternatives: null, lastAskedField: 'location' },
       }),
       reply: cmsHandoffLocationReply(purpose),
@@ -1745,6 +2069,7 @@ async function resolveCmsPropertyHandoff(message, profile = {}) {
     };
   }
 
+  // --- Location step: only communities with inventory; then dynamic property types ---
   if (awaiting === CMS_HANDOFF_LOCATION) {
     const allAreas = parseCmsAllAreasChoice(message, recommended);
     const single = matchRecommendedLocation(message, recommended);
@@ -1780,17 +2105,225 @@ async function resolveCmsPropertyHandoff(message, profile = {}) {
     if (!last.purpose) {
       last.purpose = profile.purpose || null;
     }
+    let inventory = profile.cmsLocationInventory;
+    if (!Array.isArray(inventory) || !inventory.length) {
+      inventory = await probeCmsLocationInventory(recommended);
+    }
 
-    return listingSlotResponse(profile, last, {
+    return cmsHandoffAfterLocationSelected({
+      profile,
+      last,
+      matched,
+      recommended,
+      sourceContext,
+      inventory,
       purpose: last.purpose,
-      intent: purposeToIntent(last.purpose) || profile.intent,
-      searchSource: SEARCH_SOURCE_CMS,
-      recommendedLocations: recommended,
-      preferredAreas: matched.map((m) => m.name),
+    });
+  }
+
+  // --- Property type step: only types present in selected inventory ---
+  if (awaiting === CMS_HANDOFF_PROPERTY_TYPE) {
+    let last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    last.source = SEARCH_SOURCE_CMS;
+    last = ensureCmsAreasOnFilters(last, recommended, sourceContext);
+    if (!last.purpose) last.purpose = profile.purpose || null;
+
+    const parsedTypes = parsePropertyTypesFromMessage(message);
+    let inventory = profile.cmsLocationInventory;
+    if (!Array.isArray(inventory) || !inventory.length) {
+      inventory = await probeCmsLocationInventory(recommended);
+    }
+    const selectedNames =
+      Array.isArray(last.locations) && last.locations.length
+        ? last.locations
+        : recommended.map((r) => r.name);
+    const typeOptions = propertyTypeOptionsFromInventory(inventory, last.purpose, selectedNames);
+
+    if (!parsedTypes.length) {
+      if (!isVagueConfirm(message)) return null;
+      return {
+        type: 'clarify',
+        profile: mergeProfile(profile, {
+          cmsLocationInventory: inventory,
+          slotFlow: { awaiting: CMS_HANDOFF_PROPERTY_TYPE, alternatives: null },
+        }),
+        reply: cmsHandoffPropertyTypeReply(
+          selectedNames.map((n) => matchRecommendedLocation(n, recommended) || { name: n }),
+          last.purpose
+        ),
+        options: typeOptions.map((o) => o.label),
+        quickReplies: typeOptions.map((o) => ({ label: o.label, value: o.value })),
+      };
+    }
+
+    const allowed = new Set(typeOptions.map((o) => String(o.value).toLowerCase()));
+    const chosen = parsedTypes.filter((t) => allowed.has(String(t).toLowerCase()));
+    const finalTypes = chosen.length ? chosen : parsedTypes;
+    applyTypesToFilters(last, finalTypes);
+
+    return cmsHandoffAfterPropertyTypeSelected({
+      profile,
+      last,
+      recommended,
+      sourceContext,
+      inventory,
     });
   }
 
   return null;
+}
+
+async function cmsHandoffAfterLocationSelected({
+  profile,
+  last,
+  matched,
+  recommended,
+  sourceContext,
+  inventory,
+  purpose,
+}) {
+  const selectedNames = matched.map((m) => m.name);
+  let typeOptions = propertyTypeOptionsFromInventory(inventory, purpose || last.purpose, selectedNames);
+
+  // Refresh type facets from live DB when inventory rows lack propertyTypes.
+  if (!typeOptions.length) {
+    const facet = await probeCmsSegmentFacets({
+      locations: selectedNames,
+      purpose: purpose || last.purpose,
+    });
+    typeOptions = (facet.propertyTypes || []).map((t) => ({
+      label: t,
+      value: t,
+      type: 'propertyType',
+      enabled: true,
+    }));
+  }
+
+  if (!typeOptions.length) {
+    return {
+      type: 'clarify',
+      profile: mergeProfile(profile, {
+        recommendedLocations: recommended,
+        searchSource: SEARCH_SOURCE_CMS,
+        cmsLocationInventory: inventory,
+        sourceContext: sourceContext || buildSourceContextFromRecommended(recommended),
+        lastSearchFilters: last,
+        preferredAreas: selectedNames,
+        propertySearch: propertySearchFromFilters(last),
+        purpose: last.purpose,
+        intent: purposeToIntent(last.purpose),
+        slotFlow: { awaiting: CMS_HANDOFF_LOCATION, alternatives: null },
+      }),
+      reply: `I couldn't find live listings matching that selection in ${selectedNames.join(', ')}. Please pick another community.`,
+      options: locationInventoryOptions(purpose || last.purpose, inventory).options,
+    };
+  }
+
+  if (typeOptions.length === 1) {
+    applyTypesToFilters(last, [typeOptions[0].value]);
+    return cmsHandoffAfterPropertyTypeSelected({
+      profile,
+      last,
+      recommended,
+      sourceContext,
+      inventory,
+    });
+  }
+
+  return {
+    type: 'clarify',
+    profile: mergeProfile(profile, {
+      recommendedLocations: recommended,
+      searchSource: SEARCH_SOURCE_CMS,
+      cmsLocationInventory: inventory,
+      sourceContext: sourceContext || buildSourceContextFromRecommended(recommended),
+      lastSearchFilters: last,
+      preferredAreas: selectedNames,
+      propertySearch: propertySearchFromFilters(last),
+      purpose: last.purpose,
+      intent: purposeToIntent(last.purpose),
+      slotFlow: {
+        awaiting: CMS_HANDOFF_PROPERTY_TYPE,
+        alternatives: null,
+        lastAskedField: 'propertyType',
+      },
+    }),
+    reply: cmsHandoffPropertyTypeReply(matched, purpose || last.purpose),
+    options: typeOptions.map((o) => o.label),
+    quickReplies: typeOptions.map((o) => ({ label: o.label, value: o.value })),
+  };
+}
+
+async function cmsHandoffAfterPropertyTypeSelected({
+  profile,
+  last,
+  recommended,
+  sourceContext,
+  inventory,
+}) {
+  const selectedNames =
+    Array.isArray(last.locations) && last.locations.length
+      ? last.locations
+      : recommended.map((r) => r.name);
+  const types = typesFromFilters(last);
+  const facet = await probeCmsSegmentFacets({
+    locations: selectedNames,
+    purpose: last.purpose,
+    propertyType: types.length === 1 ? types[0] : types,
+  });
+
+  // Few matches → show listings immediately (bedrooms optional / any).
+  if (facet.count > 0 && facet.count <= CMS_IMMEDIATE_LISTING_THRESHOLD) {
+    applyBedroomChoice(last, { any: true });
+    return listingSlotResponse(profile, last, {
+      purpose: last.purpose,
+      intent: purposeToIntent(last.purpose),
+      searchSource: SEARCH_SOURCE_CMS,
+      recommendedLocations: recommended,
+      sourceContext: sourceContext || buildSourceContextFromRecommended(recommended),
+      preferredAreas: selectedNames,
+      propertySearch: propertySearchFromFilters(last),
+      cmsLocationInventory: inventory,
+    });
+  }
+
+  const bedOpts = bedroomOptionsFromValues(facet.bedrooms, { includeAny: true });
+  // No bedroom data or commercial → search without bedroom restriction.
+  if (!bedOpts.length || (bedOpts.length === 1 && bedOpts[0] === 'Any')) {
+    applyBedroomChoice(last, { any: true });
+    return listingSlotResponse(profile, last, {
+      purpose: last.purpose,
+      intent: purposeToIntent(last.purpose),
+      searchSource: SEARCH_SOURCE_CMS,
+      recommendedLocations: recommended,
+      sourceContext: sourceContext || buildSourceContextFromRecommended(recommended),
+      preferredAreas: selectedNames,
+      propertySearch: propertySearchFromFilters(last),
+      cmsLocationInventory: inventory,
+    });
+  }
+
+  return {
+    type: 'clarify',
+    profile: mergeProfile(profile, {
+      recommendedLocations: recommended,
+      searchSource: SEARCH_SOURCE_CMS,
+      cmsLocationInventory: inventory,
+      sourceContext: sourceContext || buildSourceContextFromRecommended(recommended),
+      lastSearchFilters: last,
+      preferredAreas: selectedNames,
+      propertySearch: propertySearchFromFilters(last),
+      purpose: last.purpose,
+      intent: purposeToIntent(last.purpose),
+      slotFlow: { awaiting: 'bedrooms', alternatives: null, lastAskedField: 'bedrooms' },
+    }),
+    reply: cmsHandoffBedroomsReply(last, facet),
+    options: bedOpts,
+    quickReplies: bedOpts.map((label) => ({
+      label: label === 'Any' ? 'Any bedroom' : label,
+      value: label,
+    })),
+  };
 }
 
 async function polishListingReply(fallback, context, userMessage, previousSearch) {
@@ -2000,6 +2533,9 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   let searchContentHits = 0;
   let lastSearchPagination = null;
   let contentPrefetched = false;
+  let contentSuggestedActions = null;
+  let contentQuickReplies = null;
+  let contentPrimaryCta = null;
 
   const snapshotMeta = () => metaFromLoopState(propertyCards, sources, viewAllMatching, presentation);
 
@@ -2011,7 +2547,8 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
     !isListingFollowUp(userMessage) &&
     !isShowMoreRequest(userMessage) &&
     !isPropertyUiAction(userMessage) &&
-    !isBookViewingAction(userMessage);
+    !isBookViewingAction(userMessage) &&
+    !isViewContextCommunitiesMessage(userMessage);
 
   // INTERNAL KNOWLEDGE FIRST — search Rocky Mongo content before any model answer.
   if (shouldPrefetchRockyContent) {
@@ -2037,6 +2574,18 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         searchContentHits += 1;
       }
       if (prefetch.sources?.length) sources.push(...prefetch.sources);
+      if (prefetch.profilePatch) {
+        profile = mergeProfile(profile, prefetch.profilePatch);
+      }
+      if (Array.isArray(prefetch.modelPayload?.suggestedActions) && prefetch.modelPayload.suggestedActions.length) {
+        contentSuggestedActions = prefetch.modelPayload.suggestedActions;
+      }
+      if (Array.isArray(prefetch.modelPayload?.quickReplies) && prefetch.modelPayload.quickReplies.length) {
+        contentQuickReplies = prefetch.modelPayload.quickReplies;
+      }
+      if (prefetch.modelPayload?.primaryCta) {
+        contentPrimaryCta = prefetch.modelPayload.primaryCta;
+      }
       const toolCallId = 'prefetch_search_content';
       messages.push({
         role: 'assistant',
@@ -2059,11 +2608,12 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
           count: prefetch.modelPayload?.count ?? chunks.length,
           chunks,
           hasRockyContent: !!prefetch.modelPayload?.hasRockyContent,
-          primaryCta: prefetch.modelPayload?.primaryCta || null,
+          primaryCta: contentPrimaryCta,
+          suggestedActions: contentSuggestedActions,
           instruction:
             prefetch.modelPayload?.instruction ||
             (chunks.length
-              ? 'Rocky content was found. Answer only from these chunks. Preserve exact facts. Answer the question directly — never open with Rocky:/Read more:/According to Rocky:. Related pages are attached as chips — do not duplicate Read more in the prose.'
+              ? 'Rocky content was found. Answer only from these chunks. Preserve exact facts. Answer the question directly — never open with Rocky:/Read more:/According to Rocky:. Related pages are attached as chips — do not duplicate Read more in the prose. If a View properties badge is attached, invite the visitor to explore those communities without asking them to type the request.'
               : 'No Rocky content matched. You may use brief general real-estate knowledge without claiming it is from Rocky.'),
         }),
       });
@@ -2206,17 +2756,24 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         reply = FRIENDLY_CHAT_ERROR;
       }
       reply = finalizeAssistantReply(reply, { usedSearchContent, usedSearchProperties });
-      return attachRelatedContent(
+      return withContentCommunityActions(
+        attachRelatedContent(
+          {
+            reply,
+            propertyCards: uniqueBy(propertyCards, (c) => c.id),
+            leadCaptured,
+            profile,
+            viewAllMatching,
+            presentation,
+            ...(lastSearchPagination || {}),
+          },
+          sources
+        ),
         {
-          reply,
-          propertyCards: uniqueBy(propertyCards, (c) => c.id),
-          leadCaptured,
-          profile,
-          viewAllMatching,
-          presentation,
-          ...(lastSearchPagination || {}),
-        },
-        sources
+          suggestedActions: contentSuggestedActions,
+          quickReplies: contentQuickReplies,
+          primaryCta: contentPrimaryCta,
+        }
       );
     }
 
@@ -2288,6 +2845,15 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         if (chunks.length) {
           lastContentChunks = chunks;
           searchContentHits += 1;
+        }
+        if (Array.isArray(result.modelPayload?.suggestedActions) && result.modelPayload.suggestedActions.length) {
+          contentSuggestedActions = result.modelPayload.suggestedActions;
+        }
+        if (Array.isArray(result.modelPayload?.quickReplies) && result.modelPayload.quickReplies.length) {
+          contentQuickReplies = result.modelPayload.quickReplies;
+        }
+        if (result.modelPayload?.primaryCta) {
+          contentPrimaryCta = result.modelPayload.primaryCta;
         }
       }
       if (call.function?.name === 'search_properties') usedSearchProperties = true;
@@ -2415,17 +2981,24 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
     { usedSearchContent, usedSearchProperties }
   );
 
-  return attachRelatedContent(
+  return withContentCommunityActions(
+    attachRelatedContent(
+      {
+        reply: fallbackReply,
+        propertyCards: uniqueBy(propertyCards, (c) => c.id),
+        leadCaptured,
+        profile,
+        viewAllMatching,
+        presentation,
+        ...(lastSearchPagination || {}),
+      },
+      sources
+    ),
     {
-      reply: fallbackReply,
-      propertyCards: uniqueBy(propertyCards, (c) => c.id),
-      leadCaptured,
-      profile,
-      viewAllMatching,
-      presentation,
-      ...(lastSearchPagination || {}),
-    },
-    sources
+      suggestedActions: contentSuggestedActions,
+      quickReplies: contentQuickReplies,
+      primaryCta: contentPrimaryCta,
+    }
   );
 }
 
@@ -2439,10 +3012,95 @@ const chat = async (req, res) => {
       propertyRefNo,
       propertyId,
       propertyTitle,
+      contextKey,
+      communities,
     } = req.body;
     const conversation = await loadConversation(sessionId);
     let profile = conversation.userProfile || {};
     const previousSearch = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+    const viewingSelection = {
+      action,
+      propertyRefNo,
+      propertyId,
+      propertyTitle,
+      contextKey,
+      communities,
+    };
+
+    // Structured badge: View properties in these 3 communities
+    if (isViewContextCommunityPropertiesAction(action) || isViewContextCommunitiesMessage(message)) {
+      const key = contextKey || profile.sourceContext?.source || 'best-communities-for-families-dubai';
+      const forced = communitiesForContextKey(key, communities || profile.recommendedLocations);
+      if (forced.length) {
+        const seeded = applyCmsLocationsToFilters(
+          copySearchFilters(profile.lastSearchFilters || emptySearchFilters()),
+          forced
+        );
+        profile = mergeProfile(profile, {
+          recommendedLocations: forced,
+          searchSource: SEARCH_SOURCE_CMS,
+          sourceContext: buildSourceContextFromRecommended(forced, {
+            type: 'community_group',
+            source: key,
+          }),
+          lastSearchFilters: seeded,
+          preferredAreas: forced.map((r) => r.name),
+          propertySearch: propertySearchFromFilters(seeded),
+        });
+      }
+    }
+
+    // Recover multi-community scope before any slot/qualify logic (blog → listings).
+    if (
+      isCmsPropertyHandoffMessage(message) ||
+      isViewContextCommunitiesMessage(message) ||
+      isViewContextCommunityPropertiesAction(action) ||
+      isVagueConfirm(message) ||
+      hasRecommendedLocations(profile) ||
+      profile.sourceContext?.source ||
+      (Array.isArray(profile.preferredAreas) && profile.preferredAreas.length >= 2)
+    ) {
+      const recovered = recoverRecommendedLocations(profile, {
+        message,
+        history: conversation.messages || [],
+      });
+      const forcedKey = contextKey || profile.sourceContext?.source;
+      const topicForced = forcedKey
+        ? communitiesForContextKey(forcedKey, recovered)
+        : recovered;
+      const toSeed = topicForced.length ? topicForced : recovered;
+      if (toSeed.length > 1) {
+        const seeded = applyCmsLocationsToFilters(
+          ensureActiveAreaScope(profile, copySearchFilters(profile.lastSearchFilters || emptySearchFilters())),
+          toSeed
+        );
+        profile = mergeProfile(profile, {
+          recommendedLocations: toSeed,
+          searchSource: profile.searchSource || SEARCH_SOURCE_CMS,
+          sourceContext:
+            copySourceContext(profile.sourceContext) ||
+            buildSourceContextFromRecommended(toSeed, {
+              type: 'community_group',
+              source:
+                forcedKey ||
+                matchCmsTopicScopeFromProfile(profile)?.id ||
+                'best-communities-for-families-dubai',
+            }),
+          lastSearchFilters: seeded,
+          preferredAreas: toSeed.map((r) => r.name),
+          propertySearch: propertySearchFromFilters(seeded),
+        });
+        console.log(
+          '[SEARCH_CONTEXT BEFORE]',
+          JSON.stringify({
+            action: 'preSeedCommunities',
+            communities: seeded.locations,
+            purpose: seeded.purpose || null,
+          })
+        );
+      }
+    }
+
     const pageBound = isCurrentListingReference(message);
     const applyPageContext =
       pageBound ||
@@ -2455,7 +3113,12 @@ const chat = async (req, res) => {
       applyTypesToFilters(last, mergePropertyTypes(typesFromFilters(last), requestTypes, message));
       profile = mergeProfile(profile, { lastSearchFilters: last });
     }
-    const cmsHandoff = await resolveCmsPropertyHandoff(message, profile);
+    const cmsHandoff = await resolveCmsPropertyHandoff(
+      message,
+      profile,
+      conversation.messages || [],
+      viewingSelection
+    );
     if (cmsHandoff?.type === 'clarify') {
       return clarificationResponse(res, {
         reply: cmsHandoff.reply,
@@ -2466,6 +3129,9 @@ const chat = async (req, res) => {
         inputType: cmsHandoff.inputType,
         quickReplies: cmsHandoff.quickReplies,
         locationInventory: cmsHandoff.locationInventory || null,
+        propertyCards: cmsHandoff.propertyCards || null,
+        communitySummaries: cmsHandoff.communitySummaries || null,
+        listingsByCommunity: cmsHandoff.listingsByCommunity || null,
       });
     }
     if (cmsHandoff?.type === 'continue' && cmsHandoff.profile) {
@@ -2477,7 +3143,7 @@ const chat = async (req, res) => {
       profile,
       conversation.messages || [],
       applyPageContext ? bodyIntent : null,
-      { action, propertyRefNo, propertyId, propertyTitle }
+      viewingSelection
     );
 
     if (slotResult?.type === 'submit_viewing') {

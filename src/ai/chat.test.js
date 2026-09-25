@@ -59,6 +59,10 @@ const {
   hasServiceContact,
   parseServiceContactDetails,
   parseLocationFromMessage,
+  parseLocationsFromMessage,
+  canonicalizeSearchLocation,
+  partialCommunityMissNote,
+  recoverRecommendedLocations,
   parseLocationReply,
   wantsDifferentLocation,
   isUnrestrictedLocationPhrase,
@@ -87,6 +91,7 @@ const {
   needsListingIntake,
   applyMessageToSearchFilters,
   extractSearchPatch,
+  mergeSearchPatch,
   isExplicitSearchReset,
   buildListingSearchUrl,
   isCurrentListingReference,
@@ -156,11 +161,34 @@ const {
   isCmsPropertyHandoffMessage,
   copyRecommendedLocations,
   applyCmsLocationsToFilters,
+  ensureCmsAreasOnFilters,
   parseCmsAllAreasChoice,
   matchRecommendedLocation,
   purposeOptionFromInventory,
   locationInventoryOptions,
+  cmsHandoffInventorySummaryReply,
+  areaInventorySummaryPayload,
+  propertyTypeOptionsFromInventory,
+  bedroomOptionsFromValues,
   SEARCH_SOURCE_CMS,
+  ensureActiveAreaScope,
+  isAreaScopeLocked,
+  getActiveAreas,
+  wantsAreaScopeUnlock,
+  unlockAreaScope,
+  propertySearchFromFilters,
+  listingSlotQuestion,
+  communitySummariesFromInventory,
+  cmsCommunityPreviewReply,
+  propertyMatchesCommunity,
+  filterPropertiesToActiveCommunities,
+  VIEW_CONTEXT_COMMUNITY_PROPERTIES,
+  VIEW_CONTEXT_COMMUNITIES_LABEL,
+  isViewContextCommunityPropertiesAction,
+  isViewContextCommunitiesMessage,
+  communitiesForContextKey,
+  buildViewContextCommunitiesAction,
+  alternativeInventoryLine,
 } = require('./chat.tools');
 const { Lead } = require('./chat.models');
 const propertyDbService = require('../services/propertyDbService');
@@ -616,7 +644,7 @@ test('Buy purpose phrases match Rent coverage', () => {
 
 test('summer is not a location; real areas still parse', () => {
   assert.equal(parseLocationFromMessage('how can we manage our property in summer'), null);
-  assert.equal(parseLocationFromMessage('Show me villas in Dubai Hills'), 'Dubai Hills');
+  assert.equal(parseLocationFromMessage('Show me villas in Dubai Hills'), 'Dubai Hills Estate');
   assert.equal(wantsDifferentLocation('show me villas in another area'), true);
   assert.equal(parseLocationFromMessage('show me villas in another area'), null);
   assert.equal(parseLocationReply('Dubai South'), 'Dubai South');
@@ -1055,14 +1083,14 @@ test('adding a property type preserves bedrooms, budget, area, and rent purpose'
     '2 bedroom apartment in Dubai Hills under AED 100000'
   );
   assert.equal(filters.purpose, 'Rent');
-  assert.equal(filters.location, 'Dubai Hills');
+  assert.equal(filters.location, 'Dubai Hills Estate');
   assert.equal(filters.bedrooms, 2);
   assert.equal(filters.budgetMax, 100000);
   assert.deepEqual(typesFromFilters(filters), ['Apartment']);
 
   filters = applyMessageToSearchFilters(filters, 'Apartment and Villa');
   assert.equal(filters.purpose, 'Rent');
-  assert.equal(filters.location, 'Dubai Hills');
+  assert.equal(filters.location, 'Dubai Hills Estate');
   assert.equal(filters.bedrooms, 2);
   assert.equal(filters.budgetMax, 100000);
   assert.deepEqual(typesFromFilters(filters), ['Apartment', 'Villa']);
@@ -3892,7 +3920,7 @@ test('any location after JVC clears only the area and keeps the rest of the sear
     'I need a studio apartment in JVC to buy'
   );
   filters = applyMessageToSearchFilters(filters, 'AED 1M - 1.5M');
-  assert.equal(filters.location, 'JVC');
+  assert.equal(filters.location, 'Jumeirah Village Circle');
   assert.equal(filters.bedrooms, 0);
   assert.equal(filters.purpose, 'Buy');
 
@@ -4157,7 +4185,7 @@ test('search memory TEST 8 full override rent villa JVC', () => {
   const next = second.profilePatch.lastSearchFilters;
   assert.equal(next.purpose, 'Rent');
   assert.equal(next.type, 'Villa');
-  assert.equal(next.location, 'JVC');
+  assert.equal(next.location, 'Jumeirah Village Circle');
   assert.notEqual(next.purpose, 'Buy');
   assert.notEqual(next.type, 'Apartment');
   assert.notEqual(next.location, 'Dubai South');
@@ -4466,17 +4494,107 @@ test('CMS handoff extracts communities from RAG chunks not assistant prose', () 
   const chunks = [
     {
       title: 'Best Communities for Families in Dubai',
+      slug: 'best-communities-for-families-dubai',
       content:
-        'Families often look at Dubai Hills Estate, Jumeirah Village Circle (JVC), and Al Furjan for schools and parks.',
-      headings: ['Dubai Hills Estate', 'JVC', 'Al Furjan'],
+        'Families often look at Dubai Hills Estate, Jumeirah Village Circle (JVC), and Al Furjan for schools and parks. Dubai Marina and Business Bay are also popular elsewhere.',
+      headings: ['Dubai Hills Estate', 'JVC', 'Al Furjan', 'Dubai Marina'],
     },
   ];
   const locs = extractRecommendedLocationsFromChunks(chunks);
   const names = locs.map((l) => l.name);
-  assert.equal(names.includes('Dubai Hills Estate'), true);
-  assert.equal(names.includes('Jumeirah Village Circle'), true);
-  assert.equal(names.includes('Al Furjan'), true);
+  // Topic scope forces exactly the three family communities — never Marina/Bay.
+  assert.deepEqual(names, [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
   assert.equal(locs.find((l) => l.name === 'Jumeirah Village Circle')?.shortName, 'JVC');
+});
+
+test('Best Communities topic builds communitySummaries from inventory facets', () => {
+  const inventory = [
+    {
+      location: 'Dubai Hills Estate',
+      shortName: null,
+      totalCount: 5,
+      buy: { count: 2, minPrice: 1400000, bedrooms: [1, 2] },
+      rent: { count: 3, minPrice: 95000, bedrooms: [2] },
+      offPlan: { count: 0, bedrooms: [] },
+    },
+    {
+      location: 'Jumeirah Village Circle',
+      shortName: 'JVC',
+      totalCount: 8,
+      buy: { count: 8, minPrice: 725000, bedrooms: [1, 2, 3] },
+      rent: { count: 0, bedrooms: [] },
+      offPlan: { count: 0, bedrooms: [] },
+    },
+    {
+      location: 'Al Furjan',
+      totalCount: 0,
+      buy: { count: 0, bedrooms: [] },
+      rent: { count: 0, bedrooms: [] },
+      offPlan: { count: 0, bedrooms: [] },
+    },
+  ];
+  const summaries = communitySummariesFromInventory(inventory);
+  assert.equal(summaries.length, 3);
+  assert.equal(summaries[0].community, 'Dubai Hills Estate');
+  assert.equal(summaries[0].count, 5);
+  assert.deepEqual(summaries[0].bedrooms, [1, 2]);
+  assert.equal(summaries[0].startingPrice, 95000);
+  assert.equal(summaries[0].currency, 'AED');
+  assert.equal(summaries[1].startingPrice, 725000);
+  assert.deepEqual(summaries[1].bedrooms, [1, 2, 3]);
+  assert.equal(summaries[2].count, 0);
+  assert.equal(summaries[2].startingPrice, null);
+  assert.deepEqual(summaries[2].bedrooms, []);
+
+  const reply = cmsCommunityPreviewReply(summaries);
+  assert.match(reply, /family-friendly communities/i);
+  assert.match(reply, /Dubai Hills Estate/);
+  assert.match(reply, /Starting from AED/);
+  assert.match(reply, /Al Furjan/);
+  assert.match(reply, /No matching properties currently available/);
+  assert.equal(/Dubai Marina|Business Bay|Silicon Oasis/i.test(reply), false);
+
+  const emptyReply = cmsCommunityPreviewReply([
+    { community: 'Dubai Hills Estate', count: 0, bedrooms: [], startingPrice: null },
+    { community: 'Jumeirah Village Circle', count: 0, bedrooms: [], startingPrice: null },
+    { community: 'Al Furjan', count: 0, bedrooms: [], startingPrice: null },
+  ]);
+  assert.match(emptyReply, /couldn't find any current listings/i);
+});
+
+test('propertyMatchesCommunity rejects listings outside locked family areas', () => {
+  const dhe = { name: 'Dubai Hills Estate', aliases: ['Dubai Hills'] };
+  const jvc = { name: 'Jumeirah Village Circle', shortName: 'JVC', aliases: ['JVC'] };
+  assert.equal(
+    propertyMatchesCommunity({ locality: 'Dubai Hills Estate', subLocality: '' }, dhe),
+    true
+  );
+  assert.equal(propertyMatchesCommunity({ locality: 'JVC', subLocality: '' }, jvc), true);
+  assert.equal(
+    propertyMatchesCommunity({ locality: 'Dubai Marina', subLocality: '' }, dhe),
+    false
+  );
+  const filtered = filterPropertiesToActiveCommunities(
+    [
+      { locality: 'Dubai Hills Estate', propertyRefNo: 'A' },
+      { locality: 'Dubai Marina', propertyRefNo: 'B' },
+      { locality: 'Business Bay', propertyRefNo: 'C' },
+      { locality: 'Al Furjan', propertyRefNo: 'D' },
+    ],
+    [
+      { name: 'Dubai Hills Estate' },
+      { name: 'Jumeirah Village Circle', shortName: 'JVC' },
+      { name: 'Al Furjan' },
+    ]
+  );
+  assert.deepEqual(
+    filtered.map((p) => p.propertyRefNo),
+    ['A', 'D']
+  );
 });
 
 test('CMS handoff detector matches follow-up property asks', () => {
@@ -4490,20 +4608,22 @@ test('CMS handoff detector matches follow-up property asks', () => {
   assert.equal(isCmsPropertyHandoffMessage('Buy'), false);
 });
 
-test('CMS handoff skips propertyType in required fields', () => {
+test('CMS handoff requires propertyType and skips location/bedrooms when areas are set', () => {
   const input = {
-    purpose: 'Buy',
+    purpose: 'Off-plan',
     source: SEARCH_SOURCE_CMS,
-    location: 'Al Furjan',
-    locations: ['Al Furjan'],
+    location: 'Dubai Hills Estate, Jumeirah Village Circle, Al Furjan',
+    locations: ['Dubai Hills Estate', 'Jumeirah Village Circle', 'Al Furjan'],
   };
   const required = getRequiredSearchFields(input);
-  assert.equal(required.includes('propertyType'), false);
-  assert.equal(required.includes('bedrooms'), true);
+  assert.equal(required.includes('propertyType'), true);
+  assert.equal(required.includes('location'), false);
+  // Bedrooms are optional refinements on the CMS discovery path.
+  assert.equal(required.includes('bedrooms'), false);
   const missing = getMissingSearchFields({
     ...input,
-    bedrooms: 3,
-    bedroomsResolved: true,
+    types: ['Apartment'],
+    type: 'Apartment',
   });
   assert.deepEqual(missing, []);
 });
@@ -4650,4 +4770,1106 @@ test('zero-result reply lists same-area View alternatives with live counts', asy
     (result.zeroResultAlternatives?.alternatives || []).some((a) => a.type === 'bedroom' && a.bedrooms === 1),
     true
   );
+});
+
+test('Best Communities → Off-plan → Apartment → 2 Beds keeps all three areas', () => {
+  const recommended = copyRecommendedLocations([
+    { name: 'Dubai Hills Estate' },
+    { name: 'Jumeirah Village Circle', shortName: 'JVC', aliases: ['JVC'] },
+    { name: 'Al Furjan' },
+  ]);
+
+  assert.equal(
+    isCmsPropertyHandoffMessage('Yes, show me properties in these three communities.'),
+    true
+  );
+  assert.equal(parseCmsAllAreasChoice('these three communities', recommended)?.length, 3);
+  assert.equal(parseCmsAllAreasChoice('show me properties in these three communities', recommended)?.length, 3);
+
+  // Soft-yes seeds all recommended areas (never clears them).
+  let filters = ensureCmsAreasOnFilters(
+    { ...emptySearchFilters(), source: SEARCH_SOURCE_CMS },
+    recommended
+  );
+  assert.deepEqual(filters.locations, [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
+  assert.equal(getMissingSearchFields(filters).includes('location'), false);
+
+  // Off-plan
+  filters = applyMessageToSearchFilters(filters, 'Off-plan', { awaiting: 'purpose' });
+  assert.equal(filters.purpose, 'Off-plan');
+  assert.deepEqual(filters.locations, [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
+  assert.equal(getMissingSearchFields(filters).includes('location'), false);
+  assert.equal(nextMissingListingSlot(filters), 'propertyType');
+
+  // Apartment
+  filters = applyMessageToSearchFilters(filters, 'Apartment', { awaiting: 'propertyType' });
+  assert.deepEqual(filters.types, ['Apartment']);
+  assert.deepEqual(filters.locations, [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
+  assert.equal(getMissingSearchFields(filters).includes('location'), false);
+  // CMS discovery: bedrooms are optional — ready to search after type.
+  assert.equal(nextMissingListingSlot(filters), null);
+
+  // Optional 2 Beds refinement — ready to search, never ask location
+  filters = applyMessageToSearchFilters(filters, '2 Beds', { awaiting: 'bedrooms' });
+  assert.equal(filters.bedrooms, 2);
+  assert.equal(filters.bedroomsResolved, true);
+  assert.deepEqual(filters.locations, [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
+  assert.deepEqual(getMissingSearchFields(filters), []);
+  assert.equal(nextMissingListingSlot(filters), null);
+
+  const opts = listingQueryOpts(filters, '');
+  assert.deepEqual(opts.filters.locations, [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
+  assert.equal(opts.search, '');
+
+  // Change bedrooms only — areas preserved
+  filters = applyMessageToSearchFilters(filters, '3 Beds', { awaiting: null });
+  assert.equal(filters.bedrooms, 3);
+  assert.equal(filters.purpose, 'Off-plan');
+  assert.deepEqual(filters.types, ['Apartment']);
+  assert.deepEqual(filters.locations, [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
+
+  // Change purpose only — areas preserved
+  filters = applyMessageToSearchFilters(filters, 'Buy', { awaiting: null });
+  assert.equal(filters.purpose, 'Buy');
+  assert.equal(filters.bedrooms, 3);
+  assert.deepEqual(filters.types, ['Apartment']);
+  assert.deepEqual(filters.locations, [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
+
+  // Change property type only — areas preserved
+  filters = applyMessageToSearchFilters(filters, 'Villa', { awaiting: null });
+  assert.deepEqual(filters.types, ['Villa']);
+  assert.equal(filters.purpose, 'Buy');
+  assert.deepEqual(filters.locations, [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
+
+  // qualifyListingSearch after 2 Beds must not ask location
+  const profile = {
+    purpose: 'Off-plan',
+    intent: 'OFF_PLAN',
+    searchSource: SEARCH_SOURCE_CMS,
+    recommendedLocations: recommended,
+    sourceContext: {
+      type: 'community_group',
+      areas: ['Dubai Hills Estate', 'Jumeirah Village Circle', 'Al Furjan'],
+    },
+    lastSearchFilters: applyCmsLocationsToFilters(
+      {
+        ...emptySearchFilters(),
+        purpose: 'Off-plan',
+        source: SEARCH_SOURCE_CMS,
+        type: 'Apartment',
+        types: ['Apartment'],
+        bedrooms: 2,
+        bedroomsResolved: true,
+      },
+      recommended
+    ),
+    slotFlow: { awaiting: null },
+  };
+  const ready = qualifyListingSearch('2 Beds', {
+    ...profile,
+    lastSearchFilters: {
+      ...profile.lastSearchFilters,
+      bedrooms: null,
+      bedroomsResolved: false,
+    },
+    slotFlow: { awaiting: 'bedrooms' },
+  });
+  assert.equal(ready.type, 'continue');
+  assert.deepEqual(ready.profilePatch.lastSearchFilters.locations, [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
+  assert.equal(ready.missing, null);
+  assert.equal(/which area or community/i.test(ready.reply || ''), false);
+});
+
+test('CMS multi-area zero-match message does not ask for location', () => {
+  const filters = applyCmsLocationsToFilters(
+    {
+      ...emptySearchFilters(),
+      purpose: 'Off-plan',
+      source: SEARCH_SOURCE_CMS,
+      types: ['Apartment'],
+      bedrooms: 2,
+      bedroomsResolved: true,
+    },
+    [
+      { name: 'Dubai Hills Estate' },
+      { name: 'Jumeirah Village Circle' },
+      { name: 'Al Furjan' },
+    ]
+  );
+  assert.match(exactNoMatchLine(filters), /couldn't find any/i);
+  assert.match(exactNoMatchLine(filters), /across/i);
+  assert.match(exactNoMatchLine(filters), /Dubai Hills Estate/i);
+  assert.equal(/which area or community/i.test(exactNoMatchLine(filters)), false);
+});
+
+test('CMS inventory summary reply formats live Buy/Rent/Off-plan lines', () => {
+  const inventory = [
+    {
+      location: 'Dubai Hills Estate',
+      shortName: null,
+      totalCount: 9,
+      buy: {
+        count: 2,
+        minPrice: 1400000,
+        averagePrice: 1430000,
+        propertyTypes: ['Apartment'],
+        bedrooms: [1, 2],
+      },
+      rent: {
+        count: 4,
+        minPrice: 95000,
+        averagePrice: 140000,
+        propertyTypes: ['Apartment'],
+        bedrooms: [1, 2],
+      },
+      offPlan: {
+        count: 3,
+        minPrice: 1600000,
+        averagePrice: 2100000,
+        propertyTypes: ['Apartment', 'Villa'],
+        bedrooms: [2, 3],
+      },
+    },
+    {
+      location: 'Jumeirah Village Circle',
+      shortName: 'JVC',
+      totalCount: 5,
+      buy: {
+        count: 5,
+        minPrice: 610000,
+        averagePrice: 900000,
+        propertyTypes: ['Apartment'],
+        bedrooms: [1],
+      },
+      rent: { count: 0, minPrice: null, averagePrice: null, propertyTypes: [], bedrooms: [] },
+      offPlan: { count: 0, minPrice: null, averagePrice: null, propertyTypes: [], bedrooms: [] },
+    },
+    {
+      location: 'Al Furjan',
+      totalCount: 0,
+      buy: { count: 0 },
+      rent: { count: 0 },
+      offPlan: { count: 0 },
+    },
+  ];
+  const reply = cmsHandoffInventorySummaryReply(inventory);
+  assert.match(reply, /Dubai Hills Estate/);
+  assert.match(reply, /Buy: 2 properties/);
+  assert.match(reply, /Rent: 4 properties/);
+  assert.match(reply, /Off-plan: 3 properties/);
+  assert.match(reply, /Bedroom options:/);
+  assert.match(reply, /Starting price:/);
+  assert.match(reply, /Jumeirah Village Circle|JVC/);
+  assert.doesNotMatch(reply, /Al Furjan/);
+  assert.match(reply, /Would you like to explore Buy, Rent, or Off-plan properties across these communities/);
+  const payload = areaInventorySummaryPayload(inventory);
+  assert.equal(payload.type, 'area_inventory_summary');
+  assert.equal(payload.areas.length, 3);
+  assert.equal(payload.areas[0].buy.count, 2);
+  assert.deepEqual(payload.areas[0].buy.propertyTypes, ['Apartment']);
+});
+
+test('CMS purpose → location inventory only includes communities with Buy stock', () => {
+  const inventory = [
+    {
+      location: 'Dubai Hills Estate',
+      buy: {
+        count: 12,
+        minPrice: 1400000,
+        averagePrice: 2100000,
+        propertyTypes: ['Apartment', 'Villa'],
+        bedrooms: [2, 3],
+      },
+      rent: { count: 0 },
+      offPlan: { count: 0 },
+    },
+    {
+      location: 'Jumeirah Village Circle',
+      shortName: 'JVC',
+      buy: { count: 0 },
+      rent: {
+        count: 8,
+        minPrice: 70000,
+        averagePrice: 110000,
+        propertyTypes: ['Apartment'],
+        bedrooms: [1],
+      },
+      offPlan: { count: 0 },
+    },
+    {
+      location: 'Al Furjan',
+      buy: {
+        count: 9,
+        minPrice: 1250000,
+        averagePrice: 1560000,
+        propertyTypes: ['Apartment'],
+        bedrooms: [1, 2],
+      },
+      rent: { count: 0 },
+      offPlan: { count: 0 },
+    },
+  ];
+  const { options, locationInventory } = locationInventoryOptions('Buy', inventory);
+  assert.equal(locationInventory.locations.length, 2);
+  assert.equal(
+    locationInventory.locations.map((l) => l.name).includes('Jumeirah Village Circle'),
+    false
+  );
+  assert.equal(options.some((o) => /JVC/.test(o.label)), false);
+  assert.equal(options.some((o) => /Dubai Hills/.test(o.label)), true);
+  assert.equal(options.some((o) => /Al Furjan/.test(o.label)), true);
+});
+
+test('CMS property-type and bedroom options come only from live inventory facets', () => {
+  const inventory = [
+    {
+      location: 'Dubai Hills Estate',
+      buy: {
+        count: 10,
+        propertyTypes: ['Apartment', 'Villa'],
+        bedrooms: [2, 3],
+      },
+      rent: { count: 0, propertyTypes: [], bedrooms: [] },
+      offPlan: { count: 0, propertyTypes: [], bedrooms: [] },
+    },
+    {
+      location: 'Al Furjan',
+      buy: {
+        count: 4,
+        propertyTypes: ['Apartment'],
+        bedrooms: [1],
+      },
+      rent: { count: 0, propertyTypes: [], bedrooms: [] },
+      offPlan: { count: 0, propertyTypes: [], bedrooms: [] },
+    },
+  ];
+  const dheTypes = propertyTypeOptionsFromInventory(inventory, 'Buy', ['Dubai Hills Estate']);
+  assert.deepEqual(
+    dheTypes.map((o) => o.value),
+    ['Apartment', 'Villa']
+  );
+  const furjanTypes = propertyTypeOptionsFromInventory(inventory, 'Buy', ['Al Furjan']);
+  assert.deepEqual(
+    furjanTypes.map((o) => o.value),
+    ['Apartment']
+  );
+  const beds = bedroomOptionsFromValues([1], { includeAny: true });
+  assert.deepEqual(beds, ['1 Bed', 'Any']);
+  assert.equal(beds.includes('Studio'), false);
+  assert.equal(beds.includes('2 Beds'), false);
+});
+
+test('CMS Any bedroom marks resolved without re-asking', () => {
+  let filters = {
+    ...emptySearchFilters(),
+    source: SEARCH_SOURCE_CMS,
+    purpose: 'Buy',
+    locations: ['Al Furjan'],
+    location: 'Al Furjan',
+    types: ['Apartment'],
+    type: 'Apartment',
+  };
+  assert.equal(nextMissingListingSlot(filters), null);
+  filters = applyMessageToSearchFilters(filters, 'Any', { awaiting: 'bedrooms' });
+  assert.equal(filters.bedroomsAny, true);
+  assert.equal(filters.bedroomsResolved, true);
+  assert.equal(filters.bedrooms, null);
+  assert.deepEqual(getMissingSearchFields(filters), []);
+  assert.equal(nextMissingListingSlot(filters), null);
+});
+
+test('locked active areas survive 3 bedroom → Buy → Apartment without location ask', () => {
+  const recommended = copyRecommendedLocations([
+    { name: 'Dubai Hills Estate' },
+    { name: 'Jumeirah Village Circle', shortName: 'JVC', aliases: ['JVC'] },
+    { name: 'Al Furjan' },
+  ]);
+  const seeded = applyCmsLocationsToFilters(
+    { ...emptySearchFilters(), source: SEARCH_SOURCE_CMS },
+    recommended
+  );
+  assert.equal(seeded.areaScopeLocked, true);
+  assert.deepEqual(seeded.locations, [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
+
+  const profile = {
+    searchSource: SEARCH_SOURCE_CMS,
+    recommendedLocations: recommended,
+    sourceContext: {
+      type: 'community_group',
+      areas: ['Dubai Hills Estate', 'Jumeirah Village Circle', 'Al Furjan'],
+    },
+    lastSearchFilters: seeded,
+    propertySearch: propertySearchFromFilters(seeded),
+    slotFlow: { awaiting: null },
+  };
+
+  assert.equal(isAreaScopeLocked(profile), true);
+  assert.deepEqual(getActiveAreas(profile), [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
+
+  // TEST 2 — bedrooms only
+  const beds = qualifyListingSearch('3 bedroom', profile);
+  assert.ok(beds);
+  assert.equal(beds.profilePatch.lastSearchFilters.bedrooms, 3);
+  assert.deepEqual(beds.profilePatch.lastSearchFilters.locations, [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
+  assert.equal(beds.profilePatch.lastSearchFilters.areaScopeLocked, true);
+  assert.equal(beds.missing === 'location', false);
+  assert.equal(/which area or community/i.test(beds.reply || ''), false);
+
+  // TEST 3 — Buy keeps all three areas, no location ask
+  const buy = qualifyListingSearch('Buy', {
+    ...profile,
+    ...beds.profilePatch,
+    lastSearchFilters: beds.profilePatch.lastSearchFilters,
+    slotFlow: beds.profilePatch.slotFlow,
+  });
+  assert.equal(buy.profilePatch.lastSearchFilters.purpose, 'Buy');
+  assert.deepEqual(buy.profilePatch.lastSearchFilters.locations, [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
+  assert.equal(buy.missing === 'location', false);
+  assert.equal(/which area or community/i.test(buy.reply || ''), false);
+  assert.equal(
+    (buy.options || []).some((o) => /Dubai Marina|Business Bay|Any area/i.test(String(o))),
+    false
+  );
+
+  // TEST 4 — Apartment searches inside locked areas
+  const apt = qualifyListingSearch('Apartment', {
+    ...profile,
+    ...buy.profilePatch,
+    lastSearchFilters: buy.profilePatch.lastSearchFilters,
+    slotFlow: buy.profilePatch.slotFlow,
+  });
+  assert.deepEqual(apt.profilePatch.lastSearchFilters.types, ['Apartment']);
+  assert.deepEqual(apt.profilePatch.lastSearchFilters.locations, [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
+  assert.equal(apt.profilePatch.lastSearchFilters.bedrooms, 3);
+  assert.equal(apt.missing === 'location', false);
+  assert.equal(apt.type === 'continue' || apt.missing == null || apt.missing === 'bedrooms', true);
+});
+
+test('locked scope ignores Any area and does not re-ask bedrooms after Any', () => {
+  const recommended = copyRecommendedLocations([
+    { name: 'Dubai Hills Estate' },
+    { name: 'Jumeirah Village Circle', shortName: 'JVC' },
+    { name: 'Al Furjan' },
+  ]);
+  let filters = applyCmsLocationsToFilters(
+    {
+      ...emptySearchFilters(),
+      source: SEARCH_SOURCE_CMS,
+      purpose: 'Buy',
+      types: ['Apartment'],
+      type: 'Apartment',
+      bedrooms: 3,
+      bedroomsResolved: true,
+    },
+    recommended
+  );
+
+  // "Any area" must not clear locked communities
+  filters = applyMessageToSearchFilters(filters, 'Any area', { awaiting: 'location' });
+  assert.equal(filters.locationAny, false);
+  assert.equal(filters.areaScopeLocked, true);
+  assert.deepEqual(filters.locations, [
+    'Dubai Hills Estate',
+    'Jumeirah Village Circle',
+    'Al Furjan',
+  ]);
+
+  // TEST 6 — Any bedrooms continues without re-asking
+  filters = applyMessageToSearchFilters(filters, 'Any bedrooms', { awaiting: 'bedrooms' });
+  assert.equal(filters.bedroomsAny, true);
+  assert.equal(filters.bedroomsResolved, true);
+  assert.deepEqual(getMissingSearchFields(filters), []);
+
+  // Any type continues without re-asking type
+  filters = applyMessageToSearchFilters(
+    { ...filters, types: [], type: null, typesAny: false },
+    'Any type',
+    { awaiting: 'propertyType' }
+  );
+  assert.equal(filters.typesAny, true);
+  assert.deepEqual(filters.types, []);
+  assert.equal(getMissingSearchFields(filters).includes('propertyType'), false);
+});
+
+test('show Dubai Marina instead unlocks active area scope', () => {
+  assert.equal(wantsAreaScopeUnlock('show Dubai Marina instead'), true);
+  const recommended = copyRecommendedLocations([
+    { name: 'Dubai Hills Estate' },
+    { name: 'Jumeirah Village Circle' },
+    { name: 'Al Furjan' },
+  ]);
+  const locked = applyCmsLocationsToFilters(
+    { ...emptySearchFilters(), source: SEARCH_SOURCE_CMS, purpose: 'Buy', types: ['Apartment'] },
+    recommended
+  );
+  const profile = {
+    searchSource: SEARCH_SOURCE_CMS,
+    recommendedLocations: recommended,
+    lastSearchFilters: locked,
+    slotFlow: { awaiting: null },
+  };
+  const next = qualifyListingSearch('show Dubai Marina instead', profile);
+  assert.ok(next);
+  assert.equal(next.profilePatch.lastSearchFilters.areaScopeLocked, false);
+  assert.equal(next.profilePatch.lastSearchFilters.location, 'Dubai Marina');
+  assert.deepEqual(next.profilePatch.lastSearchFilters.locations, ['Dubai Marina']);
+});
+
+test('ensureActiveAreaScope restores communities when filters lost mid-flow', () => {
+  const recommended = copyRecommendedLocations([
+    { name: 'Dubai Hills Estate' },
+    { name: 'Al Furjan' },
+  ]);
+  const profile = {
+    searchSource: SEARCH_SOURCE_CMS,
+    recommendedLocations: recommended,
+    sourceContext: { areas: ['Dubai Hills Estate', 'Al Furjan'] },
+    lastSearchFilters: emptySearchFilters(),
+  };
+  const restored = ensureActiveAreaScope(profile, emptySearchFilters());
+  assert.equal(restored.areaScopeLocked, true);
+  assert.deepEqual(restored.locations, ['Dubai Hills Estate', 'Al Furjan']);
+  assert.equal(listingSlotQuestion('location', restored).options.includes('Dubai Marina'), false);
+});
+
+// --- Multi-community location scope regression (A–F) ---
+
+const FAMILY_COMMUNITIES = [
+  'Dubai Hills Estate',
+  'Jumeirah Village Circle',
+  'Al Furjan',
+];
+
+test('A: naming three communities keeps locations[] with all three', () => {
+  assert.deepEqual(
+    parseLocationsFromMessage(
+      'Show me properties in Dubai Hills Estate, JVC, and Al Furjan.'
+    ),
+    FAMILY_COMMUNITIES
+  );
+  assert.equal(canonicalizeSearchLocation('Dubai Hills'), 'Dubai Hills Estate');
+  assert.equal(canonicalizeSearchLocation('JVC'), 'Jumeirah Village Circle');
+  assert.equal(
+    canonicalizeSearchLocation('Jumeirah Village Circle (JVC)'),
+    'Jumeirah Village Circle'
+  );
+
+  let filters = applyMessageToSearchFilters(
+    emptySearchFilters(),
+    'Show me the current properties available in Dubai Hills Estate, JVC, and Al Furjan.'
+  );
+  assert.deepEqual(filters.locations, FAMILY_COMMUNITIES);
+  assert.equal(filters.areaScopeLocked, true);
+  assert.equal(getMissingSearchFields(filters).includes('location'), false);
+});
+
+test('B: Buy keeps all three communities', () => {
+  let filters = applyMessageToSearchFilters(
+    emptySearchFilters(),
+    'Show me properties in Dubai Hills Estate, JVC, and Al Furjan.'
+  );
+  filters = applyMessageToSearchFilters(filters, 'Buy', { awaiting: 'purpose' });
+  assert.equal(filters.purpose, 'Buy');
+  assert.deepEqual(filters.locations, FAMILY_COMMUNITIES);
+  assert.equal(filters.areaScopeLocked, true);
+
+  const profile = {
+    purpose: null,
+    searchSource: SEARCH_SOURCE_CMS,
+    recommendedLocations: copyRecommendedLocations(
+      FAMILY_COMMUNITIES.map((name) => ({ name }))
+    ),
+    sourceContext: {
+      type: 'community_group',
+      source: 'best-communities-for-families-dubai',
+      areas: FAMILY_COMMUNITIES.slice(),
+    },
+    lastSearchFilters: {
+      ...emptySearchFilters(),
+      locations: FAMILY_COMMUNITIES.slice(),
+      location: FAMILY_COMMUNITIES.join(', '),
+      areaScopeLocked: true,
+      source: SEARCH_SOURCE_CMS,
+    },
+    slotFlow: { awaiting: 'purpose' },
+  };
+  const next = qualifyListingSearch('Buy', profile);
+  assert.ok(next);
+  assert.deepEqual(next.profilePatch.lastSearchFilters.locations, FAMILY_COMMUNITIES);
+  assert.equal(next.profilePatch.lastSearchFilters.purpose, 'Buy');
+  assert.equal(next.missing === 'location', false);
+});
+
+test('C: Apartment keeps all three communities', () => {
+  let filters = {
+    ...emptySearchFilters(),
+    purpose: 'Buy',
+    locations: FAMILY_COMMUNITIES.slice(),
+    location: FAMILY_COMMUNITIES.join(', '),
+    areaScopeLocked: true,
+    source: SEARCH_SOURCE_CMS,
+  };
+  filters = applyMessageToSearchFilters(filters, 'Apartment', { awaiting: 'propertyType' });
+  assert.deepEqual(filters.types, ['Apartment']);
+  assert.deepEqual(filters.locations, FAMILY_COMMUNITIES);
+  assert.equal(filters.areaScopeLocked, true);
+});
+
+test('D: Any bedrooms still queries all three communities', () => {
+  let filters = {
+    ...emptySearchFilters(),
+    purpose: 'Buy',
+    types: ['Apartment'],
+    locations: FAMILY_COMMUNITIES.slice(),
+    location: FAMILY_COMMUNITIES.join(', '),
+    areaScopeLocked: true,
+    source: SEARCH_SOURCE_CMS,
+  };
+  filters = applyMessageToSearchFilters(filters, 'Any bedrooms', { awaiting: 'bedrooms' });
+  assert.equal(filters.bedroomsAny, true);
+  assert.deepEqual(filters.locations, FAMILY_COMMUNITIES);
+  const opts = listingQueryOpts(filters, '');
+  assert.deepEqual(opts.filters.locations, FAMILY_COMMUNITIES);
+  assert.equal(opts.search, '');
+});
+
+test('E: partial community miss keeps other communities (does not claim total failure)', () => {
+  const filters = {
+    ...emptySearchFilters(),
+    purpose: 'Buy',
+    types: ['Apartment'],
+    locations: FAMILY_COMMUNITIES.slice(),
+    location: FAMILY_COMMUNITIES.join(', '),
+    areaScopeLocked: true,
+  };
+  const note = partialCommunityMissNote(filters, [
+    { locality: 'Jumeirah Village Circle', propertyRefNo: 'JVC-1' },
+    { locality: 'Al Furjan', propertyRefNo: 'AF-1' },
+  ]);
+  assert.match(note, /Dubai Hills Estate/i);
+  assert.match(note, /Jumeirah Village Circle|JVC|Al Furjan/i);
+  assert.doesNotMatch(note, /couldn't find any ready apartments for sale in Dubai Hills\.?$/i);
+
+  const allMiss = exactNoMatchLine(filters);
+  assert.match(allMiss, /across/i);
+  assert.doesNotMatch(allMiss, /couldn't find any ready .* in Dubai Hills Estate\./i);
+});
+
+test('F: locked multi-community search never expands outside the three communities', () => {
+  const filters = {
+    ...emptySearchFilters(),
+    purpose: 'Buy',
+    types: ['Apartment'],
+    locations: FAMILY_COMMUNITIES.slice(),
+    location: FAMILY_COMMUNITIES.join(', '),
+    areaScopeLocked: true,
+    source: SEARCH_SOURCE_CMS,
+  };
+  const scoped = filterPropertiesToActiveCommunities(
+    [
+      { locality: 'Dubai Hills Estate', propertyRefNo: 'A' },
+      { locality: 'Business Bay', propertyRefNo: 'B' },
+      { locality: 'Dubai Marina', propertyRefNo: 'C' },
+      { locality: 'Jumeirah Village Circle', propertyRefNo: 'D' },
+      { locality: 'Dubai South', propertyRefNo: 'E' },
+    ],
+    FAMILY_COMMUNITIES.map((name) => ({ name }))
+  );
+  assert.deepEqual(
+    scoped.map((p) => p.propertyRefNo).sort(),
+    ['A', 'D']
+  );
+  assert.equal(
+    scoped.some((p) => /Business Bay|Dubai Marina|Dubai South|Maydan|Silicon/i.test(p.locality)),
+    false
+  );
+
+  // Nearby unlock must not fire while locked — merge keeps the three.
+  const next = applyMessageToSearchFilters(filters, 'Any area', { awaiting: 'location' });
+  assert.deepEqual(next.locations, FAMILY_COMMUNITIES);
+  assert.equal(next.locationAny, false);
+  assert.equal(next.areaScopeLocked, true);
+});
+
+test('Buy → Apartment → Any never asks location when communities known from topic history', () => {
+  // Reproduce the live bug: recommendedLocations empty, but conversation mentioned Best Families.
+  const history = [
+    { role: 'user', content: 'Best Communities for Families in Dubai' },
+    {
+      role: 'assistant',
+      content:
+        'Families often look at Dubai Hills Estate, Jumeirah Village Circle (JVC), and Al Furjan for schools and parks.',
+    },
+  ];
+  const recovered = recoverRecommendedLocations(
+    { preferredAreas: [], recommendedLocations: [], lastSearchFilters: emptySearchFilters() },
+    {
+      message: 'Show me the available listings in these three communities.',
+      history,
+    }
+  );
+  assert.deepEqual(
+    recovered.map((r) => r.name),
+    FAMILY_COMMUNITIES
+  );
+
+  let profile = {
+    preferredAreas: FAMILY_COMMUNITIES.slice(),
+    recommendedLocations: [],
+    sourceContext: null,
+    lastSearchFilters: emptySearchFilters(),
+    slotFlow: { awaiting: null },
+  };
+
+  let step = qualifyListingSearch(
+    'Show me the available listings in these three communities.',
+    profile
+  );
+  assert.ok(step);
+  assert.deepEqual(step.profilePatch.lastSearchFilters.locations, FAMILY_COMMUNITIES);
+  assert.equal(step.missing, 'intent');
+  assert.equal(step.missing === 'location', false);
+
+  profile = {
+    ...profile,
+    ...step.profilePatch,
+    lastSearchFilters: step.profilePatch.lastSearchFilters,
+    slotFlow: step.profilePatch.slotFlow,
+    recommendedLocations: step.profilePatch.recommendedLocations || recovered,
+    sourceContext: step.profilePatch.sourceContext,
+  };
+
+  step = qualifyListingSearch('Buy', profile);
+  assert.equal(step.profilePatch.lastSearchFilters.purpose, 'Buy');
+  assert.deepEqual(step.profilePatch.lastSearchFilters.locations, FAMILY_COMMUNITIES);
+  assert.equal(step.missing === 'location', false);
+
+  profile = {
+    ...profile,
+    ...step.profilePatch,
+    lastSearchFilters: step.profilePatch.lastSearchFilters,
+    slotFlow: step.profilePatch.slotFlow,
+  };
+
+  step = qualifyListingSearch('Apartment', profile);
+  assert.deepEqual(step.profilePatch.lastSearchFilters.types, ['Apartment']);
+  assert.deepEqual(step.profilePatch.lastSearchFilters.locations, FAMILY_COMMUNITIES);
+  assert.equal(step.missing === 'location', false);
+
+  profile = {
+    ...profile,
+    ...step.profilePatch,
+    lastSearchFilters: step.profilePatch.lastSearchFilters,
+    slotFlow: step.profilePatch.slotFlow || { awaiting: 'bedrooms' },
+  };
+
+  step = qualifyListingSearch('Any', profile);
+  assert.deepEqual(step.profilePatch.lastSearchFilters.locations, FAMILY_COMMUNITIES);
+  assert.equal(step.missing === 'location', false);
+  assert.equal(/which area or community/i.test(step.reply || ''), false);
+
+  const opts = listingQueryOpts(step.profilePatch.lastSearchFilters, '');
+  assert.deepEqual(opts.filters.locations, FAMILY_COMMUNITIES);
+  assert.equal(opts.search, '');
+});
+
+test('free-text inherits active 3-community scope', () => {
+  const profile = {
+    purpose: 'Buy',
+    intent: 'BUY',
+    searchSource: SEARCH_SOURCE_CMS,
+    recommendedLocations: copyRecommendedLocations(FAMILY_COMMUNITIES.map((name) => ({ name }))),
+    sourceContext: {
+      type: 'community_group',
+      source: 'best-communities-for-families-dubai',
+      areas: FAMILY_COMMUNITIES.slice(),
+    },
+    lastSearchFilters: {
+      ...emptySearchFilters(),
+      purpose: 'Buy',
+      locations: FAMILY_COMMUNITIES.slice(),
+      location: FAMILY_COMMUNITIES.join(', '),
+      areaScopeLocked: true,
+      source: SEARCH_SOURCE_CMS,
+    },
+    slotFlow: { awaiting: null },
+  };
+
+  for (const msg of [
+    'Show apartments for sale in all three',
+    'Any bedrooms',
+    'Show whatever apartments you have',
+    'Show properties in those communities',
+  ]) {
+    const step = qualifyListingSearch(msg, profile);
+    assert.ok(step, msg);
+    assert.deepEqual(
+      step.profilePatch.lastSearchFilters.locations,
+      FAMILY_COMMUNITIES,
+      msg
+    );
+    assert.equal(step.missing === 'location', false, msg);
+  }
+});
+
+// --- VIEW_CONTEXT_COMMUNITY_PROPERTIES structured badge flow ---
+
+test('1: VIEW_CONTEXT badge keeps all 3 communities in state', () => {
+  assert.equal(
+    isViewContextCommunityPropertiesAction(VIEW_CONTEXT_COMMUNITY_PROPERTIES),
+    true
+  );
+  assert.equal(isViewContextCommunitiesMessage(VIEW_CONTEXT_COMMUNITIES_LABEL), true);
+
+  const badge = buildViewContextCommunitiesAction('best-communities-for-families-dubai');
+  assert.equal(badge.action, VIEW_CONTEXT_COMMUNITY_PROPERTIES);
+  assert.equal(badge.label, VIEW_CONTEXT_COMMUNITIES_LABEL);
+  assert.equal(badge.contextKey, 'best-communities-for-families-dubai');
+  assert.deepEqual(badge.communities, FAMILY_COMMUNITIES);
+
+  // Stale single location must not overwrite topic scope.
+  const forced = communitiesForContextKey('best-communities-for-families-dubai', [
+    { name: 'Dubai Hills' },
+  ]);
+  assert.deepEqual(
+    forced.map((r) => r.name),
+    FAMILY_COMMUNITIES
+  );
+
+  const seeded = applyCmsLocationsToFilters(
+    emptySearchFilters(),
+    forced
+  );
+  assert.deepEqual(seeded.locations, FAMILY_COMMUNITIES);
+  assert.equal(seeded.areaScopeLocked, true);
+  assert.equal(getMissingSearchFields(seeded).includes('location'), false);
+});
+
+test('2: Buy → Apartment → Any bedrooms → Any budget stays in 3 communities', () => {
+  let filters = {
+    ...emptySearchFilters(),
+    locations: FAMILY_COMMUNITIES.slice(),
+    location: FAMILY_COMMUNITIES.join(', '),
+    areaScopeLocked: true,
+    source: SEARCH_SOURCE_CMS,
+  };
+  filters = applyMessageToSearchFilters(filters, 'Buy', { awaiting: 'purpose' });
+  assert.equal(filters.purpose, 'Buy');
+  assert.deepEqual(filters.locations, FAMILY_COMMUNITIES);
+
+  filters = applyMessageToSearchFilters(filters, 'Apartment', { awaiting: 'propertyType' });
+  assert.deepEqual(filters.types, ['Apartment']);
+  assert.deepEqual(filters.locations, FAMILY_COMMUNITIES);
+  assert.equal(filters.areaScopeLocked, true);
+
+  filters = applyMessageToSearchFilters(filters, 'Any', { awaiting: 'bedrooms' });
+  assert.equal(filters.bedroomsAny, true);
+  assert.deepEqual(filters.locations, FAMILY_COMMUNITIES);
+
+  filters = applyMessageToSearchFilters(filters, 'Any budget', { awaiting: 'budget' });
+  assert.equal(filters.budgetProvided, true);
+  assert.deepEqual(filters.locations, FAMILY_COMMUNITIES);
+  assert.equal(filters.areaScopeLocked, true);
+
+  const opts = listingQueryOpts(filters, '');
+  assert.deepEqual(opts.filters.locations, FAMILY_COMMUNITIES);
+  assert.equal(opts.search, '');
+
+  // Free-text qualify path must also keep scope (bedrooms optional for CMS multi).
+  const profile = {
+    purpose: 'Buy',
+    intent: 'BUY',
+    searchSource: SEARCH_SOURCE_CMS,
+    recommendedLocations: copyRecommendedLocations(
+      FAMILY_COMMUNITIES.map((name) => ({ name }))
+    ),
+    sourceContext: {
+      type: 'community_group',
+      source: 'best-communities-for-families-dubai',
+      areas: FAMILY_COMMUNITIES.slice(),
+    },
+    lastSearchFilters: {
+      ...filters,
+      bedroomsAny: true,
+      bedroomsResolved: true,
+      budgetProvided: true,
+    },
+    slotFlow: { awaiting: null },
+  };
+  const step = qualifyListingSearch('furnished', profile);
+  assert.ok(step);
+  assert.deepEqual(step.profilePatch.lastSearchFilters.locations, FAMILY_COMMUNITIES);
+  assert.equal(step.missing === 'location', false);
+});
+
+test('3: Buy → Apartment → 3 Beds searches only the 3 communities', () => {
+  const profile = {
+    purpose: 'Buy',
+    intent: 'BUY',
+    searchSource: SEARCH_SOURCE_CMS,
+    recommendedLocations: copyRecommendedLocations(
+      FAMILY_COMMUNITIES.map((name) => ({ name }))
+    ),
+    sourceContext: {
+      type: 'community_group',
+      source: 'best-communities-for-families-dubai',
+      areas: FAMILY_COMMUNITIES.slice(),
+    },
+    lastSearchFilters: {
+      ...emptySearchFilters(),
+      purpose: 'Buy',
+      types: ['Apartment'],
+      locations: FAMILY_COMMUNITIES.slice(),
+      location: FAMILY_COMMUNITIES.join(', '),
+      areaScopeLocked: true,
+      source: SEARCH_SOURCE_CMS,
+    },
+    slotFlow: { awaiting: 'bedrooms' },
+  };
+  const step = qualifyListingSearch('3 Beds', profile);
+  assert.ok(step);
+  assert.equal(step.profilePatch.lastSearchFilters.bedrooms, 3);
+  assert.deepEqual(step.profilePatch.lastSearchFilters.locations, FAMILY_COMMUNITIES);
+  const opts = listingQueryOpts(step.profilePatch.lastSearchFilters, '');
+  assert.deepEqual(opts.filters.locations, FAMILY_COMMUNITIES);
+  assert.equal(opts.search, '');
+});
+
+test('4: no ready results mentions off-plan alternative only within the 3 communities', () => {
+  const filters = {
+    ...emptySearchFilters(),
+    purpose: 'Buy',
+    types: ['Apartment'],
+    bedrooms: 3,
+    bedroomsResolved: true,
+    locations: FAMILY_COMMUNITIES.slice(),
+    location: FAMILY_COMMUNITIES.join(', '),
+    areaScopeLocked: true,
+    source: SEARCH_SOURCE_CMS,
+  };
+  assert.match(exactNoMatchLine(filters), /couldn't find any/i);
+  assert.match(exactNoMatchLine(filters), /across/i);
+  assert.match(exactNoMatchLine(filters), /Dubai Hills Estate/i);
+  assert.match(exactNoMatchLine(filters), /JVC|Jumeirah Village Circle/i);
+  assert.match(exactNoMatchLine(filters), /Al Furjan/i);
+  assert.doesNotMatch(exactNoMatchLine(filters), /Dubai Marina|Business Bay|Dubai South/i);
+
+  const alt = alternativeInventoryLine({
+    filters,
+    exactMatchCount: 0,
+    inventoryCounts: { offPlanCount: 2 },
+  });
+  assert.match(alt, /off-plan/i);
+  assert.match(alt, /2/);
+  assert.match(alt, /Dubai Hills Estate|JVC|Al Furjan/i);
+  assert.doesNotMatch(alt, /Dubai Marina|Business Bay|nearby/i);
+});
+
+test('5: show all keeps the same 3-community scope', () => {
+  const profile = {
+    purpose: 'Buy',
+    intent: 'BUY',
+    searchSource: SEARCH_SOURCE_CMS,
+    recommendedLocations: copyRecommendedLocations(
+      FAMILY_COMMUNITIES.map((name) => ({ name }))
+    ),
+    sourceContext: {
+      type: 'community_group',
+      source: 'best-communities-for-families-dubai',
+      areas: FAMILY_COMMUNITIES.slice(),
+    },
+    lastSearchFilters: {
+      ...emptySearchFilters(),
+      purpose: 'Buy',
+      types: ['Apartment'],
+      bedroomsAny: true,
+      bedroomsResolved: true,
+      budgetProvided: true,
+      locations: FAMILY_COMMUNITIES.slice(),
+      location: FAMILY_COMMUNITIES.join(', '),
+      areaScopeLocked: true,
+      source: SEARCH_SOURCE_CMS,
+    },
+    slotFlow: { awaiting: null },
+  };
+  const step = qualifyListingSearch('show all', profile);
+  assert.ok(step);
+  assert.deepEqual(step.profilePatch.lastSearchFilters.locations, FAMILY_COMMUNITIES);
+  assert.equal(step.profilePatch.lastSearchFilters.areaScopeLocked, true);
+  assert.equal(step.missing === 'location', false);
+  const opts = listingQueryOpts(step.profilePatch.lastSearchFilters, '');
+  assert.deepEqual(opts.filters.locations, FAMILY_COMMUNITIES);
+});
+
+test('6: change area to Dubai Marina clears locked 3-community context', () => {
+  assert.equal(wantsAreaScopeUnlock('change area to Dubai Marina'), true);
+  const profile = {
+    purpose: 'Buy',
+    intent: 'BUY',
+    searchSource: SEARCH_SOURCE_CMS,
+    recommendedLocations: copyRecommendedLocations(
+      FAMILY_COMMUNITIES.map((name) => ({ name }))
+    ),
+    sourceContext: {
+      type: 'community_group',
+      source: 'best-communities-for-families-dubai',
+      areas: FAMILY_COMMUNITIES.slice(),
+    },
+    lastSearchFilters: {
+      ...emptySearchFilters(),
+      purpose: 'Buy',
+      types: ['Apartment'],
+      locations: FAMILY_COMMUNITIES.slice(),
+      location: FAMILY_COMMUNITIES.join(', '),
+      areaScopeLocked: true,
+      source: SEARCH_SOURCE_CMS,
+    },
+    slotFlow: { awaiting: null },
+  };
+  const step = qualifyListingSearch('change area to Dubai Marina', profile);
+  assert.ok(step);
+  assert.equal(step.profilePatch.lastSearchFilters.areaScopeLocked, false);
+  assert.equal(step.profilePatch.lastSearchFilters.location, 'Dubai Marina');
+  assert.deepEqual(step.profilePatch.lastSearchFilters.locations, ['Dubai Marina']);
+  assert.deepEqual(step.profilePatch.recommendedLocations, []);
+  assert.equal(step.profilePatch.sourceContext, null);
+});
+
+test('7: Any bedrooms / type / budget does not clear lockedCommunities', () => {
+  const base = {
+    purpose: 'Buy',
+    intent: 'BUY',
+    searchSource: SEARCH_SOURCE_CMS,
+    recommendedLocations: copyRecommendedLocations(
+      FAMILY_COMMUNITIES.map((name) => ({ name }))
+    ),
+    sourceContext: {
+      type: 'community_group',
+      source: 'best-communities-for-families-dubai',
+      areas: FAMILY_COMMUNITIES.slice(),
+    },
+    lastSearchFilters: {
+      ...emptySearchFilters(),
+      purpose: 'Buy',
+      locations: FAMILY_COMMUNITIES.slice(),
+      location: FAMILY_COMMUNITIES.join(', '),
+      areaScopeLocked: true,
+      source: SEARCH_SOURCE_CMS,
+    },
+  };
+
+  for (const [msg, awaiting] of [
+    ['Any type', 'propertyType'],
+    ['Any', 'bedrooms'],
+    ['Any budget', 'budget'],
+  ]) {
+    const step = qualifyListingSearch(msg, {
+      ...base,
+      lastSearchFilters: {
+        ...base.lastSearchFilters,
+        types: awaiting === 'propertyType' ? [] : ['Apartment'],
+        bedroomsResolved: awaiting === 'budget',
+        bedroomsAny: awaiting === 'budget',
+      },
+      slotFlow: { awaiting },
+    });
+    assert.ok(step, msg);
+    assert.deepEqual(step.profilePatch.lastSearchFilters.locations, FAMILY_COMMUNITIES, msg);
+    assert.equal(step.profilePatch.lastSearchFilters.areaScopeLocked, true, msg);
+  }
+});
+
+test('VIEW_CONTEXT purpose chips hide zero-inventory categories', () => {
+  const inventory = [
+    {
+      location: 'Dubai Hills Estate',
+      buy: { count: 2, bedrooms: [1], minPrice: 1400000 },
+      rent: { count: 0, bedrooms: [], minPrice: null },
+      offPlan: { count: 3, bedrooms: [2], minPrice: 1200000 },
+    },
+    {
+      location: 'Jumeirah Village Circle',
+      shortName: 'JVC',
+      buy: { count: 1, bedrooms: [2], minPrice: 900000 },
+      rent: { count: 0, bedrooms: [], minPrice: null },
+      offPlan: { count: 0, bedrooms: [], minPrice: null },
+    },
+    {
+      location: 'Al Furjan',
+      buy: { count: 0, bedrooms: [], minPrice: null },
+      rent: { count: 0, bedrooms: [], minPrice: null },
+      offPlan: { count: 1, bedrooms: [3], minPrice: 1100000 },
+    },
+  ];
+  const all = purposeOptionFromInventory(inventory);
+  const visible = all.filter((o) => o.enabled !== false && Number(o.count) > 0);
+  assert.deepEqual(
+    visible.map((o) => o.label),
+    ['Buy', 'Off-plan']
+  );
+  assert.equal(visible.some((o) => o.label === 'Rent'), false);
+
+  const summaries = communitySummariesFromInventory(inventory);
+  const reply = cmsCommunityPreviewReply(summaries);
+  assert.match(reply, /family-friendly communities/i);
+  assert.match(reply, /Dubai Hills Estate/i);
+  assert.match(reply, /Jumeirah Village Circle \(JVC\)/i);
+  assert.match(reply, /Al Furjan/i);
+  assert.match(reply, /What would you like to explore/);
 });

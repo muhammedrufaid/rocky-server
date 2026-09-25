@@ -682,6 +682,93 @@ const getPropertyMarketStats = async ({ search = '', filters = {}, forced = {} }
   };
 };
 
+const emptyInventorySegment = () => ({
+  count: 0,
+  minPrice: null,
+  averagePrice: null,
+  startingPrice: null,
+  propertyTypes: [],
+  bedrooms: [],
+});
+
+/**
+ * Live inventory summary for one purpose/location segment.
+ * Counts all matching Live listings; price stats use numeric price conversion.
+ * Also returns distinct propertyTypes and bedroom values present in the result set.
+ */
+const getInventorySegmentSummary = async ({ search = '', filters = {}, forced = {} } = {}) => {
+  if (mongoose.connection.readyState !== 1) {
+    return emptyInventorySegment();
+  }
+  const filtersNoPrice = { ...(filters || {}) };
+  delete filtersNoPrice.priceMin;
+  delete filtersNoPrice.priceMax;
+
+  const pipeline = [
+    ...buildCommonPipeline({ search, filters: filtersNoPrice, forced }),
+    {
+      $addFields: {
+        __priceNum: numberExprFromStringField('price'),
+        __bedroomsNum: numberExprFromStringField('bedrooms'),
+        __typeNorm: {
+          $trim: { input: { $ifNull: ['$propertyType', ''] } },
+        },
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        count: { $sum: 1 },
+        minPrice: {
+          $min: {
+            $cond: [
+              { $and: [{ $ne: ['$__priceNum', null] }, { $gt: ['$__priceNum', 0] }] },
+              '$__priceNum',
+              null,
+            ],
+          },
+        },
+        averagePrice: {
+          $avg: {
+            $cond: [
+              { $and: [{ $ne: ['$__priceNum', null] }, { $gt: ['$__priceNum', 0] }] },
+              '$__priceNum',
+              null,
+            ],
+          },
+        },
+        propertyTypes: { $addToSet: '$__typeNorm' },
+        bedrooms: { $addToSet: '$__bedroomsNum' },
+      },
+    },
+  ];
+
+  const [row] = await Property.aggregate(pipeline).allowDiskUse(true);
+  if (!row) return emptyInventorySegment();
+
+  const propertyTypes = (Array.isArray(row.propertyTypes) ? row.propertyTypes : [])
+    .map((t) => String(t || '').trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+
+  const bedrooms = (Array.isArray(row.bedrooms) ? row.bedrooms : [])
+    .map((n) => Number(n))
+    .filter((n) => Number.isFinite(n) && n >= 0)
+    .sort((a, b) => a - b);
+
+  const minPrice = Number.isFinite(row.minPrice) ? row.minPrice : null;
+  const averagePrice = Number.isFinite(row.averagePrice) ? row.averagePrice : null;
+
+  return {
+    count: Number(row.count) || 0,
+    minPrice,
+    averagePrice,
+    startingPrice: minPrice,
+    propertyTypes,
+    bedrooms,
+  };
+};
+
 const countProperties = async ({ search = '', filters = {}, forced = {} } = {}) => {
   if (mongoose.connection.readyState !== 1) return 0;
   const { mongoMatch, addFields, numericMatch, hasNumericFilters } = buildListQuery({
@@ -715,6 +802,7 @@ module.exports = {
   fetchUniquePropertyTypes,
   fetchUniquePropertyTypesInOrder,
   getPropertyMarketStats,
+  getInventorySegmentSummary,
   countProperties,
 };
 

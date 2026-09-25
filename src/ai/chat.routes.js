@@ -43,20 +43,7 @@ function validateChat(req, res, next) {
   if (sessionId.trim().length > 128) {
     return res.status(400).json({ success: false, message: 'sessionId is too long' });
   }
-  if (typeof message !== 'string' || !message.trim()) {
-    return res.status(400).json({ success: false, message: 'message is required' });
-  }
-  if (message.length > maxMessageLength) {
-    return res.status(400).json({
-      success: false,
-      message: `message must be at most ${maxMessageLength} characters`,
-    });
-  }
 
-  req.body.sessionId = sessionId.trim();
-  if (typeof message === 'string' && message.trim()) {
-    req.body.message = message.trim();
-  }
   const action = req.body?.action;
   if (action != null && action !== '') {
     if (typeof action !== 'string') {
@@ -64,6 +51,42 @@ function validateChat(req, res, next) {
     }
     req.body.action = action.trim();
   }
+
+  const hasAction = !!(req.body.action && String(req.body.action).trim());
+  if ((!message || typeof message !== 'string' || !message.trim()) && !hasAction) {
+    return res.status(400).json({ success: false, message: 'message is required' });
+  }
+  if (typeof message === 'string' && message.trim()) {
+    if (message.length > maxMessageLength) {
+      return res.status(400).json({
+        success: false,
+        message: `message must be at most ${maxMessageLength} characters`,
+      });
+    }
+    req.body.message = message.trim();
+  } else if (hasAction) {
+    // Structured actions may omit free-text; use a stable label so slot parsers work.
+    req.body.message = String(req.body.message || action || 'View properties in these 3 communities').trim();
+  }
+
+  req.body.sessionId = sessionId.trim();
+
+  if (req.body.contextKey != null && req.body.contextKey !== '') {
+    if (typeof req.body.contextKey !== 'string') {
+      return res.status(400).json({ success: false, message: 'contextKey must be a string' });
+    }
+    req.body.contextKey = req.body.contextKey.trim();
+  }
+  if (req.body.communities != null) {
+    if (!Array.isArray(req.body.communities)) {
+      return res.status(400).json({ success: false, message: 'communities must be an array' });
+    }
+    req.body.communities = req.body.communities
+      .map((c) => String(c || '').trim())
+      .filter(Boolean)
+      .slice(0, 12);
+  }
+
   for (const key of ['propertyRefNo', 'propertyId', 'propertyTitle']) {
     const value = req.body?.[key];
     if (value == null || value === '') continue;

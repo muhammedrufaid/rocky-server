@@ -13,17 +13,54 @@ const {
   isCmsSearchSource,
   CMS_HANDOFF_PURPOSE,
   CMS_HANDOFF_LOCATION,
+  CMS_HANDOFF_PROPERTY_TYPE,
+  CMS_IMMEDIATE_LISTING_THRESHOLD,
   SEARCH_SOURCE_CMS,
   SEARCH_SOURCE_DIRECT,
+  CMS_COMMUNITY_CATALOG,
   probeCmsLocationInventory,
+  probeCmsSegmentFacets,
+  inventoryTotals,
   purposeOptionFromInventory,
   locationInventoryOptions,
+  areaInventorySummaryPayload,
+  communitySummariesFromInventory,
+  cmsCommunityPreviewReply,
+  filterPropertiesToActiveCommunities,
+  propertyMatchesCommunity,
+  fetchCmsCommunityPreviewProperties,
+  matchCmsTopicScopeFromChunks,
+  matchCmsTopicScopeFromProfile,
+  matchCmsTopicScopeFromText,
+  locationsForTopicScope,
+  cmsHandoffInventorySummaryReply,
   cmsHandoffIntroReply,
   cmsHandoffLocationReply,
+  cmsHandoffPropertyTypeReply,
+  cmsHandoffBedroomsReply,
+  propertyTypeOptionsFromInventory,
+  bedroomOptionsFromValues,
   parseCmsAllAreasChoice,
   matchRecommendedLocation,
   applyCmsLocationsToFilters,
+  ensureCmsAreasOnFilters,
+  ensureActiveAreaScope,
+  getActiveAreas,
+  isAreaScopeLocked,
   describeCmsLocations,
+  buildSourceContextFromRecommended,
+  copySourceContext,
+  emptyPropertySearch,
+  copyPropertySearch,
+  propertySearchFromFilters,
+  recommendedLocationsFromProfile,
+  recoverRecommendedLocations,
+  VIEW_CONTEXT_COMMUNITY_PROPERTIES,
+  VIEW_CONTEXT_COMMUNITIES_LABEL,
+  isViewContextCommunityPropertiesAction,
+  isViewContextCommunitiesMessage,
+  communitiesForContextKey,
+  buildViewContextCommunitiesAction,
 } = cmsHandoff;
 
 const VECTOR_INDEX_NAME = process.env.CHATBOT_VECTOR_INDEX || 'chatbot_knowledge_vector_index';
@@ -738,6 +775,7 @@ function emptySearchFilters() {
     location: null,
     locations: [],
     locationAny: false,
+    areaScopeLocked: false,
     bedrooms: null,
     bedroomsMin: null,
     bedroomsAny: false,
@@ -747,6 +785,7 @@ function emptySearchFilters() {
     budgetProvided: false,
     type: null,
     types: [],
+    typesAny: false,
     purpose: null,
     furnished: null,
     amenities: [],
@@ -820,16 +859,23 @@ function uniqueIdList(list = []) {
 
 function copySearchFilters(filters = {}) {
   const types = typesFromFilters(filters);
-  const locationAny =
-    filters.locationAny === true || isUnrestrictedLocationPhrase(filters.location);
-  const location = locationAny ? null : sanitizeSearchLocation(filters.location);
   const explicitLocations = Array.isArray(filters.locations)
     ? filters.locations.map((v) => String(v || '').trim()).filter(Boolean)
     : [];
+  const areaScopeLocked = filters.areaScopeLocked === true;
+  const locationAny =
+    !areaScopeLocked &&
+    (filters.locationAny === true || isUnrestrictedLocationPhrase(filters.location));
+  let location = locationAny ? null : sanitizeSearchLocation(filters.location);
+  if (!locationAny && !location && explicitLocations.length) {
+    location =
+      explicitLocations.length === 1 ? explicitLocations[0] : explicitLocations.join(', ');
+  }
   return {
     location,
     locations: locationAny ? [] : explicitLocations,
     locationAny,
+    areaScopeLocked: areaScopeLocked && !locationAny && (explicitLocations.length > 0 || !!location),
     bedrooms: filters.bedrooms ?? null,
     bedroomsMin: filters.bedroomsMin ?? null,
     bedroomsAny: !!filters.bedroomsAny,
@@ -843,6 +889,7 @@ function copySearchFilters(filters = {}) {
     budgetProvided: filters.budgetProvided === true,
     type: types.length === 1 ? types[0] : types.length ? types.join(', ') : filters.type || null,
     types,
+    typesAny: filters.typesAny === true && !types.length,
     purpose: filters.purpose || null,
     furnished: filters.furnished || null,
     amenities: normalizeAmenityList(filters.amenities),
@@ -1791,18 +1838,18 @@ function isSellCta(text) {
 
 const SELL_AREA_ALIASES = [
   { match: /\b(al\s+)?barsha\b/i, canonical: 'Al Barsha' },
-  { match: /\bdubai\s+hills(\s+estate)?\b/i, canonical: 'Dubai Hills' },
+  { match: /\bdubai\s+hills(\s+estate)?\b/i, canonical: 'Dubai Hills Estate' },
   { match: /\bal\s+furjan\b|\bfurjan\b/i, canonical: 'Al Furjan' },
   { match: /\bdubai\s+south\b/i, canonical: 'Dubai South' },
   { match: /\bdubai\s+marina\b/i, canonical: 'Dubai Marina' },
   { match: /\barabian\s+ranches\b/i, canonical: 'Arabian Ranches' },
   { match: /\bbusiness\s+bay\b/i, canonical: 'Business Bay' },
-  { match: /\bjvc\b|\bjumeirah\s+village\s+circle\b/i, canonical: 'JVC' },
+  { match: /\bjvc\b|\bjumeirah\s+village\s+circle\b/i, canonical: 'Jumeirah Village Circle' },
   { match: /\bsheikh\s+zayed\s+road\b|\bszr\b/i, canonical: 'Sheikh Zayed Road' },
   { match: /\bjebel\s+ali\b/i, canonical: 'Jebel Ali' },
   { match: /\bpalm\s+jumeirah\b/i, canonical: 'Palm Jumeirah' },
   { match: /\bdowntown(\s+dubai)?\b/i, canonical: 'Downtown Dubai' },
-  { match: /\bjbr\b|\bjumeirah\s+beach\s+residence\b/i, canonical: 'JBR' },
+  { match: /\bjbr\b|\bjumeirah\s+beach\s+residence\b/i, canonical: 'Jumeirah Beach Residence' },
 ];
 
 function parseSellLocation(text) {
@@ -2359,9 +2406,55 @@ function exactNoMatchLine(filters = {}) {
   const amenity = describeAmenitiesClause(filters);
   const suffix = amenity ? ' matching your current search' : '';
   const readyPrefix = purpose === 'Buy' ? 'ready ' : '';
+  const multi =
+    Array.isArray(filters.locations) && filters.locations.length > 1;
+  if (multi) {
+    const places = describeCmsLocations(filters) || 'those communities';
+    if (filters.areaScopeLocked === true) {
+      return `I couldn't find any ${readyPrefix}${segment || 'matching properties'} across ${places}.`
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+    return `I couldn't find an exact ${segment || 'match'} across ${places}. I can show nearby alternatives or different bedroom options.`
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
   return `I couldn't find any ${readyPrefix}${segment}${amenity}${loc}${budget ? ` ${budget}` : ''}${suffix}.`
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * When some locked communities have no matching cards, explain which still matched.
+ */
+function partialCommunityMissNote(filters = {}, properties = []) {
+  const scope = (filters.locations || []).map((n) => String(n || '').trim()).filter(Boolean);
+  if (scope.length < 2 || !Array.isArray(properties) || !properties.length) return null;
+
+  const matched = new Set();
+  for (const prop of properties) {
+    for (const name of scope) {
+      if (propertyMatchesCommunity(prop, { name })) matched.add(name);
+    }
+  }
+  const missing = scope.filter((name) => ![...matched].some((m) => locationNamesEqual(m, name)));
+  if (!missing.length || matched.size === 0) return null;
+  if (missing.length === scope.length) return null;
+
+  const missLabel =
+    missing.length === 1
+      ? missing[0]
+      : missing.length === 2
+        ? `${missing[0]} and ${missing[1]}`
+        : `${missing.slice(0, -1).join(', ')}, and ${missing[missing.length - 1]}`;
+  const hitNames = [...matched];
+  const hitLabel =
+    hitNames.length === 1
+      ? hitNames[0]
+      : hitNames.length === 2
+        ? `${hitNames[0]} and ${hitNames[1]}`
+        : `${hitNames.slice(0, -1).join(', ')}, and ${hitNames[hitNames.length - 1]}`;
+  return `I couldn’t find matching listings in ${missLabel}, but I found matches in ${hitLabel}.`;
 }
 
 function unconstrainedBudgetLine(count, filters = {}) {
@@ -2612,6 +2705,8 @@ function parseBedroomChoice(text) {
     raw === 'any br' ||
     raw === 'any bed' ||
     raw === 'any beds' ||
+    raw === 'any bedroom' ||
+    raw === 'any bedrooms' ||
     isBedroomSkip(raw)
   ) {
     return { any: true };
@@ -2737,6 +2832,7 @@ function applyTypesToFilters(filters, types) {
   const list = uniqueTypes(types);
   filters.types = list;
   filters.type = list.length === 1 ? list[0] : list.length ? list.join(', ') : null;
+  if (list.length) filters.typesAny = false;
   return filters;
 }
 
@@ -2889,35 +2985,62 @@ function normalizeSearchProfileAfterPatch(previousProfile, patch, { explicitPurp
   return next;
 }
 
+function hasLocationScope(filtersOrProfile = {}) {
+  const filters = filtersOrProfile.lastSearchFilters
+    ? copySearchFilters(filtersOrProfile.lastSearchFilters)
+    : copySearchFilters(filtersOrProfile);
+  if (filters.areaScopeLocked === true) return true;
+  if (filters.locationAny === true) return true;
+  if (Array.isArray(filters.locations) && filters.locations.length > 0) return true;
+  if (String(filters.location || '').trim()) return true;
+
+  // Profile-level multi-community scope (survives when lastSearchFilters was wiped).
+  const recommended = recommendedLocationsFromProfile(filtersOrProfile);
+  if (recommended.length > 0) return true;
+  const ctx = copySourceContext(filtersOrProfile.sourceContext);
+  if (Array.isArray(ctx?.areas) && ctx.areas.length > 0) return true;
+  const fromSearch =
+    filtersOrProfile.propertySearch?.activeAreas || filtersOrProfile.propertySearch?.areas;
+  if (Array.isArray(fromSearch) && fromSearch.length > 0) return true;
+  return false;
+}
+
 function getRequiredSearchFields(profileOrFilters = {}) {
   const filters = profileOrFilters.lastSearchFilters
     ? copySearchFilters(profileOrFilters.lastSearchFilters)
     : copySearchFilters(profileOrFilters);
-  const required = ['intent'];
-  // CMS community handoff skips property-type — purpose → locations → bedrooms → results.
-  if (!isCmsSearchSource(filters) && filters.source !== SEARCH_SOURCE_CMS) {
-    required.push('propertyType');
+  const required = ['intent', 'propertyType'];
+  // CMS / multi-community discovery: bedrooms are an optional refinement, not a blocker.
+  const cmsOrMulti =
+    isCmsSearchSource(filters) ||
+    filters.source === SEARCH_SOURCE_CMS ||
+    (Array.isArray(filters.locations) && filters.locations.length > 1) ||
+    filters.areaScopeLocked === true ||
+    recommendedLocationsFromProfile(profileOrFilters).length > 1;
+  if (requiresBedroomsForSearch(filters) && !cmsOrMulti) {
+    required.push('bedrooms');
   }
-  if (requiresBedroomsForSearch(filters)) required.push('bedrooms');
-  if (!filters.locationAny) required.push('location');
+  if (!hasLocationScope(profileOrFilters.lastSearchFilters ? profileOrFilters : filters)) {
+    required.push('location');
+  }
   return required;
 }
 
 function getMissingSearchFields(state = {}) {
-  const filters = state.lastSearchFilters
+  const hasProfileWrapper = !!(state && state.lastSearchFilters);
+  const filters = hasProfileWrapper
     ? copySearchFilters(state.lastSearchFilters)
     : copySearchFilters(state);
+  const scopeSource = hasProfileWrapper ? state : filters;
   const missing = [];
-  for (const field of getRequiredSearchFields(filters)) {
+  for (const field of getRequiredSearchFields(hasProfileWrapper ? state : filters)) {
     if (field === 'intent' && !normalizePurpose(filters.purpose)) missing.push('intent');
-    if (field === 'propertyType' && !typesFromFilters(filters).length) missing.push('propertyType');
+    if (field === 'propertyType') {
+      if (filters.typesAny === true) continue;
+      if (!typesFromFilters(filters).length) missing.push('propertyType');
+    }
     if (field === 'bedrooms' && !isBedroomsResolved(filters)) missing.push('bedrooms');
-    if (
-      field === 'location' &&
-      !filters.locationAny &&
-      !String(filters.location || '').trim() &&
-      !(Array.isArray(filters.locations) && filters.locations.length)
-    ) {
+    if (field === 'location' && !hasLocationScope(scopeSource)) {
       missing.push('location');
     }
   }
@@ -2989,6 +3112,7 @@ function hasInProgressListingSearch(profile = {}) {
     LISTING_SLOT_AWAITING.has(awaiting) ||
     awaiting === CMS_HANDOFF_PURPOSE ||
     awaiting === CMS_HANDOFF_LOCATION ||
+    awaiting === CMS_HANDOFF_PROPERTY_TYPE ||
     awaiting === 'emptyResults' ||
     awaiting === 'alternatives' ||
     awaiting === 'nearbyArea'
@@ -3071,6 +3195,10 @@ function sanitizeSearchLocation(value) {
 }
 
 function hasLocationConstraint(filters = {}) {
+  if (filters.areaScopeLocked === true) {
+    if (Array.isArray(filters.locations) && filters.locations.filter(Boolean).length > 0) return true;
+    if (sanitizeSearchLocation(filters.location)) return true;
+  }
   if (filters.locationAny === true) return false;
   if (Array.isArray(filters.locations) && filters.locations.filter(Boolean).length > 0) return true;
   const loc = sanitizeSearchLocation(filters.location);
@@ -3092,9 +3220,66 @@ function describeLocationClause(filters = {}, { fallback = '' } = {}) {
 
 function applyUnrestrictedLocation(filters) {
   if (!filters) return filters;
+  // Locked community scope cannot be cleared by "Any area".
+  if (filters.areaScopeLocked === true && Array.isArray(filters.locations) && filters.locations.length) {
+    filters.locationAny = false;
+    return filters;
+  }
   filters.location = null;
+  filters.locations = [];
   filters.locationAny = true;
+  filters.areaScopeLocked = false;
   return filters;
+}
+
+function wantsAreaScopeUnlock(text) {
+  const raw = String(text || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?]+$/g, '');
+  if (!raw) return false;
+  if (isExplicitSearchReset(raw)) return true;
+  if (/\b(change|switch|update)\s+(the\s+)?(location|area|community|communities)\b/.test(raw)) {
+    return true;
+  }
+  if (
+    /\b(show|search|try|look\s+in)\s+(me\s+)?(other|different|another)\s+(areas?|communities|locations)\b/.test(
+      raw
+    )
+  ) {
+    return true;
+  }
+  if (/\b(instead|rather)\b/.test(raw) && parseLocationFromMessage(raw)) return true;
+  if (/\bshow\s+(me\s+)?[\w\s'-]+\s+instead\b/.test(raw)) return true;
+  if (isUnrestrictedLocationPhrase(raw) && !/^(any|any bedrooms?|any type|any budget)$/i.test(raw)) {
+    return true;
+  }
+  if (/\b(clear\s+filters?|reset\s+(my\s+)?(search|filters?))\b/.test(raw)) return true;
+  return false;
+}
+
+function unlockAreaScope(filters = {}, { location = null, locationAny = false } = {}) {
+  const next = copySearchFilters(filters);
+  next.areaScopeLocked = false;
+  if (locationAny) {
+    next.location = null;
+    next.locations = [];
+    next.locationAny = true;
+    next.source = SEARCH_SOURCE_DIRECT;
+    return next;
+  }
+  if (location) {
+    next.location = location;
+    next.locations = [location];
+    next.locationAny = false;
+    next.source = SEARCH_SOURCE_DIRECT;
+    return next;
+  }
+  next.location = null;
+  next.locations = [];
+  next.locationAny = false;
+  if (next.source === SEARCH_SOURCE_CMS) next.source = SEARCH_SOURCE_DIRECT;
+  return next;
 }
 
 /** Words that look like "in X" but are not Dubai communities. */
@@ -3516,7 +3701,87 @@ function matchKnownAreaAlias(text) {
   for (const row of SELL_AREA_ALIASES) {
     if (row.match.test(raw)) return row.canonical;
   }
+  // Prefer CMS catalog canonical names (Dubai Hills Estate, Jumeirah Village Circle, …).
+  for (const row of CMS_COMMUNITY_CATALOG || []) {
+    const candidates = [row.name, row.shortName, ...(row.aliases || [])].filter(Boolean);
+    for (const alias of candidates) {
+      const re = new RegExp(`\\b${escapeRegex(alias)}\\b`, 'i');
+      if (re.test(raw)) return row.name;
+    }
+  }
   return null;
+}
+
+/**
+ * Canonicalize a place name to the CMS community catalog when possible.
+ */
+function canonicalizeSearchLocation(name) {
+  const raw = String(name || '').trim();
+  if (!raw) return null;
+  const alias = matchKnownAreaAlias(raw);
+  if (alias) return alias;
+  return raw.replace(/\s+/g, ' ');
+}
+
+function locationNamesEqual(a, b) {
+  const left = canonicalizeSearchLocation(a);
+  const right = canonicalizeSearchLocation(b);
+  if (!left || !right) return false;
+  return left.toLowerCase() === right.toLowerCase();
+}
+
+function locationInActiveScope(name, locations = []) {
+  const target = canonicalizeSearchLocation(name);
+  if (!target) return false;
+  return (locations || []).some((loc) => locationNamesEqual(loc, target));
+}
+
+/**
+ * Extract ALL mentioned communities from a message (multi-location support).
+ * Longer aliases win so "Dubai Hills Estate" is preferred over "Dubai Hills".
+ * Results are ordered by first mention in the message.
+ */
+function parseLocationsFromMessage(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return [];
+  if (isUnspecifiedLocationPhrase(raw) || isUnrestrictedLocationPhrase(raw)) return [];
+  if (isPropertyUiAction(raw)) return [];
+
+  const hits = []; // { canonical, index }
+  const seen = new Set();
+  const catalog = (CMS_COMMUNITY_CATALOG || []).map((row) => ({
+    name: row.name,
+    aliases: [...new Set([row.name, row.shortName, ...(row.aliases || [])].filter(Boolean))].sort(
+      (a, b) => String(b).length - String(a).length
+    ),
+  }));
+  // Also include SELL_AREA_ALIASES as fallbacks.
+  for (const row of SELL_AREA_ALIASES) {
+    if (!catalog.some((c) => locationNamesEqual(c.name, row.canonical))) {
+      catalog.push({ name: row.canonical, aliases: [row.canonical] });
+    }
+  }
+  catalog.sort((a, b) => {
+    const aMax = Math.max(...a.aliases.map((x) => String(x).length));
+    const bMax = Math.max(...b.aliases.map((x) => String(x).length));
+    return bMax - aMax;
+  });
+
+  for (const row of catalog) {
+    for (const alias of row.aliases) {
+      const re = new RegExp(`\\b${escapeRegex(alias)}\\b`, 'i');
+      const m = re.exec(raw);
+      if (!m) continue;
+      const canonical = canonicalizeSearchLocation(row.name) || row.name;
+      const key = canonical.toLowerCase();
+      if (seen.has(key)) break;
+      seen.add(key);
+      hits.push({ canonical, index: m.index });
+      break;
+    }
+  }
+  hits.sort((a, b) => a.index - b.index);
+  return hits.map((h) => h.canonical);
 }
 
 function locationStopSuffix() {
@@ -3885,7 +4150,15 @@ function budgetOptionsForPurpose(purpose) {
   return BUY_BUDGET_OPTIONS.slice();
 }
 
-function nextMissingListingSlot(filters = {}) {
+function nextMissingListingSlot(filters = {}, profile = null) {
+  if (profile && typeof profile === 'object') {
+    return (
+      getMissingSearchFields({
+        ...profile,
+        lastSearchFilters: filters,
+      })[0] || null
+    );
+  }
   return getMissingSearchFields(filters)[0] || null;
 }
 
@@ -3912,11 +4185,21 @@ function listingSlotQuestion(slot, filters = {}) {
     };
   }
   if (slot === 'location') {
-    // CMS handoff: never fall back to generic Dubai Marina / Business Bay chips.
-    if (isCmsSearchSource(filters) && Array.isArray(filters.locations) && filters.locations.length) {
+    // Locked / CMS multi-community scope: never fall back to generic Dubai Marina chips.
+    if (
+      filters.areaScopeLocked === true ||
+      (isCmsSearchSource(filters) && Array.isArray(filters.locations) && filters.locations.length)
+    ) {
+      const areas =
+        Array.isArray(filters.locations) && filters.locations.length
+          ? filters.locations.slice()
+          : String(filters.location || '')
+              .split(/\s*,\s*/)
+              .map((s) => s.trim())
+              .filter(Boolean);
       return {
-        reply: locationClarificationReply(),
-        options: filters.locations.slice(),
+        reply: `I'll keep searching across ${areas.join(', ')}. What else would you like to refine?`,
+        options: areas,
         inputType: 'location',
         awaiting: 'location',
       };
@@ -3948,6 +4231,7 @@ const LISTING_SLOT_AWAITING = new Set([
   'listingIntake',
   CMS_HANDOFF_PURPOSE,
   CMS_HANDOFF_LOCATION,
+  CMS_HANDOFF_PROPERTY_TYPE,
 ]);
 
 function isExplicitSearchReset(text) {
@@ -4029,11 +4313,121 @@ function qualifyListingSearch(message, profile = {}) {
 
   if (shouldSkipPropertySearch(message) && !listingAwaiting) return null;
 
-  const last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+  let last = copySearchFilters(profile.lastSearchFilters || emptySearchFilters());
+  // Always restore locked / recommended communities before applying this turn's patch.
+  last = ensureActiveAreaScope(profile, last);
+
+  // Recover multi-community scope when filters lost it (blog → property handoff).
+  if (
+    (!Array.isArray(last.locations) || !last.locations.length) &&
+    !last.locationAny
+  ) {
+    const recovered = recoverRecommendedLocations(profile, { message });
+    if (recovered.length) {
+      last = applyCmsLocationsToFilters(last, recovered);
+      last.areaScopeLocked = true;
+      last.source = last.source || SEARCH_SOURCE_CMS;
+      console.log(
+        '[SEARCH_CONTEXT AFTER]',
+        JSON.stringify({
+          action: 'recoverCommunities',
+          communities: last.locations,
+          purpose: last.purpose || null,
+        })
+      );
+    }
+  }
+
+  console.log(
+    '[SEARCH_CONTEXT BEFORE]',
+    JSON.stringify({
+      action: String(message || '').slice(0, 80),
+      awaiting: awaiting || null,
+      communities: last.locations || [],
+      purpose: last.purpose || profile.purpose || null,
+      propertyType: typesFromFilters(last),
+      bedrooms: last.bedroomsAny ? 'any' : last.bedrooms ?? null,
+      locked: last.areaScopeLocked === true,
+    })
+  );
+
+  // Explicit unlock / replace area scope (e.g. "show Dubai Marina instead").
+  if (isAreaScopeLocked({ ...profile, lastSearchFilters: last }) && wantsAreaScopeUnlock(message)) {
+    const named = parseLocationFromMessage(message) || parseLocationReply(message);
+    if (named && !isUnrestrictedLocationPhrase(message)) {
+      last = unlockAreaScope(last, { location: named });
+    } else if (isUnrestrictedLocationPhrase(message) || isExplicitSearchReset(message)) {
+      last = unlockAreaScope(last, { locationAny: isUnrestrictedLocationPhrase(message) });
+    } else {
+      last = unlockAreaScope(last);
+    }
+  }
+
   if (!last.purpose) {
     last.purpose = profile.purpose || intentToPurpose(profile.intent) || null;
   }
   const next = applyMessageToSearchFilters(last, message, { awaiting });
+
+  // Keep locked multi-area scope after purpose/type/bedroom/furnishing patches.
+  if (isAreaScopeLocked({ ...profile, lastSearchFilters: last }) && !wantsAreaScopeUnlock(message)) {
+    const locs = (last.locations || [])
+      .map((v) => canonicalizeSearchLocation(v) || String(v || '').trim())
+      .filter(Boolean);
+    Object.assign(next, {
+      locations: locs.length ? locs : next.locations,
+      location: locs.length > 1 ? locs.join(', ') : locs[0] || last.location || next.location,
+      locationAny: false,
+      areaScopeLocked: true,
+      source: last.source || SEARCH_SOURCE_CMS,
+    });
+  } else if (
+    Array.isArray(last.locations) &&
+    last.locations.length &&
+    (!Array.isArray(next.locations) || !next.locations.length) &&
+    !next.locationAny
+  ) {
+    next.locations = last.locations
+      .map((v) => canonicalizeSearchLocation(v) || String(v || '').trim())
+      .filter(Boolean);
+    next.location = last.location || next.locations.join(', ');
+    next.source = last.source || SEARCH_SOURCE_CMS;
+    next.areaScopeLocked = last.areaScopeLocked === true || next.locations.length > 1;
+  } else if (Array.isArray(next.locations) && next.locations.length > 1) {
+    next.locations = next.locations
+      .map((v) => canonicalizeSearchLocation(v) || String(v || '').trim())
+      .filter(Boolean);
+    next.location = next.locations.join(', ');
+    next.areaScopeLocked = true;
+  }
+
+  // Final safety: never drop multi-community scope on filter-only patches.
+  if (
+    (!Array.isArray(next.locations) || !next.locations.length) &&
+    !next.locationAny &&
+    !wantsAreaScopeUnlock(message)
+  ) {
+    const recovered = recoverRecommendedLocations(
+      { ...profile, lastSearchFilters: last },
+      { message }
+    );
+    if (recovered.length > 1) {
+      Object.assign(next, applyCmsLocationsToFilters(next, recovered));
+    }
+  }
+
+  console.log(
+    '[SEARCH_CONTEXT AFTER]',
+    JSON.stringify({
+      action: String(message || '').slice(0, 80),
+      communities: next.locations || [],
+      purpose: next.purpose || null,
+      propertyType: typesFromFilters(next),
+      bedrooms: next.bedroomsAny ? 'any' : next.bedrooms ?? null,
+      locked: next.areaScopeLocked === true,
+      locationAny: next.locationAny === true,
+    })
+  );
+
   if (!next.purpose && !isExplicitListingPurpose(message)) {
     next.purpose = last.purpose || profile.purpose || intentToPurpose(profile.intent) || null;
   }
@@ -4118,6 +4512,23 @@ function qualifyListingSearch(message, profile = {}) {
     };
   }
   if ((hasListingContext || extracted) && emptyChoice?.nearby) {
+    // Locked community scope: never widen to generic nearby Dubai areas.
+    if (isAreaScopeLocked({ ...profile, lastSearchFilters: next })) {
+      return {
+        type: 'clarify',
+        missing: null,
+        profilePatch: {
+          purpose: next.purpose || profile.purpose,
+          intent: purposeToIntent(next.purpose) || profile.intent,
+          lastSearchFilters: next,
+          propertySearch: propertySearchFromFilters(next),
+          slotFlow: { awaiting: 'alternatives', alternatives: null },
+        },
+        reply:
+          'I can only adjust filters inside the communities we already selected. Try a different bedroom count, property type, or purpose.',
+        options: ['Change bedrooms', 'Change property type', 'Buy', 'Rent', 'Off-plan'],
+      };
+    }
     return {
       type: 'clarify',
       missing: 'location',
@@ -4132,8 +4543,27 @@ function qualifyListingSearch(message, profile = {}) {
     };
   }
 
-  const missing = nextMissingListingSlot(next);
+  const missing = nextMissingListingSlot(next, {
+    ...profile,
+    lastSearchFilters: next,
+    recommendedLocations:
+      Array.isArray(profile.recommendedLocations) && profile.recommendedLocations.length
+        ? profile.recommendedLocations
+        : recoverRecommendedLocations(profile, { message }),
+    sourceContext: profile.sourceContext,
+    propertySearch: propertySearchFromFilters(next),
+    searchSource: next.source || profile.searchSource || null,
+  });
   const question = missing ? listingSlotQuestion(missing, next) : null;
+  const preferredAreas =
+    Array.isArray(next.locations) && next.locations.length
+      ? next.locations.slice()
+      : next.location
+        ? [next.location]
+        : undefined;
+  // Explicit location change clears the locked multi-community CMS context.
+  const scopeUnlocked =
+    wantsAreaScopeUnlock(message) && next.areaScopeLocked !== true;
   const patch = {
     purpose: next.purpose || profile.purpose || null,
     intent:
@@ -4141,11 +4571,27 @@ function qualifyListingSearch(message, profile = {}) {
       normalizeIntentValue(profile.intent) ||
       purposeToIntent(profile.purpose) ||
       null,
-    preferredAreas: next.location ? [next.location] : undefined,
+    preferredAreas,
     bedrooms: requiresBedroomsForSearch(next)
       ? next.bedrooms ?? next.bedroomsMin ?? null
       : null,
     lastSearchFilters: next,
+    searchSource: next.source || profile.searchSource || null,
+    propertySearch: propertySearchFromFilters(next),
+    recommendedLocations: scopeUnlocked
+      ? []
+      : Array.isArray(next.locations) && next.locations.length > 1
+        ? next.locations.map((name) => ({ name }))
+        : profile.recommendedLocations,
+    sourceContext: scopeUnlocked
+      ? null
+      : profile.sourceContext ||
+        (Array.isArray(next.locations) && next.locations.length > 1
+          ? buildSourceContextFromRecommended(
+              next.locations.map((name) => ({ name })),
+              { type: 'community_group' }
+            )
+          : undefined),
     slotFlow: question
       ? { awaiting: question.awaiting, alternatives: null, lastAskedField: missing }
       : { awaiting: null, alternatives: null, lastAskedField: null },
@@ -4213,7 +4659,11 @@ function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
   const lastTypes = typesFromFilters(last);
   const preservedTypes = lastTypes.length ? lastTypes : incomingTypes;
   const locationChanged = locationProvided && lastLocationSet && textsDiffer(incomingLocation, last.location);
-  const incomingAny = filters.locationAny === true || isUnrestrictedLocationPhrase(filters.location);
+  let incomingAny = filters.locationAny === true || isUnrestrictedLocationPhrase(filters.location);
+  const locked =
+    last.areaScopeLocked === true &&
+    ((Array.isArray(last.locations) && last.locations.length > 0) || !!sanitizeSearchLocation(last.location));
+  if (locked) incomingAny = false;
 
   const merged = {
     location: incomingAny
@@ -4228,7 +4678,8 @@ function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
         : Array.isArray(last.locations)
           ? last.locations.map((v) => String(v || '').trim()).filter(Boolean)
           : [],
-    locationAny: incomingAny || (!locationProvided && last.locationAny === true),
+    locationAny: locked ? false : incomingAny || (!locationProvided && last.locationAny === true),
+    areaScopeLocked: locked || last.areaScopeLocked === true,
     bedrooms: last.bedrooms ?? null,
     bedroomsMin: last.bedroomsMin ?? null,
     bedroomsAny: last.bedroomsAny === true,
@@ -4245,9 +4696,18 @@ function resolveEffectiveFilters(filters = {}, lastSearchFilters = {}) {
     purpose: last.purpose || null,
     goldenVisaSearch: last.goldenVisaSearch === true || filters.goldenVisaSearch === true,
     source: filters.source || last.source || null,
+    typesAny: last.typesAny === true && !preservedTypes.length,
   };
   if (locationProvided) merged.locationAny = false;
+  if (locked && (!merged.locations || !merged.locations.length)) {
+    merged.locations = Array.isArray(last.locations) ? last.locations.slice() : [];
+    merged.location = last.location || merged.locations.join(', ') || null;
+  }
   applyTypesToFilters(merged, preservedTypes);
+  if (merged.typesAny && !typesFromFilters(merged).length) {
+    merged.types = [];
+    merged.type = null;
+  }
   return normalizeSearchProfileAfterPatch(last, merged);
 }
 
@@ -4712,6 +5172,11 @@ function extractSearchPatch(message, previous = {}, { awaiting } = {}) {
     }
   }
   if (awaiting === 'propertyType' && shortSlotReply) {
+    if (/^(any|any type|any property|any property type)$/i.test(raw.replace(/[.!?]/g, ''))) {
+      changes.types = [];
+      changes.typesAny = true;
+      return changes;
+    }
     const types = parsePropertyTypesFromMessage(raw);
     if (types.length) {
       changes.types = types;
@@ -4721,13 +5186,28 @@ function extractSearchPatch(message, previous = {}, { awaiting } = {}) {
   if ((awaiting === 'location' || awaiting === 'nearbyArea') && shortSlotReply) {
     const standaloneAny =
       /^(any|all|anywhere|skip|no preference|any area|any location)$/i.test(raw.replace(/[.!?]/g, ''));
+    // Locked community scope: ignore "Any area" chip replies.
+    if (
+      (standaloneAny || isUnrestrictedLocationPhrase(raw)) &&
+      previous.areaScopeLocked === true &&
+      Array.isArray(previous.locations) &&
+      previous.locations.length
+    ) {
+      return changes;
+    }
     if (standaloneAny || isUnrestrictedLocationPhrase(raw)) {
       changes.locationAny = true;
       return changes;
     }
-    const location = parseLocationFromMessage(raw) || parseLocationReply(raw);
+    const multi = parseLocationsFromMessage(raw);
+    if (multi.length > 1) {
+      changes.locations = multi;
+      changes.areaScopeLocked = true;
+      return changes;
+    }
+    const location = multi[0] || parseLocationFromMessage(raw) || parseLocationReply(raw);
     if (location) {
-      changes.location = location;
+      changes.location = canonicalizeSearchLocation(location) || location;
       return changes;
     }
   }
@@ -4771,17 +5251,42 @@ function extractSearchPatch(message, previous = {}, { awaiting } = {}) {
   const awaitingLocation = awaiting === 'location' || awaiting === 'nearbyArea';
   const standaloneAnyLocation =
     awaitingLocation && /^(any|all|anywhere|skip|no preference)$/i.test(raw.replace(/[.!?]/g, ''));
-  const unrestrictedLocation = isUnrestrictedLocationPhrase(raw) || standaloneAnyLocation;
-  let location = unrestrictedLocation ? null : parseLocationFromMessage(message);
-  if (!unrestrictedLocation && !location && awaitingLocation) {
-    location = parseLocationReply(message);
+  let unrestrictedLocation = isUnrestrictedLocationPhrase(raw) || standaloneAnyLocation;
+  // Never widen locked community scope via "Any area" / "anywhere".
+  if (
+    unrestrictedLocation &&
+    previous.areaScopeLocked === true &&
+    Array.isArray(previous.locations) &&
+    previous.locations.length &&
+    !wantsAreaScopeUnlock(raw)
+  ) {
+    unrestrictedLocation = false;
+  }
+  // Standalone "Any type" outside a slot.
+  if (
+    /^(any|any type|any property|any property type)$/i.test(raw.replace(/[.!?]/g, '')) &&
+    (awaiting === 'propertyType' || awaiting === null || awaiting === undefined)
+  ) {
+    changes.types = [];
+    changes.typesAny = true;
+  }
+  // Prefer multi-community extraction so "DHE, JVC, and Al Furjan" stays an array.
+  const namedLocations = unrestrictedLocation ? [] : parseLocationsFromMessage(message);
+  let location = null;
+  if (!unrestrictedLocation) {
+    if (namedLocations.length === 1) location = namedLocations[0];
+    else if (namedLocations.length === 0) location = parseLocationFromMessage(message);
+    if (!location && awaitingLocation) location = parseLocationReply(message);
   }
   const skipBedsForLocationAny =
     unrestrictedLocation && !/\b(studio|bed|br|bhk|bedroom)s?\b/i.test(raw);
   const skipBedsForAnyReply = awaiting !== 'bedrooms' && isStandaloneAnyBudgetReply(raw);
   const skipLocationForAnyReply =
     skipBedsForAnyReply && awaiting !== 'location' && awaiting !== 'nearbyArea';
-  if (skipLocationForAnyReply) location = null;
+  if (skipLocationForAnyReply) {
+    location = null;
+    namedLocations.length = 0;
+  }
   const beds = skipBedsForLocationAny || skipBedsForAnyReply ? null : parseBedroomChoice(message);
   const budget = changes.budget
     ? null
@@ -4801,8 +5306,11 @@ function extractSearchPatch(message, previous = {}, { awaiting } = {}) {
   }
   if (unrestrictedLocation) {
     changes.locationAny = true;
+  } else if (namedLocations.length > 1) {
+    changes.locations = namedLocations;
+    changes.areaScopeLocked = true;
   } else if (location) {
-    changes.location = location;
+    changes.location = canonicalizeSearchLocation(location) || location;
   }
   if (beds) changes.bedrooms = beds;
   if (budget) changes.budget = budget;
@@ -4821,14 +5329,93 @@ function extractSearchPatch(message, previous = {}, { awaiting } = {}) {
 function mergeSearchPatch(previous, patch, message = '') {
   const next = copySearchFilters(previous);
   const changes = patch && typeof patch === 'object' ? patch : {};
-  if (changes.types) {
+  if (changes.typesAny === true) {
+    next.types = [];
+    next.type = null;
+    next.typesAny = true;
+  } else if (changes.types) {
     applyTypesToFilters(next, mergePropertyTypes(typesFromFilters(next), changes.types, message));
+    next.typesAny = false;
   }
   if (changes.locationAny === true) {
-    applyUnrestrictedLocation(next);
-  } else if (Object.prototype.hasOwnProperty.call(changes, 'location')) {
-    next.location = changes.location;
+    if (previous.areaScopeLocked === true && Array.isArray(previous.locations) && previous.locations.length) {
+      // Ignore — keep locked communities.
+      next.locations = previous.locations
+        .map((v) => canonicalizeSearchLocation(v) || String(v || '').trim())
+        .filter(Boolean);
+      next.location = previous.location || next.locations.join(', ');
+      next.locationAny = false;
+      next.areaScopeLocked = true;
+    } else {
+      applyUnrestrictedLocation(next);
+    }
+  } else if (Array.isArray(changes.locations) && changes.locations.length) {
+    next.locations = changes.locations
+      .map((v) => canonicalizeSearchLocation(v) || String(v || '').trim())
+      .filter(Boolean);
+    // De-dupe canonical names while preserving order.
+    const seen = new Set();
+    next.locations = next.locations.filter((n) => {
+      const key = n.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     next.locationAny = false;
+    if (next.locations.length === 1) next.location = next.locations[0];
+    else if (next.locations.length > 1) next.location = next.locations.join(', ');
+    else next.location = null;
+    if (next.locations.length > 1 || changes.areaScopeLocked === true || previous.areaScopeLocked === true) {
+      next.areaScopeLocked = next.locations.length > 0;
+    }
+  } else if (Object.prototype.hasOwnProperty.call(changes, 'location')) {
+    const incoming = changes.location
+      ? canonicalizeSearchLocation(changes.location) || String(changes.location).trim()
+      : null;
+    next.locationAny = false;
+    // Locked multi-community scope: never collapse to a single alias hit unless unlocked.
+    if (
+      previous.areaScopeLocked === true &&
+      Array.isArray(previous.locations) &&
+      previous.locations.length > 1 &&
+      !wantsAreaScopeUnlock(message)
+    ) {
+      next.locations = previous.locations
+        .map((v) => canonicalizeSearchLocation(v) || String(v || '').trim())
+        .filter(Boolean);
+      next.location = previous.location || next.locations.join(', ');
+      next.areaScopeLocked = true;
+    } else if (incoming) {
+      next.location = incoming;
+      next.locations = [incoming];
+      if (previous.areaScopeLocked && !wantsAreaScopeUnlock(message)) {
+        next.areaScopeLocked = true;
+      }
+    } else {
+      next.location = null;
+      next.locations = [];
+    }
+  }
+  // Preserve multi-area CMS scope when only purpose/type/beds/budget change.
+  if (
+    !Object.prototype.hasOwnProperty.call(changes, 'location') &&
+    !(Array.isArray(changes.locations) && changes.locations.length) &&
+    changes.locationAny !== true &&
+    Array.isArray(previous.locations) &&
+    previous.locations.length > 0
+  ) {
+    next.locations = previous.locations
+      .map((v) => canonicalizeSearchLocation(v) || String(v || '').trim())
+      .filter(Boolean);
+    if (!next.location && next.locations.length) {
+      next.location =
+        next.locations.length === 1 ? next.locations[0] : next.locations.join(', ');
+    }
+    if (previous.source) next.source = previous.source;
+    if (previous.areaScopeLocked === true || next.locations.length > 1) next.areaScopeLocked = true;
+  }
+  if (Object.prototype.hasOwnProperty.call(changes, 'areaScopeLocked')) {
+    next.areaScopeLocked = changes.areaScopeLocked === true;
   }
   if (changes.bedrooms) {
     applyBedroomChoice(next, changes.bedrooms);
@@ -4842,6 +5429,7 @@ function mergeSearchPatch(previous, patch, message = '') {
   if (changes.budget) applyBudgetChoice(next, changes.budget);
   if (changes.furnished) next.furnished = changes.furnished;
   if (changes.purpose) next.purpose = changes.purpose;
+  if (changes.source) next.source = changes.source;
   if (
     changes.clearAmenities ||
     changes.amenities ||
@@ -5207,6 +5795,28 @@ async function fetchPropertyCards(filters, search) {
       // Page failed verification — do not claim unmatched inventory.
       remainingAfterExclude = 0;
       total = 0;
+    }
+  }
+
+  // Strict community scope: never return cards outside the locked active areas.
+  if (
+    filters.areaScopeLocked === true ||
+    (filters.source === SEARCH_SOURCE_CMS &&
+      Array.isArray(filters.locations) &&
+      filters.locations.length > 0)
+  ) {
+    const scope = (filters.locations || [])
+      .map((name) => String(name || '').trim())
+      .filter(Boolean)
+      .map((name) => ({ name }));
+    if (scope.length) {
+      const before = properties.length;
+      properties = filterPropertiesToActiveCommunities(properties, scope);
+      const dropped = before - properties.length;
+      if (dropped > 0) {
+        remainingAfterExclude = Math.max(0, remainingAfterExclude - dropped);
+        total = Math.max(0, total - dropped);
+      }
     }
   }
 
@@ -5832,6 +6442,7 @@ function canonicalSearchState(filters = {}) {
         : hasLocationConstraint(filters)
           ? [String(filters.location).trim()]
           : [],
+    areaScopeLocked: filters.areaScopeLocked === true,
     source: filters.source || null,
     minPrice,
     maxPrice,
@@ -6149,6 +6760,8 @@ function composeSearchReply(ctx = {}) {
       }
       return stripExposedUrlsFromReply(lines.filter(Boolean).join('\n\n').replace(/\n\n+/g, '\n\n'));
     }
+    const partial = ctx.partialCommunityNote || partialCommunityMissNote(filters, ctx.exactListings || []);
+    if (partial) lines.push(partial);
     const count = Number(ctx.exactMatchCount);
     if (!/you're looking for/i.test(ack)) {
       lines.push(
@@ -6428,6 +7041,7 @@ async function buildSearchResponseContext(effectiveFilters, {
       acknowledgement,
       exactMatchCount: Number.isFinite(Number(total)) ? Number(total) : 0,
       exactListings: propertyCards.slice(0, 3),
+      partialCommunityNote: partialCommunityMissNote(effectiveFilters, propertyCards),
       marketStats,
       overallMarketStats,
       marketStatsScope: scope,
@@ -6727,6 +7341,27 @@ async function searchProperties(
   }
 
   const effectiveFilters = resolveEffectiveFilters(filters, lastSearchFilters);
+  // Preserve locked community scope even if the model omitted locations.
+  if (
+    lastSearchFilters?.areaScopeLocked === true ||
+    lastSearchFilters?.source === SEARCH_SOURCE_CMS ||
+    (Array.isArray(lastSearchFilters?.locations) && lastSearchFilters.locations.length)
+  ) {
+    Object.assign(
+      effectiveFilters,
+      ensureActiveAreaScope(
+        {
+          lastSearchFilters,
+          searchSource: lastSearchFilters?.source,
+          recommendedLocations: [],
+          sourceContext: {
+            areas: Array.isArray(lastSearchFilters?.locations) ? lastSearchFilters.locations : [],
+          },
+        },
+        effectiveFilters
+      )
+    );
+  }
   clearUntrustedBedrooms(effectiveFilters);
 
   if (!showMore) {
@@ -6734,6 +7369,18 @@ async function searchProperties(
       awaiting: slotFlow?.awaiting,
     });
     Object.assign(effectiveFilters, overlaid);
+    if (
+      effectiveFilters.areaScopeLocked === true ||
+      (Array.isArray(lastSearchFilters?.locations) && lastSearchFilters.locations.length)
+    ) {
+      if (!Array.isArray(effectiveFilters.locations) || !effectiveFilters.locations.length) {
+        effectiveFilters.locations = (lastSearchFilters.locations || []).slice();
+        effectiveFilters.location =
+          lastSearchFilters.location || effectiveFilters.locations.join(', ');
+        effectiveFilters.locationAny = false;
+        effectiveFilters.areaScopeLocked = true;
+      }
+    }
   }
 
   const purpose = trustedPurpose({
@@ -7347,11 +7994,50 @@ async function searchContent({ query }) {
   }));
 
   // Related pages are returned as `sources` chips — never instruct "Read more: Title" in prose.
-  const recommendedLocations = extractRecommendedLocationsFromChunks(shortChunks);
+  const topic = matchCmsTopicScopeFromChunks(shortChunks);
+  const recommendedLocations = topic
+    ? locationsForTopicScope(topic)
+    : extractRecommendedLocationsFromChunks(shortChunks);
   const profilePatch = {};
+  let suggestedActions = [];
+  let quickReplies = [];
+  let primaryCta = null;
   if (recommendedLocations.length) {
     profilePatch.recommendedLocations = recommendedLocations;
     profilePatch.searchSource = SEARCH_SOURCE_CMS;
+    profilePatch.sourceContext = buildSourceContextFromRecommended(recommendedLocations, {
+      type: 'community_group',
+      topic: topic || undefined,
+      source: topic?.id || shortChunks[0]?.slug || shortChunks[0]?.title || null,
+      title: shortChunks[0]?.title || topic?.id || null,
+      slug: shortChunks[0]?.slug || topic?.id || null,
+    });
+    profilePatch.preferredAreas = recommendedLocations.map((r) => r.name);
+    const seeded = applyCmsLocationsToFilters(
+      { ...emptySearchFilters(), source: SEARCH_SOURCE_CMS },
+      recommendedLocations
+    );
+    profilePatch.lastSearchFilters = seeded;
+    profilePatch.propertySearch = propertySearchFromFilters(seeded);
+
+    // Best Communities (and other multi-community topics): structured badge, not free-text.
+    if (recommendedLocations.length > 1) {
+      const badge = buildViewContextCommunitiesAction(
+        topic?.id || profilePatch.sourceContext?.source || 'community_group',
+        recommendedLocations
+      );
+      suggestedActions = [badge];
+      quickReplies = [
+        {
+          label: badge.label,
+          value: badge.label,
+          action: badge.action,
+          contextKey: badge.contextKey,
+          communities: badge.communities,
+        },
+      ];
+      primaryCta = badge;
+    }
   }
 
   return {
@@ -7363,7 +8049,9 @@ async function searchContent({ query }) {
       count: rows.length,
       chunks: shortChunks,
       hasRockyContent: rows.length > 0,
-      primaryCta: null,
+      primaryCta,
+      suggestedActions,
+      quickReplies,
       recommendedLocations,
       instruction: contentAnswerInstruction(rows.length > 0),
     },
@@ -7658,6 +8346,9 @@ module.exports = {
   isVagueConfirm,
   normalizePropertyType,
   parseLocationFromMessage,
+  parseLocationsFromMessage,
+  canonicalizeSearchLocation,
+  partialCommunityMissNote,
   parseLocationReply,
   wantsDifferentLocation,
   isUnrestrictedLocationPhrase,
@@ -7677,6 +8368,7 @@ module.exports = {
   locationEmptyNearbyReply,
   nearbyAreaOptions,
   matchesNamedOption,
+  alternativeInventoryLine,
   foundListingsReply,
   purposeClarificationReply,
   bedroomsClarificationReply,
@@ -7719,15 +8411,53 @@ module.exports = {
   isCmsSearchSource,
   CMS_HANDOFF_PURPOSE,
   CMS_HANDOFF_LOCATION,
+  CMS_HANDOFF_PROPERTY_TYPE,
+  CMS_IMMEDIATE_LISTING_THRESHOLD,
   SEARCH_SOURCE_CMS,
   SEARCH_SOURCE_DIRECT,
   probeCmsLocationInventory,
+  probeCmsSegmentFacets,
+  inventoryTotals,
   purposeOptionFromInventory,
   locationInventoryOptions,
+  areaInventorySummaryPayload,
+  communitySummariesFromInventory,
+  cmsCommunityPreviewReply,
+  filterPropertiesToActiveCommunities,
+  propertyMatchesCommunity,
+  fetchCmsCommunityPreviewProperties,
+  matchCmsTopicScopeFromChunks,
+  matchCmsTopicScopeFromProfile,
+  matchCmsTopicScopeFromText,
+  locationsForTopicScope,
+  cmsHandoffInventorySummaryReply,
   cmsHandoffIntroReply,
   cmsHandoffLocationReply,
+  cmsHandoffPropertyTypeReply,
+  cmsHandoffBedroomsReply,
+  propertyTypeOptionsFromInventory,
+  bedroomOptionsFromValues,
   parseCmsAllAreasChoice,
   matchRecommendedLocation,
   applyCmsLocationsToFilters,
+  ensureCmsAreasOnFilters,
+  ensureActiveAreaScope,
+  getActiveAreas,
+  isAreaScopeLocked,
   describeCmsLocations,
+  buildSourceContextFromRecommended,
+  copySourceContext,
+  emptyPropertySearch,
+  copyPropertySearch,
+  propertySearchFromFilters,
+  recommendedLocationsFromProfile,
+  recoverRecommendedLocations,
+  VIEW_CONTEXT_COMMUNITY_PROPERTIES,
+  VIEW_CONTEXT_COMMUNITIES_LABEL,
+  isViewContextCommunityPropertiesAction,
+  isViewContextCommunitiesMessage,
+  communitiesForContextKey,
+  buildViewContextCommunitiesAction,
+  wantsAreaScopeUnlock,
+  unlockAreaScope,
 };
