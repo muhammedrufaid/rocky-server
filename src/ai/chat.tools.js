@@ -69,6 +69,12 @@ const CONTENT_LIMIT = 8;
 const PROPERTY_LIMIT = 6;
 const MAX_RELATED_CONTENT_ACTIONS = 2;
 
+/** Per-turn suggestion/action diagnostics. Enable with CHAT_DEBUG_TURN_META=true. Never log message text or contact details. */
+function traceTurnMeta(stage, data) {
+  if (process.env.CHAT_DEBUG_TURN_META !== 'true') return;
+  console.log('[TURN_META]', stage, JSON.stringify(data));
+}
+
 const TOOL_DEFINITIONS = [
   {
     type: 'function',
@@ -7791,6 +7797,50 @@ function scoreKeywordContentHit(doc, tokens = []) {
   return Math.min(0.99, score);
 }
 
+/**
+ * A keyword hit is topical when at least half of the query tokens appear in the document's
+ * descriptive fields (title/slug/url/headings/excerpt/tags/category). Body-only mentions are
+ * incidental: fine as answer context, but they must not drive related-content chips or
+ * property/community actions for the current turn.
+ */
+function keywordHitIsTopical(doc = {}, tokens = []) {
+  if (!tokens.length) return false;
+  const descriptive = [
+    doc.title,
+    doc.slug,
+    doc.url,
+    doc.excerpt,
+    doc.category,
+    ...(Array.isArray(doc.tags) ? doc.tags : []),
+    ...(Array.isArray(doc.headings) ? doc.headings : []),
+  ]
+    .map((v) => String(v || '').toLowerCase())
+    .join(' ');
+  const hits = tokens.filter(
+    (token) => descriptive.includes(token) || descriptive.includes(token.replace(/\s+/g, '-'))
+  ).length;
+  return hits >= Math.ceil(tokens.length / 2);
+}
+
+/** Body text contains every term of a multi-term query (single-term body mentions are too weak). */
+function keywordHitCoversAllTerms(doc = {}, tokens = []) {
+  if (tokens.length < 2) return false;
+  const content = String(doc.content || '').toLowerCase();
+  return tokens.every((token) => content.includes(token));
+}
+
+/** Rows retrieved because they are about the query (vector hit or topical keyword hit). */
+function topicalContentRows(rows = []) {
+  return (rows || []).filter((row) => row && row.topicalMatch === true);
+}
+
+/** Related-content chip candidates: topical rows, else body hits covering every query term. */
+function relatedContentRows(rows = []) {
+  const topical = topicalContentRows(rows);
+  if (topical.length) return topical;
+  return (rows || []).filter((row) => row && row.coversAllTerms === true);
+}
+
 function contentRowKey(row = {}) {
   const sourceId = String(row.sourceId || '').trim();
   const hash = String(row.embeddingHash || '').trim();
@@ -7813,7 +7863,10 @@ function mergeContentSearchRows(vectorRows = [], keywordRows = [], limit = CONTE
     const key = contentRowKey(row);
     const existing = byKey.get(key);
     if (!existing || Number(row.score || 0) > Number(existing.score || 0)) {
-      byKey.set(key, row);
+      const topical = row.topicalMatch === true || existing?.topicalMatch === true;
+      byKey.set(key, topical ? { ...row, topicalMatch: true } : row);
+    } else if (row.topicalMatch === true && existing.topicalMatch !== true) {
+      byKey.set(key, { ...existing, topicalMatch: true });
     }
   }
   return [...byKey.values()]
@@ -7871,6 +7924,8 @@ async function keywordSearchContent(query, limit = CONTENT_LIMIT) {
       headings: doc.headings,
       embeddingHash: doc.embeddingHash,
       score: scoreKeywordContentHit(doc, tokens),
+      topicalMatch: keywordHitIsTopical(doc, tokens),
+      coversAllTerms: keywordHitCoversAllTerms(doc, tokens),
     }))
     .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))
     .slice(0, limit);
@@ -7964,17 +8019,22 @@ async function searchContent({ query }) {
     keywordRows = [];
   }
 
-  const rows = mergeContentSearchRows(vectorRows, keywordRows, CONTENT_LIMIT);
+  const rows = mergeContentSearchRows(
+    vectorRows.map((row) => ({ ...row, topicalMatch: true })),
+    keywordRows,
+    CONTENT_LIMIT
+  );
+  const relatedRows = relatedContentRows(rows);
 
   const ranked = rankRelatedContentSources(
-    rows.map((row) => ({
+    relatedRows.map((row) => ({
       title: row.title,
       url: row.url,
       sourceType: row.sourceType,
     }))
   );
   const sources = isGoldenVisaMention(q)
-    ? filterGoldenVisaRelatedSources(ranked.length ? ranked : rows)
+    ? filterGoldenVisaRelatedSources(ranked.length ? ranked : relatedRows)
     : ranked;
 
   const shortChunks = rows.map((row) => ({
@@ -7994,10 +8054,13 @@ async function searchContent({ query }) {
   }));
 
   // Related pages are returned as `sources` chips — never instruct "Read more: Title" in prose.
-  const topic = matchCmsTopicScopeFromChunks(shortChunks);
+  // Community actions come only from topical chunks, so an article that merely mentions the
+  // query term cannot attach its community badge or re-seed the session's search scope.
+  const topicalChunks = shortChunks.filter((_, i) => rows[i]?.topicalMatch === true);
+  const topic = matchCmsTopicScopeFromChunks(topicalChunks);
   const recommendedLocations = topic
     ? locationsForTopicScope(topic)
-    : extractRecommendedLocationsFromChunks(shortChunks);
+    : extractRecommendedLocationsFromChunks(topicalChunks);
   const profilePatch = {};
   let suggestedActions = [];
   let quickReplies = [];
@@ -8039,6 +8102,19 @@ async function searchContent({ query }) {
       primaryCta = badge;
     }
   }
+
+  traceTurnMeta('search_content', {
+    candidates: rows.map((row) => ({
+      title: row.title,
+      score: Number(Number(row.score || 0).toFixed(3)),
+      topical: row.topicalMatch === true,
+      coversAllTerms: row.coversAllTerms === true,
+    })),
+    topic: topic?.id || null,
+    recommendedLocations: recommendedLocations.map((r) => r.name),
+    suggestedActions: suggestedActions.map((a) => a.label),
+    sources: sources.map((s) => s.title),
+  });
 
   return {
     propertyCards: [],
@@ -8375,6 +8451,11 @@ module.exports = {
   rankRelatedContentSources,
   contentSearchKeywords,
   mergeContentSearchRows,
+  keywordHitIsTopical,
+  keywordHitCoversAllTerms,
+  topicalContentRows,
+  relatedContentRows,
+  traceTurnMeta,
   contentAnswerInstruction,
   ROCKY_CONTENT_SOURCE_TYPES,
   isHomepageUrl,

@@ -72,6 +72,10 @@ const {
   rankRelatedContentSources,
   contentSearchKeywords,
   mergeContentSearchRows,
+  keywordHitIsTopical,
+  keywordHitCoversAllTerms,
+  topicalContentRows,
+  relatedContentRows,
   contentAnswerInstruction,
   isHomepageUrl,
   emptyResultsReply,
@@ -810,6 +814,95 @@ test('content search merge keeps distinct chunks and prefers higher score', () =
   assert.equal(merged[0].score, 0.92);
   assert.match(merged[0].content, /keyword hit/i);
   assert.equal(merged[1].sourceId, '2');
+});
+
+test('keyword hit is topical only when query tokens appear in descriptive fields', () => {
+  const bodyOnly = {
+    title: 'Best Communities for Families in Dubai',
+    slug: 'best-communities-for-families-dubai',
+    headings: ['Dubai Hills Estate', 'Al Furjan'],
+    content: 'Always check the broker is registered with the regulator (XYZA) before you pay a deposit.',
+  };
+  assert.equal(keywordHitIsTopical(bodyOnly, ['xyza']), false);
+  assert.equal(keywordHitIsTopical({ ...bodyOnly, title: 'What is XYZA?' }, ['xyza']), true);
+  assert.equal(keywordHitIsTopical(bodyOnly, ['best', 'communities', 'families']), true);
+  // Half of the tokens must match descriptive fields.
+  assert.equal(keywordHitIsTopical(bodyOnly, ['families', 'xyza', 'deposit']), false);
+  assert.equal(keywordHitIsTopical(bodyOnly, ['families', 'xyza']), true);
+  assert.equal(keywordHitIsTopical(bodyOnly, []), false);
+});
+
+test('related chips fall back to body hits only when every term of a multi-term query matches', () => {
+  const doc = { title: 'Buying Guide', content: 'Budget for the XYZ transfer fee of 4% on completion.' };
+  assert.equal(keywordHitCoversAllTerms(doc, ['xyz', 'transfer', 'fee']), true);
+  assert.equal(keywordHitCoversAllTerms(doc, ['xyz', 'mortgage']), false);
+  assert.equal(keywordHitCoversAllTerms(doc, ['xyz']), false);
+
+  const topical = { title: 'Topical', topicalMatch: true, coversAllTerms: false };
+  const bodyAll = { title: 'Body all terms', topicalMatch: false, coversAllTerms: true };
+  const incidental = { title: 'Incidental', topicalMatch: false, coversAllTerms: false };
+  assert.deepEqual(relatedContentRows([bodyAll, topical, incidental]).map((r) => r.title), ['Topical']);
+  assert.deepEqual(relatedContentRows([bodyAll, incidental]).map((r) => r.title), ['Body all terms']);
+  assert.deepEqual(relatedContentRows([incidental]), []);
+});
+
+test('content search merge keeps topical flag from either duplicate', () => {
+  const base = {
+    sourceType: 'blog',
+    sourceId: '1',
+    title: 'Guide',
+    url: 'https://www.rockyrealestate.com/blogs/guide',
+    content: 'same chunk',
+    embeddingHash: 'hash-a',
+  };
+  const [higherNonTopical] = mergeContentSearchRows(
+    [{ ...base, score: 0.8, topicalMatch: true }],
+    [{ ...base, score: 0.9, topicalMatch: false }],
+    5
+  );
+  assert.equal(higherNonTopical.score, 0.9);
+  assert.equal(higherNonTopical.topicalMatch, true);
+  const [lowerTopical] = mergeContentSearchRows(
+    [{ ...base, score: 0.8, topicalMatch: false }],
+    [{ ...base, score: 0.7, topicalMatch: true }],
+    5
+  );
+  assert.equal(lowerTopical.score, 0.8);
+  assert.equal(lowerTopical.topicalMatch, true);
+});
+
+test('incidental body mention of a community article does not produce community actions', () => {
+  const rows = [
+    {
+      title: 'Buying Property as a Foreigner',
+      slug: 'buying-property-foreigner',
+      content: 'Use a licensed XYZA broker.',
+      topicalMatch: false,
+    },
+    {
+      title: 'Best Communities for Families in Dubai',
+      slug: 'best-communities-for-families-dubai',
+      content: 'Dubai Hills Estate, JVC and Al Furjan. Check your agent is XYZA registered.',
+      topicalMatch: false,
+    },
+    {
+      title: 'Downtown Jebel Ali and Dubai South',
+      slug: 'downtown-jebel-ali-dubai-south',
+      content: 'Verify prices with XYZA and the land department.',
+      topicalMatch: false,
+    },
+  ];
+  // All rows remain available as answer context, but none may drive actions.
+  assert.equal(topicalContentRows(rows).length, 0);
+  assert.deepEqual(extractRecommendedLocationsFromChunks(topicalContentRows(rows)), []);
+  // Without gating, the same retrieval would have forced the 3-community topic badge.
+  assert.equal(extractRecommendedLocationsFromChunks(rows).length, 3);
+
+  const topicalRows = rows.map((r, i) => (i === 1 ? { ...r, topicalMatch: true } : r));
+  assert.deepEqual(
+    extractRecommendedLocationsFromChunks(topicalContentRows(topicalRows)).map((l) => l.name),
+    ['Dubai Hills Estate', 'Jumeirah Village Circle', 'Al Furjan']
+  );
 });
 
 test('content answer instruction prioritizes Rocky hits and forbids vague filler', () => {
