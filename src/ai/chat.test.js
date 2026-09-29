@@ -4,7 +4,12 @@
  */
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { getSystemPrompt } = require('./chat.prompt');
+const {
+  getSystemPrompt,
+  ANSWER_DEPTH,
+  classifyAnswerDepth,
+  answerLengthInstruction,
+} = require('./chat.prompt');
 const {
   parseSellIntent,
   parsePurposeFromMessage,
@@ -919,6 +924,90 @@ test('content answer instruction prioritizes Rocky hits and forbids vague filler
   assert.match(withoutHits, /No sufficiently relevant Rocky/i);
   assert.match(withoutHits, /Do NOT claim the answer came from Rocky/i);
   assert.match(withoutHits, /verified with the relevant authority/i);
+  // Length is set per turn, not by a fixed sentence cap that would truncate multi-part answers.
+  assert.match(withHits, /RESPONSE LENGTH note/);
+  assert.doesNotMatch(withHits, /at most 2–3 short sentences/);
+  assert.match(withHits, /never two/i);
+});
+
+test('answer depth: simple definitions and yes/no questions are brief', () => {
+  for (const q of ['What is Ejari?', "What's a title deed?", 'Who regulates brokers in Dubai?', 'Can expats own freehold property?']) {
+    assert.equal(classifyAnswerDepth(q), ANSWER_DEPTH.BRIEF, q);
+  }
+});
+
+test('answer depth: area recommendations get options plus one differentiator', () => {
+  for (const q of ['Good areas near Downtown for couples', 'Which communities are best for investors?', 'Top neighbourhoods for expats']) {
+    assert.equal(classifyAnswerDepth(q), ANSWER_DEPTH.RECOMMENDATION, q);
+  }
+});
+
+test('answer depth: costs, processes and comparisons are complete but compact', () => {
+  for (const q of [
+    'What fees does a seller pay on transfer?',
+    'What documents are required to rent an apartment?',
+    'Difference between freehold and leasehold',
+    'How do foreigners get a mortgage?',
+  ]) {
+    assert.equal(classifyAnswerDepth(q), ANSWER_DEPTH.COMPLEX, q);
+  }
+});
+
+test('answer depth: explicit detail requests override the concise default', () => {
+  for (const q of ['Explain Ejari in detail', 'Give me a full guide to renting', 'Tell me everything about service charges', 'Walk me through a mortgage application', 'tell me more']) {
+    assert.equal(classifyAnswerDepth(q), ANSWER_DEPTH.DETAILED, q);
+  }
+  // Accepting an offer to explain further expands; a bare "yes" otherwise does not.
+  assert.equal(
+    classifyAnswerDepth('Yes please', { previousAssistant: 'Ejari registers leases. I can explain how it affects tenants if you like.' }),
+    ANSWER_DEPTH.DETAILED
+  );
+  assert.equal(
+    classifyAnswerDepth('Yes, explain that', {
+      previousAssistant: 'Ejari registers leases. Would you like a quick explanation of the registration steps?',
+    }),
+    ANSWER_DEPTH.DETAILED
+  );
+  assert.equal(
+    classifyAnswerDepth('Sure', { previousAssistant: 'Want a quick pros/cons summary for your family?' }),
+    ANSWER_DEPTH.DETAILED
+  );
+  assert.notEqual(
+    classifyAnswerDepth('Yes please', { previousAssistant: 'Would you like to view properties in these areas?' }),
+    ANSWER_DEPTH.DETAILED
+  );
+});
+
+test('answer depth: property searches keep text minimal unless detail is requested', () => {
+  assert.equal(classifyAnswerDepth('Show me villas in Arabian Ranches', { propertySearch: true }), ANSWER_DEPTH.LISTING);
+  assert.equal(
+    classifyAnswerDepth('Show me villas and explain the buying process in detail', { propertySearch: true }),
+    ANSWER_DEPTH.DETAILED
+  );
+});
+
+test('answer length instruction states the depth rule and single follow-up', () => {
+  const brief = answerLengthInstruction(ANSWER_DEPTH.BRIEF);
+  assert.match(brief, /^RESPONSE LENGTH FOR THIS TURN/);
+  assert.match(brief, /2–4 short sentences/);
+  assert.match(brief, /at most ONE short follow-up/);
+  assert.match(answerLengthInstruction(ANSWER_DEPTH.COMPLEX), /Cover every essential item/);
+  assert.match(answerLengthInstruction('unknown'), /2–5 short sentences/);
+});
+
+test('process, explanation and transaction-cost questions route to content, not listing intake', () => {
+  for (const q of [
+    'Explain the steps to sell an apartment in Dubai',
+    'What costs are involved when renting a villa?',
+    'What are the fees for buying a townhouse?',
+    'Walk me through the process of buying a flat off-plan',
+  ]) {
+    assert.equal(isContentKnowledgeTopic(q), true, q);
+    assert.equal(shouldSkipPropertySearch(q), true, q);
+  }
+  // Explicit listing requests stay property search.
+  assert.equal(isContentKnowledgeTopic('Show me apartments to buy in JVC under 2M'), false);
+  assert.equal(isExplicitPropertySearchIntent('Show me apartments to buy in JVC under 2M'), true);
 });
 
 test('system prompt encodes Rocky knowledge-retrieval priority', () => {

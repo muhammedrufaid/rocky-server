@@ -1,6 +1,12 @@
 const OpenAI = require('openai');
 const { Conversation } = require('./chat.models');
-const { getSystemPrompt, getListingReplyPrompt } = require('./chat.prompt');
+const {
+  getSystemPrompt,
+  getListingReplyPrompt,
+  ANSWER_DEPTH,
+  classifyAnswerDepth,
+  answerLengthInstruction,
+} = require('./chat.prompt');
 const {
   shouldUseSse,
   isResponseOpen,
@@ -29,6 +35,18 @@ const TOOL_MAX_TOKENS = 1024;
 const REPLY_MAX_TOKENS = 600;
 /** Content replies need enough tokens after reasoning models — 110 was truncating to empty content. */
 const CONTENT_REPLY_MAX_TOKENS = 600;
+/**
+ * Safety ceilings only — length is steered by the per-turn RESPONSE LENGTH note. Multi-part and
+ * explicitly detailed answers get more room so they are not cut off mid-answer.
+ */
+const REPLY_MAX_TOKENS_BY_DEPTH = {
+  [ANSWER_DEPTH.COMPLEX]: 1000,
+  [ANSWER_DEPTH.DETAILED]: 1500,
+};
+
+function replyTokenBudget(depth, fallback) {
+  return Math.max(fallback, REPLY_MAX_TOKENS_BY_DEPTH[depth] || 0);
+}
 const FRIENDLY_CHAT_ERROR = "Sorry, I couldn't pull that up — try again in a moment";
 
 const PROPERTY_CTAS = ['View listing', 'Book a viewing', 'See similar properties'];
@@ -2539,11 +2557,21 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   const abortSignal = sse?.signal || null;
   const streamEnabled = Boolean(sse?.enabled);
 
+  const previousAssistant = [...history].reverse().find((m) => m.role === 'assistant')?.content || '';
+  const answerDepth = classifyAnswerDepth(userMessage, {
+    previousAssistant,
+    propertySearch:
+      isExplicitPropertySearchIntent(userMessage) ||
+      isShowMoreRequest(userMessage) ||
+      isPropertyUiAction(userMessage),
+  });
   const messages = [
     { role: 'system', content: getSystemPrompt(userProfile) },
     ...history,
     { role: 'user', content: userMessage },
+    { role: 'system', content: answerLengthInstruction(answerDepth) },
   ];
+  traceTurnMeta('answer_depth', { sessionId, depth: answerDepth });
 
   const propertyCards = [];
   const sources = [];
@@ -2642,10 +2670,11 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
           hasRockyContent: !!prefetch.modelPayload?.hasRockyContent,
           primaryCta: contentPrimaryCta,
           suggestedActions: contentSuggestedActions,
+          responseLength: answerLengthInstruction(answerDepth),
           instruction:
             prefetch.modelPayload?.instruction ||
             (chunks.length
-              ? 'Rocky content was found. Answer only from these chunks. Preserve exact facts. Answer the question directly — never open with Rocky:/Read more:/According to Rocky:. Related pages are attached as chips — do not duplicate Read more in the prose. If a View properties badge is attached, invite the visitor to explore those communities without asking them to type the request.'
+              ? 'Rocky content was found. Answer only from these chunks. Preserve exact facts. Answer the question directly — never open with Rocky:/Read more:/According to Rocky:. Related pages are attached as chips — do not duplicate Read more in the prose. If a View properties badge is attached, invite the visitor to explore those communities in one short sentence without re-listing them. Follow the RESPONSE LENGTH note for this turn.'
               : 'No Rocky content matched. You may use brief general real-estate knowledge without claiming it is from Rocky.'),
         }),
       });
@@ -2665,10 +2694,10 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         ? { type: 'function', function: { name: 'search_content' } }
         : 'auto',
     max_completion_tokens: contentOnlyReply
-      ? CONTENT_REPLY_MAX_TOKENS
+      ? replyTokenBudget(answerDepth, CONTENT_REPLY_MAX_TOKENS)
       : hasToolResults
-        ? REPLY_MAX_TOKENS
-        : TOOL_MAX_TOKENS,
+        ? replyTokenBudget(answerDepth, REPLY_MAX_TOKENS)
+        : replyTokenBudget(answerDepth, TOOL_MAX_TOKENS),
     reasoning_effort: reasoningEffort,
   });
 
@@ -2965,7 +2994,11 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
       messages.push({
         role: 'tool',
         tool_call_id: call.id,
-        content: JSON.stringify(result.modelPayload),
+        content: JSON.stringify(
+          call.function?.name === 'search_content'
+            ? { ...result.modelPayload, responseLength: answerLengthInstruction(answerDepth) }
+            : result.modelPayload
+        ),
       });
     }
 

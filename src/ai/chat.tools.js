@@ -3659,6 +3659,14 @@ function isContentKnowledgeTopic(text) {
   if (isServicesCatalogQuestion(raw)) return true;
   // Property-management lead flow owns these — not blog Q&A.
   if (isMultiPropertyServiceQuery(raw) || matchesServiceInquiryPhrase(raw)) return false;
+  // Process / explanation / transaction-cost questions are content, even when they mention buying.
+  if (
+    /\b(explain\s+(?:the|how|what|why|about|in)|walk\s+me\s+through|guide\s+to|process\s+(?:of|for)|steps?\s+(?:to|for|of|in)|step[-\s]by[-\s]step|procedure\s+(?:of|for))\b/.test(raw) ||
+    /\b(costs?|fees|charges|expenses|taxes)\b[\s\S]{0,40}\b(buy(?:ing)?|purchas(?:e|ing)|sell(?:ing)?|rent(?:ing)?|leas(?:e|ing)|transfer|own(?:ing)?)\b/.test(raw) ||
+    /\b(buy(?:ing)?|purchas(?:e|ing)|sell(?:ing)?|rent(?:ing)?)\b[\s\S]{0,40}\b(costs?|fees|charges|expenses)\b/.test(raw)
+  ) {
+    return true;
+  }
   if (
     /\b(best|top|good)\s+(communities|areas|neighbourhoods|neighborhoods|places)\b/.test(raw) ||
     /\b(family[-\s]?friendly|for\s+families|areas?\s+for\s+families|communities\s+for\s+families)\b/.test(raw) ||
@@ -6769,14 +6777,15 @@ function composeSearchReply(ctx = {}) {
     const partial = ctx.partialCommunityNote || partialCommunityMissNote(filters, ctx.exactListings || []);
     if (partial) lines.push(partial);
     const count = Number(ctx.exactMatchCount);
-    if (!/you're looking for/i.test(ack)) {
+    const summary = matchingCountSummary(count, filters);
+    // The count line already names the segment and area; only use the heading when it is missing.
+    if (!summary && !/you're looking for/i.test(ack)) {
       lines.push(
         `Here are ${segment} ${purposeBit}${area}${describeAmenitiesClause(filters)}.`
           .replace(/\s+/g, ' ')
           .trim()
       );
     }
-    const summary = matchingCountSummary(count, filters);
     if (summary) lines.push(summary);
     const alternative = alternativeInventoryLine(ctx);
     if (alternative) lines.push(alternative);
@@ -7937,10 +7946,11 @@ function contentAnswerInstruction(hasChunks) {
       'INTERNAL KNOWLEDGE FIRST — MANDATORY: Rocky internal content was found. Answer ONLY from these chunks as the primary source.',
       'Do NOT answer from generic model knowledge first. Do NOT use vague filler like "Typically...", "Requirements may vary...", or "You should check authorities..." when these chunks contain a specific answer.',
       'Preserve exact thresholds, visa durations, eligibility requirements, dates, ownership rules, and fees from the chunks accurately.',
-      "Answer the visitor's LATEST question directly in at most 2–3 short sentences. Lead with the facts (communities, rules, fees) — never open with 'Rocky:', 'Read more:', 'According to Rocky:', or 'From our Rocky content:'.",
+      "Answer the visitor's LATEST question directly, at the length set by the RESPONSE LENGTH note for this turn. Lead with the facts (communities, rules, fees) — never open with 'Rocky:', 'Read more:', 'According to Rocky:', or 'From our Rocky content:'.",
+      'The chunks are reference material, not a checklist: use only the facts that answer this question, merge overlapping chunks, and leave the rest for a follow-up.',
       'Do NOT paste "Read more" or the article title as a search-result style lead-in. A related-page button/chip is already attached below the reply — do not duplicate that CTA in the prose, and do not paste raw URLs.',
       'Do NOT ask whether they want you to find or pull up the article. Use the chunks automatically. Do NOT invent facts missing from the chunks.',
-      'End with one short optional next step (e.g. exploring properties in a named community) when it fits.',
+      'End with at most one short follow-up tied to this answer (an offer to explain more, or exploring properties in a community the answer named) — never two.',
     ].join(' ');
   }
   return [
@@ -7948,7 +7958,7 @@ function contentAnswerInstruction(hasChunks) {
     'Only now may you answer briefly from general real-estate knowledge.',
     'Do NOT claim the answer came from Rocky Real Estate.',
     'For legal, immigration, visa, tax, mortgage, regulatory, or government-rule questions, clearly note that requirements can change and should be verified with the relevant authority.',
-    'Keep the reply concise and useful. Do not invent Rocky-specific policies or fees.',
+    'Follow the RESPONSE LENGTH note for this turn. Do not invent Rocky-specific policies or fees.',
   ].join(' ');
 }
 

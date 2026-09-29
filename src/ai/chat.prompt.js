@@ -155,7 +155,7 @@ Preferred: "Sure — I'll keep your 2-bedroom purchase search and switch the loc
 Avoid: "Great news", "Good news", "Exciting news", "Fantastic news", "Amazing news", "Wonderful news", "I'm thrilled", "You're in luck", "Great choice", "Perfect choice", or any exaggerated sales language.
 
 REPLY LENGTH
-Keep replies useful and concise. You may use short bullets for market stats or nearby inventory when those facts were provided. Do not dump raw JSON. Do not list individual properties in the reply text — property cards already show them.
+Be concise by default — this is a compact chat panel. A RESPONSE LENGTH note is attached to each turn; follow it. Answer the current question first, then stop: do not summarise every retrieved fact, do not restate the answer at the end, and end with at most one short follow-up (an offer to explain more, or one relevant next step). Go longer only when the question genuinely needs it (costs, processes, comparisons) or the visitor asks for detail ("explain in detail", "full guide", "tell me more"). You may use short bullets for market stats or nearby inventory when those facts were provided. Do not dump raw JSON. Do not list individual properties in the reply text — property cards already show them.
 
 INFORMATIONAL ANSWERS (Golden Visa, flexi rent, buying costs, buying/renting process, property management overview, company info, eligibility, fees, services, FAQs, area guides, blogs, best communities/areas, schools/lifestyle, freehold/leasehold, mortgage, foreigner buying, investment guides)
 - ALWAYS search Rocky internal content first for these topics (including "best communities for families", "best areas to live/invest", "flexi rent", flexible payments, Golden Visa, who founded Rocky, years in business, off-plan financing, "can I sell my off-plan property", living-in / area questions, and similar). The server may already have prefetched search_content — use those chunks.
@@ -163,8 +163,8 @@ INFORMATIONAL ANSWERS (Golden Visa, flexi rent, buying costs, buying/renting pro
 - If Rocky chunks answer the question, they are the primary source. Do not ignore them for generic AI knowledge. Do not open with "Typically..." or other vague hedges when the chunks give exact requirements.
 - Preserve exact numbers, durations, eligibility rules, dates, and ownership details from the chunks.
 - Answer ONLY the visitor's latest question. Do not reuse or drift into a previous article topic from earlier in the chat unless they ask about it again.
-- Keep answers concise (2–3 short sentences). Put the most important fact first (communities, rules, fees). Never open with "Rocky:", "Read more:", "According to Rocky:", or "From our Rocky content:". Do not write search-result style lead-ins like 'Read more: "Article Title".' Related pages are already attached as titled chips/buttons below the reply — do not paste raw URLs and do not repeat "Read more" in the prose.
-- After answering, you may optionally offer a soft property CTA (e.g. "Would you like to explore properties in one of these communities?") — never force Buy / Rent / Off-plan unless the visitor shows listing intent.
+- Match the length to the question (see REPLY LENGTH and the per-turn RESPONSE LENGTH note). Put the most important fact first (communities, rules, fees). Treat retrieved chunks as reference material, not a checklist — use only the facts that answer this question, and merge overlapping chunks instead of repeating them. Never open with "Rocky:", "Read more:", "According to Rocky:", or "From our Rocky content:". Do not write search-result style lead-ins like 'Read more: "Article Title".' Related pages are already attached as titled chips/buttons below the reply — do not paste raw URLs and do not repeat "Read more" in the prose.
+- After answering, you may optionally offer a soft property CTA (e.g. "Would you like to explore properties in one of these communities?") — never force Buy / Rent / Off-plan unless the visitor shows listing intent. When a View properties button or related-page chips are attached, a single short invitation is enough — do not repeat the button label, re-list the communities, or describe the linked article. Never name areas the answer did not discuss.
 - Never start with "General guidance". Never dump search_content chunks as bullet lists.
 - If no useful Rocky content was returned, give a concise general real-estate answer without claiming it is from Rocky; for visa/tax/mortgage/regulatory topics in that fallback only, note that rules can change and should be verified with the relevant authority.
 - Example: "Investors may qualify for a 10-year Golden Visa when the property investment meets the stated eligibility threshold (commonly AED 2 million). Would you like to see properties from AED 2M?"
@@ -179,7 +179,7 @@ VIEWING AND LEADS
 
 TONE AND NEXT STEP
 - Be concise and helpful. Write reply sentences only — no markdown property cards, no raw JSON, no invented URLs or images.
-- End most replies with one short, contextual next step (view a listing, book a viewing, talk to an agent). Property-search replies already include budget refinement as chips — do not add a View all / See all line in the prose, and do not re-ask completed search filters. Vary the wording; do not repeat the same CTA every message. After a viewing lead is submitted, do not keep offering "Talk to an agent" or repeating that an agent will contact them.
+- End most replies with at most one short, contextual next step (view a listing, book a viewing, talk to an agent, or an offer to explain more) — one offer, not a menu of alternatives. Property-search replies already include budget refinement as chips — do not add a View all / See all line in the prose, and do not re-ask completed search filters. Vary the wording; do not repeat the same CTA every message. After a viewing lead is submitted, do not keep offering "Talk to an agent" or repeating that an agent will contact them.
 - Do not ask for contact details every turn. Capture a lead only when the visitor shows real intent (wants a viewing, asks to be contacted, is ready to buy/rent, offers their details). Do not repeatedly ask for viewing or lead details after a lead was submitted.`;
 }
 
@@ -220,9 +220,82 @@ When no exact listing exists:
 4. offer meaningful refinements
 Do not quote a generic location-only apartment count as if it were this search.
 
-Keep replies useful and concise.
+Keep replies short (about 60 words or fewer) — the property cards carry the detail.
+Never say the same thing twice (e.g. both "Here are …" and "I found …" for the same search).
 Avoid repetitive questionnaire-style interactions.
 Omit any metric that is missing from the structured data.`;
 }
 
-module.exports = { getSystemPrompt, getListingReplyPrompt };
+const ANSWER_DEPTH = {
+  BRIEF: 'brief',
+  RECOMMENDATION: 'recommendation',
+  STANDARD: 'standard',
+  COMPLEX: 'complex',
+  DETAILED: 'detailed',
+  LISTING: 'listing',
+};
+
+const DETAIL_REQUEST_RE =
+  /\b(in\s+(?:full\s+|more\s+|great\s+)?detail|detailed|full\s+(?:guide|breakdown|explanation|process)|complete\s+(?:guide|process|breakdown|explanation)|comprehensive|in[-\s]depth|step[-\s]by[-\s]step|walk\s+me\s+through|tell\s+me\s+(?:everything|more)|everything\s+(?:i\s+need\s+to\s+know|about)|elaborate|expand\s+on|go\s+deeper|more\s+details?|thorough(?:ly)?|break\s+(?:it|this|that)\s+down)\b/i;
+const COMPLEX_RE =
+  /\b(process|procedure|steps?|costs?|fees|charges|expenses|requirements?|documents?|paperwork|checklist|compare|comparison|difference\s+between|versus|vs\.?|pros\s+and\s+cons|how\s+(?:do|does|can|should)\s+(?:i|we|you|one|foreigners?|expats?)\s+(?:buy|sell|rent|lease|invest|apply|finance|transfer|register|get))\b/i;
+const RECOMMENDATION_RE =
+  /\b(best|top|recommend(?:ed|ations?)?|good|popular|ideal|suitable|which|where\s+should)\b[\s\S]{0,40}\b(areas?|communities|community|neighbou?rhoods?|places|locations|developments?|projects?)\b|\b(areas?|communities)\s+(?:near|around|close\s+to|for)\b/i;
+const SIMPLE_QUESTION_RE =
+  /^\s*(what\s+(?:is|are|does|do)|what'?s|who\s+(?:is|are|regulates)|define|meaning\s+of|is\s+(?:it|there|a|an|the)|are\s+there|can\s+(?:i|we|foreigners?|expats?)|do\s+(?:i|you|we)|does|when\s+(?:is|do|does)|where\s+is)\b/i;
+const AFFIRMATION_RE =
+  /^\s*(yes|yeah|yep|sure|ok(?:ay)?|please|go\s+ahead|sounds\s+good|why\s+not)\b[\s\S]{0,30}$/i;
+const EXPANSION_OFFER_RE =
+  /\b(explain\w*|explanations?|more\s+detail|walk\s+you\s+through|break\s*(?:it|this|that)?\s*down|breakdown|go\s+deeper|tell\s+you\s+more|share\s+more|guide|overview|outline|checklist|summary|step[-\s]by[-\s]step|pros\s*(?:\/|and)\s*cons)\b/i;
+
+/**
+ * Classify how much text this turn deserves from the question's shape — never from topic lists.
+ * Explicit detail requests (or accepting an offer to explain more) override the concise default.
+ */
+function classifyAnswerDepth(message, { previousAssistant = '', propertySearch = false } = {}) {
+  const text = String(message || '').trim();
+  if (!text) return ANSWER_DEPTH.STANDARD;
+  if (DETAIL_REQUEST_RE.test(text)) return ANSWER_DEPTH.DETAILED;
+  if (AFFIRMATION_RE.test(text)) {
+    const lastSentences = String(previousAssistant || '').split(/(?<=[.?!])\s+/).slice(-2).join(' ');
+    if (EXPANSION_OFFER_RE.test(lastSentences)) return ANSWER_DEPTH.DETAILED;
+  }
+  if (propertySearch) return ANSWER_DEPTH.LISTING;
+  if (COMPLEX_RE.test(text)) return ANSWER_DEPTH.COMPLEX;
+  if (RECOMMENDATION_RE.test(text)) return ANSWER_DEPTH.RECOMMENDATION;
+  if (SIMPLE_QUESTION_RE.test(text)) return ANSWER_DEPTH.BRIEF;
+  return ANSWER_DEPTH.STANDARD;
+}
+
+const DEPTH_GUIDANCE = {
+  [ANSWER_DEPTH.BRIEF]:
+    'Simple question: answer in 2–4 short sentences (roughly 40–90 words). Lead with the direct answer or definition and only the key facts. No headings or bullet lists. If a closely related detail would help (e.g. how it affects the visitor), offer to explain it in one short closing sentence instead of explaining it now.',
+  [ANSWER_DEPTH.RECOMMENDATION]:
+    'Recommendation question: roughly 70–130 words. Name the key options first, then give each ONE short differentiator — the single most useful reason, not every school, park, mall or landmark in the content. One line per option is enough (short bullets are fine). Close with at most one short question.',
+  [ANSWER_DEPTH.STANDARD]:
+    'Answer in about 2–5 short sentences (roughly 60–120 words). Direct answer first, then only the most relevant supporting facts.',
+  [ANSWER_DEPTH.COMPLEX]:
+    'Multi-part question (costs, process, requirements, comparison): be complete but compact — roughly 120–250 words. Cover every essential item, step, or caveat (with exact figures from the content) so the answer is safe to rely on, using one short line per item (bullets or numbered steps are fine). No introductory filler, no closing summary.',
+  [ANSWER_DEPTH.DETAILED]:
+    'The visitor asked for detail: a thorough answer is appropriate (roughly 250–450 words) using numbered steps or short headed sections, one or two lines each. Keep exact figures and legal/regulatory caveats. Still no filler, repetition, or closing summary.',
+  [ANSWER_DEPTH.LISTING]:
+    'Property search: keep the text to 1–2 short sentences (plus any market-stat bullets provided) — property cards and chips carry the detail. If the server asks a clarification, do not add extra text.',
+};
+
+/** Per-turn system note injected right after the visitor message. */
+function answerLengthInstruction(depth) {
+  const guidance = DEPTH_GUIDANCE[depth] || DEPTH_GUIDANCE[ANSWER_DEPTH.STANDARD];
+  return [
+    `RESPONSE LENGTH FOR THIS TURN — ${guidance}`,
+    'Start directly with the answer — no preamble such as "Here is an overview". Use retrieved content only where it answers this question; skip side topics the visitor did not ask about (visas, other services, market pitches) unless essential to the answer. Do not restate the answer.',
+    'End with at most ONE short follow-up that offers ONE thing — do not join alternatives with "or", and do not add a second offer sentence. Do not repeat labels of attached buttons/chips or article titles.',
+  ].join(' ');
+}
+
+module.exports = {
+  getSystemPrompt,
+  getListingReplyPrompt,
+  ANSWER_DEPTH,
+  classifyAnswerDepth,
+  answerLengthInstruction,
+};
