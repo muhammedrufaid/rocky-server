@@ -5,6 +5,7 @@ const Faq = require('../models/Faq');
 const CompanyInfo = require('../models/CompanyInfo');
 const AreaGuide = require('../models/AreaGuide');
 const Service = require('../models/Service');
+const Blog = require('../models/Blog');
 const ChatbotChunk = require('../models/ChatbotChunk');
 const ChatSession = require('../models/ChatSession');
 const Property = require('../models/Property');
@@ -49,7 +50,27 @@ const embed = async (texts) => {
   return vectors;
 };
 
-const stripHtml = (s) => String(s || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/[ \t]+/g, ' ').trim();
+const HTML_ENTITIES = { '&nbsp;': ' ', '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
+const stripHtml = (s) =>
+  String(s || '')
+    .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&(nbsp|amp|lt|gt|quot|#39);/g, (e) => HTML_ENTITIES[e])
+    .replace(/\{\{DIRHAM\}\}/g, 'AED')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
+
+const blogBlockToText = (block) => {
+  if (['paragraph', 'heading2', 'heading3'].includes(block.type)) return stripHtml(block.text);
+  if (block.type === 'list') return (block.items || []).map((item) => `- ${stripHtml(item)}`).join('\n');
+  if (block.type === 'table') {
+    return [block.headers, ...(block.rows || [])]
+      .filter((row) => Array.isArray(row) && row.length)
+      .map((row) => row.map(stripHtml).join(' | '))
+      .join('\n');
+  }
+  return '';
+};
 
 // Splits body by paragraph so each chunk (head + body part) stays under MAX_CHUNK_CHARS.
 const splitText = (head, body) => {
@@ -75,12 +96,13 @@ const splitText = (head, body) => {
 };
 
 const buildChunks = async () => {
-  const [faqs, company, areas, knowledge, services] = await Promise.all([
+  const [faqs, company, areas, knowledge, services, blogs] = await Promise.all([
     Faq.find({ isActive: true }).lean(),
     CompanyInfo.find({ isActive: true }).lean(),
     AreaGuide.find({ isActive: true }).lean(),
     ChatbotKnowledge ? ChatbotKnowledge.find({}).lean() : [],
     Service.find({ isActive: true }).select('title description overview subservices').lean(),
+    Blog.find({ isActive: true }).select('title category description content faqs').lean(),
   ]);
 
   const chunks = [];
@@ -115,6 +137,15 @@ const buildChunks = async () => {
     const overview = services.map((s) => `- ${s.title}: ${stripHtml(s.description)}`).join('\n');
     add('service', {}, 'All services', 'Service: All Rocky Real Estate services\n\n', overview);
   }
+  blogs.forEach((b) => {
+    const body = [
+      b.description ? `Summary: ${stripHtml(b.description)}` : '',
+      ...(b.content || []).map(blogBlockToText),
+      ...(b.faqs || []).map((f) => `Q: ${stripHtml(f.question)}\nA: ${stripHtml(f.answer)}`),
+    ].filter(Boolean).join('\n');
+    const head = `Blog: ${b.title}\n${b.category ? `Category: ${b.category}\n` : ''}\n`;
+    add('blog', b, b.title, head, body);
+  });
 
   return chunks;
 };

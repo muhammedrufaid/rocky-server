@@ -1,6 +1,6 @@
 const mongoose = require('mongoose');
 
-const CHUNK_SOURCES = ['faq', 'knowledge', 'company', 'area', 'service'];
+const CHUNK_SOURCES = ['faq', 'knowledge', 'company', 'area', 'service', 'blog'];
 
 const chatbotChunkSchema = new mongoose.Schema(
   {
