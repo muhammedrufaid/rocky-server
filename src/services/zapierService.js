@@ -4,6 +4,7 @@ const ZAPIER_SOURCES = {
   SELL_INQUIRY: 'Sell Inquiry',
   LANDING_PAGE_LEAD: 'Landing Page Lead',
   PROPERTY_MANAGEMENT_LEAD: 'Property Management Lead',
+  ROCKY_AI_CHAT: 'RockyAI Chat',
   // JEWEL_TOWER_LEAD: 'Jewel Tower Lead',
   // CAREERS: 'Careers',
 };

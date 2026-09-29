@@ -26,12 +26,13 @@ const {
   shouldCaptureSellLead,
   sellFlowOptions,
   SELL_SERVICE_LOCATION_OPTIONS,
-  isSellServiceTransitionQuery,
   isMultiPropertyServiceQuery,
   parseSellServiceLocationChoice,
   sellServiceLocationReply,
   isGeneralKnowledgeQuery,
   isInformationalRealEstateQuery,
+  emptyResultOptions,
+  parseAmenityRemovals,
   isExplicitPropertySearchIntent,
   isContentKnowledgeTopic,
   parseAmenitiesFromMessage,
@@ -85,7 +86,6 @@ const {
   isHomepageUrl,
   emptyResultsReply,
   foundListingsReply,
-  locationEmptyNearbyReply,
   CONVERSATION_INTENTS,
   LISTING_MODES,
   parseConversationIntent,
@@ -97,7 +97,6 @@ const {
   pmNeedReply,
   PM_NEED_OPTIONS,
   parsePmNeedChoice,
-  needsListingIntake,
   applyMessageToSearchFilters,
   extractSearchPatch,
   mergeSearchPatch,
@@ -142,7 +141,6 @@ const {
   exactResultsExhaustedOptions,
   noAdditionalSegmentOptions,
   noAdditionalSegmentReply,
-  noInventoryReply,
   noInventoryOptions,
   toPropertyCard,
   viewAllCtaLabel,
@@ -198,7 +196,17 @@ const {
   communitiesForContextKey,
   buildViewContextCommunitiesAction,
   alternativeInventoryLine,
+  parseCardSelection,
+  isViewingRequestMessage,
+  isAgentContactRequest,
+  leadStageForTurn,
+  leadStageInstruction,
+  leadContextFromProfile,
+  captureLead,
+  communityInventoryFit,
+  inventoryFitLine,
 } = require('./chat.tools');
+const { leaveRecommendationScopePatch } = require('./chat.cmsHandoff');
 const { Lead } = require('./chat.models');
 const propertyDbService = require('../services/propertyDbService');
 
@@ -671,13 +679,6 @@ test('empty-result copy avoids flat negatives', () => {
   const reply = emptyResultsReply({ location: 'Dubai Marina', type: 'Apartment', bedrooms: 2 });
   assert.match(reply, /Looking for/i);
   assert.equal(/i don't have|i couldn't find|no matches/i.test(reply), false);
-  const nearby = locationEmptyNearbyReply({ location: 'Arabian Ranches' }, [
-    'Dubai Hills',
-    'Mudon',
-  ]);
-  assert.match(nearby, /near Arabian Ranches/i);
-  assert.match(nearby, /Dubai Hills/);
-  assert.equal(/i don't have|i couldn't find/i.test(nearby), false);
 });
 
 test('sell FAQ is content, not sell-listing intent', () => {
@@ -1072,13 +1073,15 @@ test('missing phone asks only for phone; already-shared keeps state', () => {
   assert.match(done.reply, /I have your details/i);
   assert.equal(isAlreadySharedDetails('i already shared'), true);
   assert.equal(isSellCta('Get a valuation'), true);
+  assert.equal(isSellCta('Speak with a listing agent'), true);
+  assert.equal(isSellCta("I'd like a quick valuation please"), true);
+  assert.equal(isSellCta('How do agents value apartments?'), false);
 });
 
 // --- Property management after sell ---
 
 test('PM after sell asks same vs different location', () => {
   const listing = { type: 'Villa', location: 'Al Barsha' };
-  assert.equal(isSellServiceTransitionQuery('Property Management'), true);
   assert.match(sellServiceLocationReply(listing, { propertyNote: '20 properties' }), /Al Barsha/i);
   assert.equal(parseSellServiceLocationChoice('Same property'), 'same');
   assert.deepEqual(SELL_SERVICE_LOCATION_OPTIONS, ['Same property', 'Different location']);
@@ -1191,11 +1194,9 @@ test('property management starts with a service question, not a contact form', (
 
 test('listing intake is required until type or area is known', () => {
   const profile = startFreshIntent(CONVERSATION_INTENTS.BUY, 'Buy a Property', {});
-  assert.equal(needsListingIntake(profile.lastSearchFilters), true);
   assert.equal(nextMissingListingSlot(profile.lastSearchFilters), 'propertyType');
   assert.equal(profile.slotFlow.awaiting, 'propertyType');
   const withType = startFreshIntent(CONVERSATION_INTENTS.BUY, 'I want to buy a villa in Arabian Ranches', {});
-  assert.equal(needsListingIntake(withType.lastSearchFilters), false);
   assert.equal(withType.lastSearchFilters.type, 'Villa');
   assert.equal(withType.lastSearchFilters.location, 'Arabian Ranches');
   assert.equal(nextMissingListingSlot(withType.lastSearchFilters), 'bedrooms');
@@ -3379,7 +3380,7 @@ test('Agent can coordinate completes scheduling and does not ask another time', 
 });
 
 test('successful viewing lead closes viewingRequest', async (t) => {
-  t.mock.method(Lead, 'create', async (doc) => ({ _id: 'lead-view-ok', ...doc }));
+  mockLeadStore(t, { createImpl: async (doc) => ({ _id: 'lead-view-ok', ...doc }) });
   const afterContact = applyViewingRequestFlow(
     'sha\nsha@gmail.com\n1234567842',
     viewingSession(),
@@ -3470,7 +3471,7 @@ test('property search after a completed viewing is not treated as a viewing note
 });
 
 test('preferred viewing time completes the flow after captureLead succeeds', async (t) => {
-  t.mock.method(Lead, 'create', async (doc) => ({ _id: 'lead-view-1', ...doc }));
+  mockLeadStore(t, { createImpl: async (doc) => ({ _id: 'lead-view-1', ...doc }) });
   const profile = marinaStudioBuyProfile();
   const started = applyViewingRequestFlow('Book a viewing', profile, []);
   const afterContact = applyViewingRequestFlow(
@@ -3516,8 +3517,10 @@ test('preferred viewing time completes the flow after captureLead succeeds', asy
 });
 
 test('lead capture failure does not claim an agent will contact the visitor', async (t) => {
-  t.mock.method(Lead, 'create', async () => {
-    throw new Error('db unavailable');
+  mockLeadStore(t, {
+    createImpl: async () => {
+      throw new Error('db unavailable');
+    },
   });
   const captured = await executeTool(
     'capture_lead',
@@ -4093,7 +4096,6 @@ test('any-location language clears the area filter and is not searched as a plac
   const reply = foundListingsReply(filters, 3);
   assert.equal(/in any(where| locations?)|in anywhere/i.test(reply), false);
   assert.equal(emptyResultsReply(filters).toLowerCase().includes('any locations'), false);
-  assert.equal(noInventoryReply(filters).toLowerCase().includes('any locations'), false);
 });
 
 test('any location after JVC clears only the area and keeps the rest of the search', () => {
@@ -4144,8 +4146,6 @@ test('commercial office fallbacks do not mention bedrooms', () => {
   const emptyOpts = noInventoryOptions(office);
   assert.equal(emptyOpts.includes('Change bedrooms'), false);
   assert.equal(emptyOpts.some((opt) => /br|studio/i.test(opt)), false);
-  assert.equal(/bedroom configuration/i.test(noInventoryReply(office)), false);
-
   const residential = applyMessageToSearchFilters(
     emptySearchFilters(),
     'I need a 2 BHK apartment in Dubai South to buy'
@@ -6054,4 +6054,243 @@ test('VIEW_CONTEXT purpose chips hide zero-inventory categories', () => {
   assert.match(reply, /Jumeirah Village Circle \(JVC\)/i);
   assert.match(reply, /Al Furjan/i);
   assert.match(reply, /What would you like to explore/);
+});
+
+// --- Structured state: selection, lead stage, lead capture ---
+
+const SHOWN_CARDS = [
+  { id: 'REF-A', title: 'Alpha Tower 2BR', price: 1200000, beds: 2 },
+  { id: 'REF-B', title: 'Beta Residence 2BR', price: 1300000, beds: 2 },
+  { id: 'REF-C', title: 'Gamma Court 2BR', price: 1400000, beds: 2 },
+];
+
+test('card selection resolves ordinals, option numbers and ref numbers against shown cards', () => {
+  assert.equal(parseCardSelection('I like the second one', SHOWN_CARDS).id, 'REF-B');
+  assert.equal(parseCardSelection('tell me more about the last listing', SHOWN_CARDS).id, 'REF-C');
+  assert.equal(parseCardSelection('option 1 looks good', SHOWN_CARDS).id, 'REF-A');
+  assert.equal(parseCardSelection('what about REF-C?', SHOWN_CARDS).id, 'REF-C');
+  assert.equal(parseCardSelection('the fifth one', SHOWN_CARDS), null);
+  assert.equal(parseCardSelection('I am a first time buyer', SHOWN_CARDS), null);
+  assert.equal(parseCardSelection('is this a good second home?', SHOWN_CARDS), null);
+  assert.equal(parseCardSelection('the second one', []), null);
+});
+
+test('natural viewing and contact requests are detected without matching view amenities', () => {
+  assert.equal(isViewingRequestMessage('Can I arrange a viewing?'), true);
+  assert.equal(isViewingRequestMessage('could we see the second one this weekend'), true);
+  assert.equal(isViewingRequestMessage('does it have a sea view?'), false);
+  assert.equal(isAgentContactRequest('Yes, ask someone to contact me'), true);
+  assert.equal(isAgentContactRequest('I want to speak to an agent'), true);
+  assert.equal(isAgentContactRequest('What is RERA?'), false);
+});
+
+test('viewing flow starts from natural phrasing and uses the selected property', () => {
+  const profile = {
+    lastPropertyCards: SHOWN_CARDS,
+    selectedProperty: { refNo: 'REF-B', title: 'Beta Residence 2BR' },
+    viewingRequest: {},
+    slotFlow: {},
+  };
+  const flow = applyViewingRequestFlow('Can I arrange a viewing?', profile, [], {});
+  assert.ok(flow);
+  assert.equal(flow.profilePatch.viewingRequest.propertyRefNo, 'REF-B');
+  assert.equal(flow.profilePatch.slotFlow.awaiting, 'viewingContact');
+  assert.equal(applyViewingRequestFlow('Can I arrange a viewing?', { viewingRequest: {}, slotFlow: {} }, [], {}), null);
+});
+
+test('lead stage is deterministic and never regresses on informational questions', () => {
+  assert.equal(leadStageForTurn({}, 'What is RERA?'), 'research');
+  const searching = {
+    lastSearchFilters: { purpose: 'Buy', location: 'Somewhere', budgetProvided: true },
+    shownPropertyIds: ['REF-A'],
+  };
+  assert.equal(leadStageForTurn(searching, 'show more'), 'refinement');
+  assert.equal(leadStageForTurn({ ...searching, leadStage: 'refinement' }, 'What is RERA?'), 'refinement');
+  assert.equal(leadStageForTurn({ ...searching, selectedProperty: { refNo: 'REF-B' } }, 'nice'), 'property_interest');
+  assert.equal(leadStageForTurn(searching, 'Please ask someone to call me'), 'high_intent');
+  assert.equal(leadStageForTurn({ ...searching, leadCaptured: true }, 'thanks'), 'lead_conversion');
+  assert.match(leadStageInstruction('research'), /Do not offer an agent/);
+  assert.match(leadStageInstruction('property_interest'), /once/);
+  assert.match(leadStageInstruction('property_interest', { informational: true }), /do not offer an agent/);
+  assert.doesNotMatch(leadStageInstruction('high_intent', { informational: true }), /informational question/);
+});
+
+test('inventory fit line states live counts, including communities with no matches', () => {
+  assert.equal(inventoryFitLine(null), '');
+  assert.equal(
+    inventoryFitLine({
+      communities: [
+        { community: 'Area A', matchingListings: 0 },
+        { community: 'Area B', matchingListings: 4 },
+        { community: 'Area C', matchingListings: 0 },
+      ],
+    }),
+    'For your current search: 4 listings in Area B; none right now in Area A or Area C.'
+  );
+  assert.equal(
+    inventoryFitLine({ communities: [{ community: 'Area B', matchingListings: 1 }] }),
+    'For your current search: 1 listing in Area B.'
+  );
+  assert.equal(
+    inventoryFitLine({ criteria: { amenities: ['near_metro'] }, communities: [{ community: 'Area B', matchingListings: 0 }] }),
+    'For your current search (with metro access): none right now in Area B.'
+  );
+});
+
+test('lead context carries the selected property and active search to the CRM record', () => {
+  const ctx = leadContextFromProfile({
+    leadStage: 'high_intent',
+    selectedProperty: { refNo: 'REF-B', title: 'Beta Residence 2BR' },
+    lastSearchFilters: { purpose: 'Buy', locations: ['Area One'], type: 'Apartment', bedrooms: 2, budgetMax: 1500000 },
+  });
+  assert.deepEqual(ctx, {
+    stage: 'high_intent',
+    propertyRefNo: 'REF-B',
+    propertyTitle: 'Beta Residence 2BR',
+    purpose: 'Buy',
+    location: 'Area One',
+    propertyType: 'Apartment',
+    bedrooms: 2,
+    budgetMin: null,
+    budgetMax: 1500000,
+  });
+});
+
+test('leaving recommendation scope keeps the search but drops article communities', () => {
+  const patch = leaveRecommendationScopePatch({
+    purpose: 'Buy', bedrooms: 2, budgetMax: 1500000, locations: ['A', 'B'], areaScopeLocked: true, source: 'cms_recommendation',
+  });
+  assert.deepEqual(patch.recommendedLocations, []);
+  assert.equal(patch.sourceContext, null);
+  assert.equal(patch.resetPreferredAreas, true);
+  assert.equal(patch.lastSearchFilters.purpose, 'Buy');
+  assert.equal(patch.lastSearchFilters.budgetMax, 1500000);
+  assert.equal(patch.lastSearchFilters.areaScopeLocked, false);
+  assert.equal(patch.lastSearchFilters.source, 'direct_property_search');
+});
+
+test('metro proximity is a searchable amenity', () => {
+  assert.deepEqual(parseAmenitiesFromMessage('Anything closer to the metro?'), ['near_metro']);
+  assert.deepEqual(parseAmenitiesFromMessage('near metro instead'), ['near_metro']);
+  assert.deepEqual(parseAmenitiesFromMessage('how long is the metro ride to downtown'), []);
+  const opts = emptyResultOptions({ purpose: 'Buy', type: 'Apartment', bedrooms: 2, amenities: ['near_metro'] });
+  assert.equal(opts[0], 'Without metro access');
+  assert.deepEqual(parseAmenityRemovals(opts[0]), ['near_metro']);
+});
+
+test('area comparisons are informational, comparisons of shown listings are not', () => {
+  assert.equal(isInformationalRealEstateQuery('Compare Area One and Area Two'), true);
+  assert.equal(isInformationalRealEstateQuery('Area One vs Area Two for families'), true);
+  assert.equal(isInformationalRealEstateQuery('compare the first and second apartments'), false);
+});
+
+test('community inventory fit counts live listings for the current search only', async (t) => {
+  const seen = [];
+  t.mock.method(propertyDbService, 'countProperties', async ({ search }) => {
+    seen.push(search);
+    return search === 'Area Two' ? 0 : 3;
+  });
+  const fit = await communityInventoryFit({
+    filters: { purpose: 'Buy', type: 'Apartment', bedrooms: 2, bedroomsResolved: true, budgetMax: 1500000 },
+    recommendedLocations: [{ name: 'Area One' }, { name: 'Area Two' }],
+  });
+  assert.equal(fit.criteria.budgetMax, 1500000);
+  assert.deepEqual(fit.communities.map((c) => c.community), ['Area One', 'Area Two']);
+  assert.equal(fit.communities[0].matchingListings, 3);
+  assert.equal(await communityInventoryFit({ filters: {}, recommendedLocations: [{ name: 'Area One' }] }), null);
+});
+
+function mockLeadStore(t, { createImpl, duplicate = null } = {}) {
+  const created = [];
+  const updates = [];
+  t.mock.method(Lead, 'findOne', () => ({ lean: async () => duplicate }));
+  t.mock.method(Lead, 'create', createImpl || (async (doc) => {
+    created.push(doc);
+    return { _id: 'lead-1', ...doc };
+  }));
+  t.mock.method(Lead, 'updateOne', async (filter, update) => {
+    updates.push(update);
+  });
+  return { created, updates };
+}
+
+const LEAD_ARGS = { name: 'Test Visitor', phone: '+971 50 000 0000', email: '', intent: 'Viewing request', emailOptional: true };
+
+test('captureLead asks for missing details without reporting a failure', async (t) => {
+  mockLeadStore(t);
+  const result = await captureLead({ name: 'Test Visitor', intent: 'callback' }, 's1', {});
+  assert.equal(result.modelPayload.ok, false);
+  assert.equal(result.modelPayload.missingDetails, true);
+  assert.match(result.modelPayload.error, /Nothing failed/);
+});
+
+test('captureLead rejects an invalid phone number', async (t) => {
+  const store = mockLeadStore(t);
+  const result = await captureLead({ ...LEAD_ARGS, phone: '12' }, 's1', {});
+  assert.equal(result.modelPayload.invalidPhone, true);
+  assert.equal(store.created.length, 0);
+});
+
+test('captureLead saves context, records CRM outcome, and dedupes the same request', async (t) => {
+  const previousUrl = process.env.ZAPIER_WEBHOOK_URL;
+  process.env.ZAPIER_WEBHOOK_URL = 'https://hooks.invalid/test';
+  t.after(() => {
+    if (previousUrl === undefined) delete process.env.ZAPIER_WEBHOOK_URL;
+    else process.env.ZAPIER_WEBHOOK_URL = previousUrl;
+  });
+  const posted = [];
+  t.mock.method(globalThis, 'fetch', async (url, init) => {
+    posted.push(JSON.parse(init.body));
+    return { ok: true, text: async () => '' };
+  });
+  const store = mockLeadStore(t);
+  const context = { stage: 'high_intent', propertyRefNo: 'REF-B', purpose: 'Buy', budgetMax: 1500000 };
+  const result = await captureLead(LEAD_ARGS, 's1', { context });
+  assert.equal(result.modelPayload.ok, true);
+  assert.equal(store.created[0].context.propertyRefNo, 'REF-B');
+  assert.equal(posted[0].source, 'RockyAI Chat');
+  assert.match(posted[0].message, /Property: REF-B/);
+  assert.deepEqual(store.updates[0], { crmSync: 'sent' });
+
+  t.mock.restoreAll();
+  mockLeadStore(t, { duplicate: { _id: 'lead-1' } });
+  const again = await captureLead(LEAD_ARGS, 's1', { context });
+  assert.equal(again.modelPayload.alreadyCaptured, true);
+});
+
+test('captureLead dedupes property leads per listing and other leads per request', async (t) => {
+  const queries = [];
+  mockLeadStore(t);
+  t.mock.method(Lead, 'findOne', (query) => {
+    queries.push(query);
+    return { lean: async () => null };
+  });
+  await captureLead(LEAD_ARGS, 's1', { context: { propertyRefNo: 'REF-B' } });
+  await captureLead({ ...LEAD_ARGS, intent: 'Sell: villa' }, 's1', { context: { propertyRefNo: null } });
+  assert.equal(queries[0]['context.propertyRefNo'], 'REF-B');
+  assert.equal('intent' in queries[0], false);
+  assert.equal(queries[1]['context.propertyRefNo'], null);
+  assert.equal(queries[1].intent, 'Sell: villa');
+});
+
+test('captureLead never reports success when the lead cannot be stored', async (t) => {
+  mockLeadStore(t, { createImpl: async () => { throw new Error('db down'); } });
+  const result = await captureLead(LEAD_ARGS, 's1', {});
+  assert.equal(result.modelPayload.ok, false);
+  assert.equal(result.leadCaptured, false);
+  assert.match(result.modelPayload.error, /Do not claim/);
+});
+
+test('captureLead keeps the stored lead but flags a failed CRM hand-off', async (t) => {
+  const previousUrl = process.env.ZAPIER_WEBHOOK_URL;
+  process.env.ZAPIER_WEBHOOK_URL = 'https://hooks.invalid/test';
+  t.after(() => {
+    if (previousUrl === undefined) delete process.env.ZAPIER_WEBHOOK_URL;
+    else process.env.ZAPIER_WEBHOOK_URL = previousUrl;
+  });
+  t.mock.method(globalThis, 'fetch', async () => { throw new Error('network down'); });
+  const store = mockLeadStore(t);
+  const result = await captureLead(LEAD_ARGS, 's1', {});
+  assert.equal(result.modelPayload.ok, true);
+  assert.deepEqual(store.updates[0], { crmSync: 'failed' });
 });

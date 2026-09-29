@@ -126,6 +126,11 @@ const conversationSchema = new mongoose.Schema(
         whatsapp: { type: String, default: null, trim: true },
       },
       leadCaptured: { type: Boolean, default: false },
+      leadStage: { type: String, default: null, trim: true },
+      selectedProperty: {
+        refNo: { type: String, default: null, trim: true },
+        title: { type: String, default: null, trim: true },
+      },
       viewingRequest: {
         active: { type: Boolean, default: false },
         propertyRefNo: { type: String, default: null, trim: true },
@@ -160,6 +165,19 @@ const leadSchema = new mongoose.Schema(
     },
     intent: { type: String, required: true, trim: true },
     sessionId: { type: String, required: true, trim: true, index: true },
+    context: {
+      stage: { type: String, default: null },
+      propertyRefNo: { type: String, default: null },
+      propertyTitle: { type: String, default: null },
+      purpose: { type: String, default: null },
+      location: { type: String, default: null },
+      propertyType: { type: String, default: null },
+      bedrooms: { type: Number, default: null },
+      budgetMin: { type: Number, default: null },
+      budgetMax: { type: Number, default: null },
+    },
+    // Outcome of the Zapier/CRM hand-off: 'sent' | 'failed' | 'skipped'.
+    crmSync: { type: String, default: null },
   },
   { timestamps: true }
 );

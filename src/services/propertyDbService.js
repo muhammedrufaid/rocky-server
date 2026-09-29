@@ -143,6 +143,7 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
       concierge: /concierge|24\s*hour|security/i,
       built_in_wardrobes: /built[-\s]?in\s*wardrobe|fitted\s*wardrobe/i,
       central_ac: /central\s*a\/?c|central\s*air|central\s*cooling/i,
+      near_metro: /\bmetro\b/i,
     };
     for (const amenity of nf.amenities) {
       const key = String(amenity || '')

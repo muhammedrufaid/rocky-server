@@ -48,7 +48,10 @@ function getSystemPrompt(userProfile = {}) {
     slotFlow: userProfile.slotFlow || { awaiting: null },
     leadCaptured: !!userProfile.leadCaptured,
   };
-  const shown = formatShownProperties(userProfile.lastPropertyCards);
+  const selected = userProfile.selectedProperty?.refNo
+    ? ` The visitor selected ${userProfile.selectedProperty.refNo}${userProfile.selectedProperty.title ? ` (${userProfile.selectedProperty.title})` : ''} — "it", "this one" and "that property" refer to it.`
+    : '';
+  const shown = formatShownProperties(userProfile.lastPropertyCards) + selected;
   const filters = profile.lastSearchFilters || {};
   const currentSearch = {
     listingMode:
@@ -179,7 +182,7 @@ VIEWING AND LEADS
 
 TONE AND NEXT STEP
 - Be concise and helpful. Write reply sentences only — no markdown property cards, no raw JSON, no invented URLs or images.
-- End most replies with at most one short, contextual next step (view a listing, book a viewing, talk to an agent, or an offer to explain more) — one offer, not a menu of alternatives. Property-search replies already include budget refinement as chips — do not add a View all / See all line in the prose, and do not re-ask completed search filters. Vary the wording; do not repeat the same CTA every message. After a viewing lead is submitted, do not keep offering "Talk to an agent" or repeating that an agent will contact them.
+- End most replies with at most one short, contextual next step — one offer, not a menu of alternatives. The LEAD STAGE note for the turn decides whether a viewing, agent, or callback offer is allowed; informational answers otherwise offer only to explain more or refine the search. Property-search replies already include budget refinement as chips — do not add a View all / See all line in the prose, and do not re-ask completed search filters. Vary the wording; do not repeat the same CTA every message. After a viewing lead is submitted, do not keep offering "Talk to an agent" or repeating that an agent will contact them.
 - Do not ask for contact details every turn. Capture a lead only when the visitor shows real intent (wants a viewing, asks to be contacted, is ready to buy/rent, offers their details). Do not repeatedly ask for viewing or lead details after a lead was submitted.`;
 }
 

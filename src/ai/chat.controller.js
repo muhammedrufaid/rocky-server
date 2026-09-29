@@ -17,6 +17,7 @@ const {
 const {
   emptyViewingRequest,
   copyViewingRequest,
+  copyGoldenVisaFlow,
   applyViewingRequestFlow,
   isBookViewingAction,
   isListingSearchOverride,
@@ -25,8 +26,16 @@ const {
   requiresBedroomsForSearch,
   buildViewingLeadIntent,
   logViewingDebug,
+  communityInventoryFit,
+  inventoryFitLine,
+  isUnrestrictedLocationPhrase,
+  parseCardSelection,
+  leadStageForTurn,
+  leadStageInstruction,
+  leadContextFromProfile,
 } = require('./chat.tools');
-const { TOOL_DEFINITIONS, executeTool, toPropertyCard, PURPOSE_OPTIONS, PURPOSE_SELECT, BEDROOM_OPTIONS, SELL_OPTIONS, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, isSellServiceTransitionQuery, isMultiPropertyServiceQuery, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, shouldResetOnListingIntent, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, needsListingIntake, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, normalizePurpose, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, applyBudgetChoice, isBedroomsResolved, isAmbiguousListingQuery, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, isInformationalRealEstateQuery, isExplicitPropertySearchIntent, isGoldenVisaMention, isGoldenVisaPropertySearchIntent, isShowGoldenVisaPropertiesAction, isReadInvestorVisaGuideAction, goldenVisaInfoOptions, goldenVisaInitialReply, goldenVisaGuideDetailReply, buildGoldenVisaInfoResult, markGoldenVisaAction, copyGoldenVisaFlow, filterGoldenVisaRelatedSources, GOLDEN_VISA_ACTION, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parseDesiredPropertyType, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, isChangeBedroomsAction, bedroomChangeQuestion, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, bedroomsClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion, listingSearchResetPatch, isExplicitSearchReset, hasInProgressListingSearch, hasActiveListingSearch, isCurrentListingReference, buildSearchAcknowledgement, joinAckAndQuestion, stripExposedUrlsFromReply, canonicalSearchState, isCmsPropertyHandoffMessage, hasRecommendedLocations, isCmsHandoffAwaiting, copyRecommendedLocations, CMS_HANDOFF_PURPOSE, CMS_HANDOFF_LOCATION, CMS_HANDOFF_PROPERTY_TYPE, CMS_IMMEDIATE_LISTING_THRESHOLD, SEARCH_SOURCE_CMS, probeCmsLocationInventory, probeCmsSegmentFacets, purposeOptionFromInventory, locationInventoryOptions, areaInventorySummaryPayload, communitySummariesFromInventory, cmsCommunityPreviewReply, fetchCmsCommunityPreviewProperties, matchCmsTopicScopeFromProfile, matchCmsTopicScopeFromText, cmsHandoffIntroReply, cmsHandoffLocationReply, cmsHandoffPropertyTypeReply, cmsHandoffBedroomsReply, propertyTypeOptionsFromInventory, bedroomOptionsFromValues, inventoryTotals, parseCmsAllAreasChoice, matchRecommendedLocation, applyCmsLocationsToFilters, ensureCmsAreasOnFilters, ensureActiveAreaScope, getActiveAreas, isAreaScopeLocked, unlockAreaScope, wantsAreaScopeUnlock, hasLocationConstraint, SEARCH_SOURCE_DIRECT, recommendedLocationsFromProfile, recoverRecommendedLocations, VIEW_CONTEXT_COMMUNITY_PROPERTIES, VIEW_CONTEXT_COMMUNITIES_LABEL, isViewContextCommunityPropertiesAction, isViewContextCommunitiesMessage, communitiesForContextKey, buildViewContextCommunitiesAction, buildSourceContextFromRecommended, copySourceContext, propertySearchFromFilters, emptyPropertySearch, copyPropertySearch, traceTurnMeta } = require('./chat.tools');
+const { leaveRecommendationScopePatch } = require('./chat.cmsHandoff');
+const { TOOL_DEFINITIONS, executeTool, PURPOSE_OPTIONS, PURPOSE_SELECT, SELL_SERVICE_LOCATION_OPTIONS, PM_NEED_OPTIONS, CONVERSATION_INTENTS, emptySearchFilters, copySearchFilters, parseSellIntent, isSellCta, isAlreadySharedDetails, parseSellListingDetails, sellClarificationReply, sellFlowOptions, parseSellServiceLocationChoice, sellServiceLocationReply, advanceSellListing, emptySellListing, copySellListing, shouldCaptureSellLead, buildSellLeadIntent, hasSellContact, hasServiceContact, emptyServiceInquiry, copyServiceInquiry, seedServiceInquiry, parseServiceContactDetails, parseContactDetails, serviceContactReply, buildServiceLeadIntent, shouldCaptureServiceLead, isServiceInquiryMessage, parsePmNeedChoice, pmNeedReply, pmPropertyReply, hasPmPropertyContext, applyPmPropertyDetails, parseConversationIntent, currentConversationIntent, isExplicitIntentStarter, isPurposeChipReply, shouldResetOnListingIntent, isListingIntent, intentToPurpose, purposeToIntent, normalizeIntentValue, startFreshIntent, listingStartReply, listingStartOptions, listingIntakeReply, applyMessageToSearchFilters, parsePropertyTypesFromMessage, mergePropertyTypes, typesFromFilters, applyTypesToFilters, normalizePurpose, isShowMoreRequest, filtersFromRequestBody, uniqueIdList, parsePurposeFromMessage, parseBedroomChoice, applyBedroomChoice, isListingFollowUp, isGeneralKnowledgeQuery, isContentKnowledgeTopic, isInformationalRealEstateQuery, isExplicitPropertySearchIntent, isGoldenVisaMention, isGoldenVisaPropertySearchIntent, isShowGoldenVisaPropertiesAction, isReadInvestorVisaGuideAction, buildGoldenVisaInfoResult, markGoldenVisaAction, filterGoldenVisaRelatedSources, GOLDEN_VISA_ACTION, shouldSkipPropertySearch, isVagueConfirm, normalizePropertyType, parseLocationFromMessage, parseLocationReply, wantsDifferentLocation, locationClarificationReply, parsePropertyTypeChange, parseAlternativeChip, parseBudgetFromMessage, parseEmptyResultChoice, isChangeBedroomsAction, bedroomChangeQuestion, emptyResultOptions, emptyResultsReply, nearbyAreaOptions, matchesNamedOption, foundListingsReply, purposeClarificationReply, isPropertyUiAction, qualifyListingSearch, nextMissingListingSlot, listingSlotQuestion, listingSearchResetPatch, isExplicitSearchReset, hasInProgressListingSearch, hasActiveListingSearch, isCurrentListingReference, buildSearchAcknowledgement, joinAckAndQuestion, stripExposedUrlsFromReply, canonicalSearchState, isCmsPropertyHandoffMessage, hasRecommendedLocations, isCmsHandoffAwaiting, copyRecommendedLocations, CMS_HANDOFF_PURPOSE, CMS_HANDOFF_LOCATION, CMS_HANDOFF_PROPERTY_TYPE, CMS_IMMEDIATE_LISTING_THRESHOLD, SEARCH_SOURCE_CMS, probeCmsLocationInventory, probeCmsSegmentFacets, purposeOptionFromInventory, locationInventoryOptions, areaInventorySummaryPayload, communitySummariesFromInventory, cmsCommunityPreviewReply, matchCmsTopicScopeFromProfile, matchCmsTopicScopeFromText, cmsHandoffIntroReply, cmsHandoffLocationReply, cmsHandoffPropertyTypeReply, cmsHandoffBedroomsReply, propertyTypeOptionsFromInventory, bedroomOptionsFromValues, inventoryTotals, parseCmsAllAreasChoice, matchRecommendedLocation, applyCmsLocationsToFilters, ensureCmsAreasOnFilters, ensureActiveAreaScope, isAreaScopeLocked, unlockAreaScope, wantsAreaScopeUnlock, hasLocationConstraint, SEARCH_SOURCE_DIRECT, recoverRecommendedLocations, isViewContextCommunityPropertiesAction, isViewContextCommunitiesMessage, communitiesForContextKey, buildSourceContextFromRecommended, copySourceContext, propertySearchFromFilters, copyPropertySearch, traceTurnMeta } = require('./chat.tools');
 
 const HISTORY_TURNS = 10;
 const MAX_STORED_MESSAGES = 40;
@@ -362,9 +371,16 @@ function mergeProfile(current, patch) {
     sellListing: copySellListing(current.sellListing || {}),
     serviceInquiry: copyServiceInquiry(current.serviceInquiry || {}),
     viewingRequest: copyViewingRequest(current.viewingRequest || {}),
+    goldenVisaFlow: copyGoldenVisaFlow(current.goldenVisaFlow || {}),
     leadCaptured: current.leadCaptured || false,
+    leadStage: current.leadStage || null,
+    selectedProperty: {
+      refNo: current.selectedProperty?.refNo || null,
+      title: current.selectedProperty?.title || null,
+    },
   };
 
+  if (patch.resetPreferredAreas) next.preferredAreas = [];
   if (Array.isArray(patch.preferredAreas)) {
     for (const area of patch.preferredAreas) {
       const value = String(area || '').trim();
@@ -383,6 +399,10 @@ function mergeProfile(current, patch) {
   if (patch.intent !== undefined) next.intent = patch.intent;
   if (Array.isArray(patch.lastPropertyCards)) {
     next.lastPropertyCards = toStoredPropertyCards(patch.lastPropertyCards);
+    const stillShown = next.lastPropertyCards.some(
+      (card) => (card.id || card.propertyRefNo) === next.selectedProperty.refNo
+    );
+    if (!stillShown) next.selectedProperty = { refNo: null, title: null };
   }
   if (patch.resetShownPropertyIds) {
     next.shownPropertyIds = [];
@@ -442,6 +462,14 @@ function mergeProfile(current, patch) {
     });
   }
   if (patch.leadCaptured) next.leadCaptured = true;
+  if (patch.goldenVisaFlow) next.goldenVisaFlow = copyGoldenVisaFlow(patch.goldenVisaFlow);
+  if (patch.leadStage !== undefined) next.leadStage = patch.leadStage;
+  if (patch.selectedProperty !== undefined) {
+    next.selectedProperty = {
+      refNo: patch.selectedProperty?.refNo || null,
+      title: patch.selectedProperty?.title || null,
+    };
+  }
 
   return next;
 }
@@ -1575,7 +1603,7 @@ function resolvePendingSlots(message, profile, history = [], explicitIntent = nu
  * only mentioned fields change; bedrooms/budget/purpose stay unless stated.
  */
 function applyNewLocationSearch(message, profile) {
-  if (wantsDifferentLocation(message)) return null;
+  if (wantsDifferentLocation(message) || isInformationalRealEstateQuery(message)) return null;
   const mentionedLocation = parseLocationFromMessage(message);
   const mentionedTypes = parsePropertyTypesFromMessage(message);
   const purposeFromMsg = parsePurposeFromMessage(message);
@@ -1693,14 +1721,35 @@ async function maybeCaptureServiceLead(sessionId, profile) {
       intent: buildServiceLeadIntent(inquiry),
       emailOptional: true,
     },
-    { sessionId, leadAlreadyCaptured: !!profile.leadCaptured }
+    { sessionId, leadContext: nonPropertyLeadContext(profile) }
   );
   let nextProfile = profile;
   if (result.profilePatch) {
     nextProfile = mergeProfile(profile, result.profilePatch);
   }
-  return { profile: nextProfile, leadCaptured: !!result.leadCaptured };
+  return { profile: nextProfile, ...leadCaptureOutcome(result) };
 }
+
+function leadCaptureOutcome(result) {
+  const payload = result.modelPayload || {};
+  const rejected = !result.leadCaptured && !!(payload.missingDetails || payload.invalidPhone);
+  return { leadCaptured: !!result.leadCaptured, rejected, failed: !result.leadCaptured && !rejected };
+}
+
+function leadCaptureReply(captured, reply) {
+  if (captured.rejected) {
+    return 'Could you double-check your name, phone number (with country code) and email? I could not use the details as written.';
+  }
+  return captured.failed ? LEAD_SAVE_FAILED_REPLY : reply;
+}
+
+/** Sell and service leads are not about the listing on screen, so they carry no property reference. */
+function nonPropertyLeadContext(profile) {
+  return { ...leadContextFromProfile(profile), propertyRefNo: null, propertyTitle: null };
+}
+
+const LEAD_SAVE_FAILED_REPLY =
+  "I have your details, but I couldn't pass them to the team just now. Please try again in a moment or contact the team directly.";
 
 async function maybeCaptureSellLead(sessionId, profile, message) {
   const listing = profile.sellListing || {};
@@ -1715,13 +1764,13 @@ async function maybeCaptureSellLead(sessionId, profile, message) {
       email: listing.email,
       intent: buildSellLeadIntent(message, listing),
     },
-    { sessionId, leadAlreadyCaptured: !!profile.leadCaptured }
+    { sessionId, leadContext: nonPropertyLeadContext(profile) }
   );
   let nextProfile = profile;
   if (result.profilePatch) {
     nextProfile = mergeProfile(profile, result.profilePatch);
   }
-  return { profile: nextProfile, leadCaptured: !!result.leadCaptured };
+  return { profile: nextProfile, ...leadCaptureOutcome(result) };
 }
 
 async function maybeCaptureViewingLead(sessionId, profile) {
@@ -1761,7 +1810,7 @@ async function maybeCaptureViewingLead(sessionId, profile) {
       emailOptional: true,
       phoneOptional: true,
     },
-    { sessionId, leadAlreadyCaptured: false }
+    { sessionId, leadAlreadyCaptured: false, leadContext: leadContextFromProfile(profile) }
   );
   let nextProfile = profile;
   if (result.profilePatch) {
@@ -1902,7 +1951,6 @@ async function resolveCmsPropertyHandoff(message, profile = {}, history = [], se
     '[SEARCH_CONTEXT BEFORE]',
     JSON.stringify({
       action: forcedFromAction ? selection.action : 'cmsHandoff',
-      message: String(message || '').slice(0, 120),
       communities: recommended.map((r) => r.name),
       purpose: profile.purpose || profile.lastSearchFilters?.purpose || null,
       awaiting: awaiting || null,
@@ -1913,6 +1961,24 @@ async function resolveCmsPropertyHandoff(message, profile = {}, history = [], se
 
   if (!inHandoffSlot && !handoffStart) return null;
   if (!recommended.length && !inHandoffSlot) return null;
+
+  // An existing search keeps its purpose/budget/bedrooms/type; only the area scope changes.
+  const knownPurpose = normalizePurpose(profile.lastSearchFilters?.purpose || profile.purpose);
+  if (handoffStart && knownPurpose) {
+    const scoped = applyCmsLocationsToFilters(
+      copySearchFilters(profile.lastSearchFilters || emptySearchFilters()),
+      recommended
+    );
+    scoped.purpose = knownPurpose;
+    const next = listingSlotResponse(profile, scoped, {
+      recommendedLocations: recommended,
+      searchSource: SEARCH_SOURCE_CMS,
+      sourceContext: sourceContext || buildSourceContextFromRecommended(recommended),
+      preferredAreas: recommended.map((r) => r.name),
+      resetShownPropertyIds: true,
+    });
+    return next.type === 'continue' ? { ...next, search: true } : next;
+  }
 
   // --- Start: seed ALL recommended communities, show live inventory, ask purpose ---
   if (handoffStart || (awaiting === CMS_HANDOFF_PURPOSE && isCmsPropertyHandoffMessage(message))) {
@@ -2550,7 +2616,15 @@ async function runForcedPropertySearch({ sessionId, profile, userMessage, previo
   return success;
 }
 
-async function runModelLoop({ sessionId, userProfile, history, userMessage, turnIndex, sse = null }) {
+async function runModelLoop({
+  sessionId,
+  userProfile,
+  history,
+  userMessage,
+  turnIndex,
+  previousSearch = null,
+  sse = null,
+}) {
   const openai = getOpenAI();
   const model = process.env.OPENAI_CHAT_MODEL || process.env.OPENAI_MODEL || 'gpt-5-nano';
   const reasoningEffort = process.env.OPENAI_REASONING_EFFORT || 'minimal';
@@ -2565,11 +2639,25 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
       isShowMoreRequest(userMessage) ||
       isPropertyUiAction(userMessage),
   });
+  const shouldPrefetchRockyContent =
+    (isInformationalRealEstateQuery(userMessage) ||
+      isContentKnowledgeTopic(userMessage) ||
+      isGeneralKnowledgeQuery(userMessage)) &&
+    !isExplicitPropertySearchIntent(userMessage) &&
+    !isListingFollowUp(userMessage) &&
+    !isShowMoreRequest(userMessage) &&
+    !isPropertyUiAction(userMessage) &&
+    !isBookViewingAction(userMessage) &&
+    !isViewContextCommunitiesMessage(userMessage);
   const messages = [
     { role: 'system', content: getSystemPrompt(userProfile) },
     ...history,
     { role: 'user', content: userMessage },
     { role: 'system', content: answerLengthInstruction(answerDepth) },
+    {
+      role: 'system',
+      content: leadStageInstruction(userProfile.leadStage, { informational: shouldPrefetchRockyContent }),
+    },
   ];
   traceTurnMeta('answer_depth', { sessionId, depth: answerDepth });
 
@@ -2596,19 +2684,9 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
   let contentSuggestedActions = null;
   let contentQuickReplies = null;
   let contentPrimaryCta = null;
+  let inventoryFitNote = '';
 
   const snapshotMeta = () => metaFromLoopState(propertyCards, sources, viewAllMatching, presentation);
-
-  const shouldPrefetchRockyContent =
-    (isInformationalRealEstateQuery(userMessage) ||
-      isContentKnowledgeTopic(userMessage) ||
-      isGeneralKnowledgeQuery(userMessage)) &&
-    !isExplicitPropertySearchIntent(userMessage) &&
-    !isListingFollowUp(userMessage) &&
-    !isShowMoreRequest(userMessage) &&
-    !isPropertyUiAction(userMessage) &&
-    !isBookViewingAction(userMessage) &&
-    !isViewContextCommunitiesMessage(userMessage);
 
   // INTERNAL KNOWLEDGE FIRST — search Rocky Mongo content before any model answer.
   if (shouldPrefetchRockyContent) {
@@ -2646,6 +2724,13 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
       if (prefetch.modelPayload?.primaryCta) {
         contentPrimaryCta = prefetch.modelPayload.primaryCta;
       }
+      const inventoryFit = await communityInventoryFit({
+        filters: profile.lastSearchFilters,
+        userMessage,
+        recommendedLocations: prefetch.modelPayload?.recommendedLocations || [],
+      });
+      traceTurnMeta('inventory_fit', { sessionId, inventoryFit: inventoryFit?.communities || null });
+      inventoryFitNote = inventoryFitLine(inventoryFit);
       const toolCallId = 'prefetch_search_content';
       messages.push({
         role: 'assistant',
@@ -2671,6 +2756,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
           primaryCta: contentPrimaryCta,
           suggestedActions: contentSuggestedActions,
           responseLength: answerLengthInstruction(answerDepth),
+          ...(inventoryFit ? { inventoryFit } : {}),
           instruction:
             prefetch.modelPayload?.instruction ||
             (chunks.length
@@ -2817,6 +2903,10 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         reply = FRIENDLY_CHAT_ERROR;
       }
       reply = finalizeAssistantReply(reply, { usedSearchContent, usedSearchProperties });
+      if (inventoryFitNote && !usedSearchProperties && reply !== FRIENDLY_CHAT_ERROR) {
+        reply = `${reply}\n\n${inventoryFitNote}`;
+        if (streamEnabled) sse.token(`\n\n${inventoryFitNote}`);
+      }
       return withContentCommunityActions(
         attachRelatedContent(
           {
@@ -2871,7 +2961,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         result = await executeTool(call.function?.name, args, {
           sessionId,
           lastSearchFilters: profile.lastSearchFilters,
-          leadAlreadyCaptured: !!profile.leadCaptured,
+          leadContext: leadContextFromProfile(profile),
           slotFlow: profile.slotFlow,
           userMessage,
           intent: profile.intent,
@@ -2895,7 +2985,7 @@ async function runModelLoop({ sessionId, userProfile, history, userMessage, turn
         'TOOL CALL:',
         call.function?.name,
         'args:',
-        call.function?.arguments,
+        call.function?.name === 'capture_lead' ? '[redacted]' : call.function?.arguments,
         '| propertyCards returned:',
         result.propertyCards?.length ?? 0
       );
@@ -3092,6 +3182,18 @@ const chat = async (req, res) => {
       communities,
     };
 
+    const selectedCard = parseCardSelection(message, profile.lastPropertyCards || []);
+    if (selectedCard) {
+      profile = mergeProfile(profile, {
+        selectedProperty: {
+          refNo: selectedCard.id || selectedCard.propertyRefNo,
+          title: selectedCard.title || null,
+        },
+      });
+    }
+    profile = mergeProfile(profile, { leadStage: leadStageForTurn(profile, message) });
+    traceTurnMeta('lead_stage', { sessionId, stage: profile.leadStage, selected: profile.selectedProperty?.refNo });
+
     // Structured badge: View properties in these 3 communities
     if (isViewContextCommunityPropertiesAction(action) || isViewContextCommunitiesMessage(message)) {
       const key = contextKey || profile.sourceContext?.source || 'best-communities-for-families-dubai';
@@ -3115,15 +3217,23 @@ const chat = async (req, res) => {
       }
     }
 
+    if (
+      (hasRecommendedLocations(profile) || isAreaScopeLocked(profile)) &&
+      parseLocationFromMessage(message) &&
+      !isCmsPropertyHandoffMessage(message) &&
+      !isViewContextCommunityPropertiesAction(action) &&
+      !isCmsHandoffAwaiting(profile.slotFlow?.awaiting)
+    ) {
+      profile = mergeProfile(profile, leaveRecommendationScopePatch(profile.lastSearchFilters || {}));
+    }
+
     // Recover multi-community scope before any slot/qualify logic (blog → listings).
     if (
       isCmsPropertyHandoffMessage(message) ||
       isViewContextCommunitiesMessage(message) ||
       isViewContextCommunityPropertiesAction(action) ||
-      isVagueConfirm(message) ||
-      hasRecommendedLocations(profile) ||
-      profile.sourceContext?.source ||
-      (Array.isArray(profile.preferredAreas) && profile.preferredAreas.length >= 2)
+      (isVagueConfirm(message) && hasRecommendedLocations(profile)) ||
+      isCmsHandoffAwaiting(profile.slotFlow?.awaiting)
     ) {
       const recovered = recoverRecommendedLocations(profile, {
         message,
@@ -3203,13 +3313,15 @@ const chat = async (req, res) => {
       profile = cmsHandoff.profile;
     }
 
-    const slotResult = resolvePendingSlots(
-      message,
-      profile,
-      conversation.messages || [],
-      applyPageContext ? bodyIntent : null,
-      viewingSelection
-    );
+    const slotResult = cmsHandoff?.search
+      ? { type: 'continue', profile }
+      : resolvePendingSlots(
+          message,
+          profile,
+          conversation.messages || [],
+          applyPageContext ? bodyIntent : null,
+          viewingSelection
+        );
 
     if (slotResult?.type === 'submit_viewing') {
       const captured = await maybeCaptureViewingLead(sessionId, slotResult.profile);
@@ -3232,19 +3344,13 @@ const chat = async (req, res) => {
     }
 
     if (slotResult?.type === 'clarify') {
-      let profileForResponse = slotResult.profile;
-      let leadCaptured = false;
-      if (shouldCaptureServiceLead(profileForResponse.serviceInquiry || {})) {
-        const captured = await maybeCaptureServiceLead(sessionId, profileForResponse);
-        profileForResponse = captured.profile;
-        leadCaptured = captured.leadCaptured;
-      } else {
-        const captured = await maybeCaptureSellLead(sessionId, profileForResponse, message);
-        profileForResponse = captured.profile;
-        leadCaptured = captured.leadCaptured;
-      }
+      const captured = shouldCaptureServiceLead(slotResult.profile.serviceInquiry || {})
+        ? await maybeCaptureServiceLead(sessionId, slotResult.profile)
+        : await maybeCaptureSellLead(sessionId, slotResult.profile, message);
+      const profileForResponse = captured.profile;
+      const { leadCaptured } = captured;
       return clarificationResponse(res, {
-        reply: slotResult.reply,
+        reply: leadCaptureReply(captured, slotResult.reply),
         profile: profileForResponse,
         conversation,
         message,
@@ -3365,6 +3471,7 @@ const chat = async (req, res) => {
         history,
         userMessage: message,
         turnIndex: conversation.messages.length,
+        previousSearch,
         sse,
       });
 

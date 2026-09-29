@@ -503,6 +503,22 @@ function hasRecommendedLocations(profile = {}) {
   return copyRecommendedLocations(profile.recommendedLocations || []).length > 0;
 }
 
+/** Profile patch that drops article-driven area scope once the user names their own area. */
+function leaveRecommendationScopePatch(filters = {}) {
+  return {
+    recommendedLocations: [],
+    sourceContext: null,
+    cmsLocationInventory: null,
+    searchSource: SEARCH_SOURCE_DIRECT,
+    resetPreferredAreas: true,
+    lastSearchFilters: {
+      ...filters,
+      areaScopeLocked: false,
+      source: filters.source === SEARCH_SOURCE_CMS ? SEARCH_SOURCE_DIRECT : filters.source || null,
+    },
+  };
+}
+
 function isCmsHandoffAwaiting(awaiting) {
   return (
     awaiting === CMS_HANDOFF_PURPOSE ||
@@ -796,18 +812,6 @@ function locationInventoryOptions(intent, inventory = []) {
     });
   }
   return { options, locationInventory: payload };
-}
-
-function formatSegmentLine(label, seg, { rent = false } = {}) {
-  const count = Number(seg?.count) || 0;
-  if (count <= 0) return null;
-  const countPart = count === 1 ? '1 property' : `${count} properties`;
-  const from = formatPriceLabel(seg.minPrice ?? seg.startingPrice, { rent });
-  const avg = formatPriceLabel(seg.averagePrice, { rent });
-  let line = `${label} — ${countPart}`;
-  if (from) line += ` · From ${from}`;
-  if (avg) line += ` · Avg ${avg}`;
-  return line;
 }
 
 /**
@@ -1579,6 +1583,7 @@ function describeCmsLocations(filters = {}) {
 }
 
 module.exports = {
+  leaveRecommendationScopePatch,
   CMS_HANDOFF_PURPOSE,
   CMS_HANDOFF_LOCATION,
   CMS_HANDOFF_PROPERTY_TYPE,

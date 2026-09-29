@@ -1,5 +1,6 @@
 const OpenAI = require('openai');
 const propertyDbService = require('../services/propertyDbService');
+const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 const { Lead } = require('./chat.models');
 const ChatbotKnowledge = require('../models/ChatbotKnowledge');
 const { formatAed } = require('./chat.format');
@@ -126,7 +127,7 @@ const TOOL_DEFINITIONS = [
             type: 'array',
             items: { type: 'string' },
             description:
-              'Amenity / feature keys the visitor required (e.g. swimming_pool, gym, parking, balcony, maid_room, garden, waterfront, pet_friendly, sea_view). Pass every still-active amenity from memory — do not drop previously stated features.',
+              'Amenity / feature keys the visitor required (e.g. swimming_pool, gym, parking, balcony, maid_room, garden, waterfront, pet_friendly, sea_view, near_metro). Pass every still-active amenity from memory — do not drop previously stated features.',
           },
         },
       },
@@ -598,6 +599,12 @@ const AMENITY_DEFINITIONS = [
     parse: /\b(central\s+a\/?c|central\s+air(?:\s*conditioning)?|central\s+cooling)\b/i,
     feature: /central\s+a\/?c|central\s+air|central\s+cooling/i,
   },
+  {
+    id: 'near_metro',
+    label: 'metro access',
+    parse: /\b(?:near|close\s+to|closer\s+to|walking\s+distance\s+(?:to|from)|next\s+to)\s+(?:the\s+|a\s+)?metro\b|\bmetro\s+(?:access|station|nearby|proximity)\b/i,
+    feature: /\bmetro\b/i,
+  },
 ];
 
 const AMENITY_BY_ID = Object.fromEntries(AMENITY_DEFINITIONS.map((item) => [item.id, item]));
@@ -638,6 +645,7 @@ function normalizeAmenityId(value) {
     wardrobes: 'built_in_wardrobes',
     ac: 'central_ac',
     air_conditioning: 'central_ac',
+    metro: 'near_metro',
   };
   if (alias[raw]) return alias[raw];
   for (const def of AMENITY_DEFINITIONS) {
@@ -1184,7 +1192,6 @@ const VIEWING_WEEKEND_OPTIONS = [
   'Sunday afternoon',
   'Agent can coordinate',
 ];
-const VIEWING_TIME_OPTIONS = VIEWING_WEEKEND_OPTIONS;
 const VIEWING_AWAITING = ['viewingContact', 'viewingTime', 'viewingProperty'];
 
 function isBookViewingAction(text) {
@@ -1229,8 +1236,58 @@ function parseViewingPropertyChoice(text, cards = []) {
   return null;
 }
 
+const ORDINAL_INDEX = {
+  first: 0, '1st': 0, second: 1, '2nd': 1, third: 2, '3rd': 2,
+  fourth: 3, '4th': 3, fifth: 4, '5th': 4, sixth: 5, '6th': 5,
+};
+const ORDINAL_WORD = '(first|second|third|fourth|fifth|sixth|1st|2nd|3rd|4th|5th|6th|last)';
+const LISTING_NOUN = '(one|option|listing|property|apartment|villa|townhouse|unit|flat|penthouse)';
+
+/** Resolve "the second one", "option 3", "the last listing" or a ref no. against the cards on screen. */
+function parseCardSelection(text, cards = []) {
+  const raw = String(text || '').toLowerCase();
+  if (!raw || !cards.length) return null;
+  const byRef = cards.find((card) => {
+    const id = String(card.id || card.propertyRefNo || '').toLowerCase();
+    return id && raw.includes(id);
+  });
+  if (byRef) return byRef;
+  const ordinal =
+    raw.match(new RegExp(`\\bthe\\s+${ORDINAL_WORD}(?:\\s+${LISTING_NOUN})?\\b`)) ||
+    raw.match(new RegExp(`\\b${ORDINAL_WORD}\\s+${LISTING_NOUN}\\b`));
+  if (ordinal) {
+    const index = ordinal[1] === 'last' ? cards.length - 1 : ORDINAL_INDEX[ordinal[1]];
+    return cards[index] || null;
+  }
+  const numbered = raw.match(/\b(?:option|number|no\.?|listing|property)\s*#?\s*([1-6])\b/);
+  return numbered ? cards[Number(numbered[1]) - 1] || null : null;
+}
+
+function isViewingRequestMessage(text) {
+  const raw = String(text || '').toLowerCase();
+  if (!raw) return false;
+  return (
+    /\b(book|arrange|schedule|set\s+up|organi[sz]e|plan)\b[\w\s']{0,20}\b(viewings?|visits?|tours?)\b/.test(raw) ||
+    /\b(can|could|may)\s+(i|we)\s+(view|see|visit|tour)\s+(it|this|that|the\s+[\w\s]{0,15}?(one|property|apartment|villa|unit|flat))\b/.test(raw)
+  );
+}
+
+function isAgentContactRequest(text) {
+  const raw = String(text || '').toLowerCase();
+  if (!raw) return false;
+  return (
+    /\b(ask|have|get)\s+(someone|somebody|an?\s+agent|your\s+(team|agent)|an?\s+consultant)\s+(to\s+)?(contact|call|reach|get\s+in\s+touch|ring)\b/.test(raw) ||
+    /\b(contact|call|ring)\s+me\b/.test(raw) ||
+    /\b(speak|talk)\s+(to|with)\s+(an?\s+|your\s+)?(agent|consultant|someone)\b/.test(raw)
+  );
+}
+
 function resolveSelectedViewingProperty(profile = {}, selection = {}) {
   const cards = profile.lastPropertyCards || [];
+  const selectedRef = String(profile.selectedProperty?.refNo || '').trim();
+  if (!selection.propertyRefNo && !selection.propertyId && selectedRef) {
+    selection = { ...selection, propertyRefNo: selectedRef, propertyTitle: profile.selectedProperty?.title };
+  }
   const explicit = String(selection.propertyRefNo || selection.propertyId || '').trim();
   if (explicit) {
     const card =
@@ -1424,9 +1481,12 @@ function viewingNextStep(vr = {}, message = '', selection = {}) {
   return 'submit_viewing';
 }
 
+const CONTACT_LOG_KEYS = new Set(['name', 'email', 'phone', 'whatsapp', 'rawMessage', 'userMessage']);
+
 function logViewingDebug(label, payload) {
   if (process.env.NODE_TEST_CONTEXT || process.env.NODE_ENV === 'test') return;
-  console.log(label, JSON.stringify(payload));
+  const redact = (key, value) => (CONTACT_LOG_KEYS.has(key) && value ? '[redacted]' : value);
+  console.log(label, JSON.stringify(payload, redact));
 }
 
 function viewingTimePrompt() {
@@ -1492,10 +1552,6 @@ function buildViewingLeadIntent(vr = {}, profile = {}) {
   return bits.join(' — ').slice(0, 400);
 }
 
-function selectedViewingProperty(profile = {}, selection = {}) {
-  return resolveSelectedViewingProperty(profile, selection);
-}
-
 function seedViewingContact(profile = {}, history = []) {
   const fromHistory = contactFromHistory(history);
   const sell = profile.sellListing || {};
@@ -1551,7 +1607,12 @@ function finalizeViewingCapture(viewingRequest, captureResult) {
 function applyViewingRequestFlow(message, profile = {}, history = [], selection = {}) {
   const awaiting = profile.slotFlow?.awaiting;
   const previous = copyViewingRequest(profile.viewingRequest || {});
-  const booking = isBookViewingRequest(message, selection);
+  const hasListingInFocus = !!profile.selectedProperty?.refNo || (profile.lastPropertyCards || []).length > 0;
+  const booking =
+    isBookViewingRequest(message, selection) ||
+    (!previous.active &&
+      hasListingInFocus &&
+      (isViewingRequestMessage(message) || isAgentContactRequest(message)));
   const inViewing =
     previous.active ||
     VIEWING_AWAITING.includes(awaiting) ||
@@ -1756,22 +1817,6 @@ function contactFromHistory(messages = []) {
   return contact;
 }
 
-function propertyFromHistory(messages = []) {
-  let type = null;
-  let location = null;
-  let bedrooms = null;
-  let priceNote = null;
-  for (const item of messages || []) {
-    if (item.role !== 'user') continue;
-    const parsed = parseSellListingDetails(item.content, { type, location, bedrooms, priceNote });
-    type = parsed.type || type;
-    location = parsed.location || location;
-    bedrooms = parsed.bedrooms ?? bedrooms;
-    priceNote = parsed.priceNote || priceNote;
-  }
-  return { type, location, bedrooms, priceNote };
-}
-
 function persistSellListing(current = {}, lastSearchFilters = {}, history = []) {
   const prior = copySellListing(current);
   const fromHistory = contactFromHistory(history);
@@ -1839,7 +1884,11 @@ function isSellCta(text) {
     .trim()
     .toLowerCase()
     .replace(/[.!?]/g, '');
-  return /^(get a valuation|valuation|talk to an agent|talk to agent|listing agent)$/i.test(raw);
+  if (/^(get a valuation|valuation|talk to an agent|talk to agent|listing agent)$/i.test(raw)) return true;
+  // Typed versions of the same two actions, e.g. "I'd like to speak with a listing agent", "a quick valuation please".
+  return /^(?:(?:yes|ok|okay|sure)[,\s]+)?(?:(?:i(?:'d|\s+would)?\s+like(?:\s+to)?|i\s+want(?:\s+to)?|can\s+i|could\s+i|let\s+me|please)\s+)?(?:(?:get|have)\s+(?:a\s+|an\s+)?(?:quick\s+|free\s+)?valuation|(?:a\s+)?(?:quick\s+|free\s+)?valuation|(?:speak|talk|chat)\s+(?:with|to)\s+(?:a\s+|an\s+|the\s+)?(?:listing\s+)?agent|connect\s+me\s+(?:with|to)\s+(?:a\s+|an\s+|the\s+)?(?:listing\s+)?agent)(?:\s+please)?$/i.test(
+    raw
+  );
 }
 
 const SELL_AREA_ALIASES = [
@@ -1932,10 +1981,6 @@ function parseSellListingDetails(text, current = {}) {
 
 function hasSellBedrooms(details = {}) {
   return details.bedrooms != null || details.bedroomsMin != null;
-}
-
-function sellReadyForCta(details = {}) {
-  return !!(details.type && details.location && hasSellBedrooms(details) && details.priceNote && details.occupancy);
 }
 
 /** Progressive chips: type → bedrooms → occupancy → valuation/agent. */
@@ -2368,19 +2413,6 @@ function budgetNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-function describeBudgetBare(filters = {}) {
-  const min = budgetNumber(filters.budgetMin);
-  const max = budgetNumber(filters.budgetMax);
-  const hasMin = min != null;
-  const hasMax = max != null;
-  if (hasMin && hasMax) {
-    return `${formatAed(min)}–${formatAed(max).replace(/^AED\s/, '')}`;
-  }
-  if (hasMax) return formatAed(max);
-  if (hasMin) return `${formatAed(min)}+`;
-  return '';
-}
-
 function describeBudgetConstraint(filters = {}) {
   const min = budgetNumber(filters.budgetMin);
   const max = budgetNumber(filters.budgetMax);
@@ -2506,25 +2538,6 @@ function describeBudgetPossessive(filters = {}) {
   return ` ${range}`;
 }
 
-function exactResultsExhaustedReply(filters = {}, stats = {}) {
-  const area = describeLocationClause(filters);
-  const segment = describeBedsAndType(filters, { plural: true });
-  const budgetBit = describeBudgetRange(filters);
-  const where = `${segment}${area}${budgetBit ? ` ${budgetBit}` : ''}`.replace(/\s+/g, ' ').trim();
-  const min = stats.minimumPrice != null ? formatAed(stats.minimumPrice) : null;
-  const avg = stats.averagePrice != null ? formatAed(stats.averagePrice) : null;
-  const lines = [`There aren't any more ${where} right now.`];
-  if (min && avg) {
-    lines.push(
-      `Current ${segment}${area} start from around ${min}, with an average asking price of about ${avg}.`
-    );
-  } else if (min) {
-    lines.push(`Current ${segment}${area} start from around ${min}.`);
-  }
-  lines.push(searchBroadenReply(filters, { budgetHint: true }));
-  return lines.join('\n\n');
-}
-
 function bedroomFallbackOptions(filters = {}) {
   if (!requiresBedroomsForSearch(filters)) return [];
   const n = Number(filters.bedrooms);
@@ -2603,21 +2616,6 @@ function emptyResultsReply(filters = {}) {
   return `Looking for a ${bedsType} — let me check the closest options for you.`;
 }
 
-/** Soft nearby-offer copy when the requested location has zero inventory for purpose+type. */
-function locationEmptyNearbyReply(filters = {}, nearbyAreas = []) {
-  const loc = (filters.location || 'that area').toString().trim() || 'that area';
-  const areas = (nearbyAreas || []).map((a) => String(a).trim()).filter(Boolean);
-  if (!areas.length) {
-    return `Let me check what's available near ${loc} for you. Would you like to try a different area or adjust the search?`;
-  }
-  if (areas.length === 1) {
-    return `We don't currently have matching listings in ${loc}, but there are options nearby in ${areas[0]}. Would you like me to show those?`;
-  }
-  const head = areas.slice(0, -1).join(', ');
-  const tail = areas[areas.length - 1];
-  return `Let me check what's available near ${loc} for you. I can show nearby options in ${head}, or ${tail}. Which area would you like?`;
-}
-
 function emptyResultOptions(filters = {}) {
   const opts = [...bedroomFallbackOptions(filters).filter((opt) => opt !== 'Change bedrooms')];
   if (requiresBedroomsForSearch(filters)) {
@@ -2632,7 +2630,11 @@ function emptyResultOptions(filters = {}) {
     opts.push(...beds);
   }
   opts.push(...nearbyFallbackOptions(filters), 'Change budget');
-  return opts;
+  const amenityOpts = normalizeAmenityList(filters.amenities || [])
+    .map((id) => AMENITY_DEFINITIONS.find((def) => def.id === id))
+    .filter(Boolean)
+    .map((def) => `Without ${def.label}`);
+  return [...amenityOpts, ...opts];
 }
 
 const NEARBY_AREA_MAP = [
@@ -2763,14 +2765,6 @@ function parseBedroomChoice(text) {
       return { exact: n };
     }
   }
-  return null;
-}
-
-function parseBedroomsFromMessage(text) {
-  const choice = parseBedroomChoice(text);
-  if (!choice || choice.any) return null;
-  if (choice.min != null) return choice.min;
-  if (choice.exact != null) return choice.exact;
   return null;
 }
 
@@ -2947,21 +2941,8 @@ function searchCategory(filters = {}) {
   return 'unknown';
 }
 
-function isPropertyCategoryChange(previous = {}, next = {}) {
-  const from = searchCategory(previous);
-  const to = searchCategory(next);
-  if (from === 'unknown' || to === 'unknown') return false;
-  return from !== to;
-}
-
 function isExplicitListingPurpose(text) {
   return !!parsePurposeFromMessage(text) || isPurposeChipReply(text);
-}
-
-function clearPurposeFilters(filters) {
-  if (!filters) return filters;
-  filters.purpose = null;
-  return filters;
 }
 
 function normalizeSearchProfileAfterPatch(previousProfile, patch, { explicitPurpose: _explicitPurpose = false } = {}) {
@@ -3373,12 +3354,6 @@ function isReadInvestorVisaGuideAction(text) {
   return /^read investor visa guide$/.test(raw) || /^investor visa guide$/.test(raw);
 }
 
-function goldenVisaActionIdFromMessage(text) {
-  if (isShowGoldenVisaPropertiesAction(text)) return GOLDEN_VISA_ACTION.SHOW_PROPERTIES;
-  if (isReadInvestorVisaGuideAction(text)) return GOLDEN_VISA_ACTION.READ_GUIDE;
-  return null;
-}
-
 function copyGoldenVisaFlow(flow = {}) {
   return {
     shownActions: uniqueIdList(flow.shownActions || []),
@@ -3615,6 +3590,15 @@ function isInformationalRealEstateQuery(text) {
   ) {
     return true;
   }
+  // "Compare X and Y", "X vs Y", "difference between X and Y" — unless it is about shown listings.
+  if (
+    (/\bcompare\b[\s\S]{2,60}\b(?:and|with|to|vs\.?|versus)\b/.test(lower) ||
+      /\b(?:vs\.?|versus)\b/.test(lower) ||
+      /\bdifference\s+between\b/.test(lower)) &&
+    !/\b(apartments?|villas?|townhouses?|listings?|propert(?:y|ies)|units?|these|them|this\s+one|that\s+one|first|second|third)\b/.test(lower)
+  ) {
+    return true;
+  }
   if (
     /\b(schools?|lifestyle|amenities|community\s+guide|area\s+guide|living\s+in|what'?s\s+it\s+like)\b/.test(lower)
   ) {
@@ -3742,12 +3726,6 @@ function locationNamesEqual(a, b) {
   const right = canonicalizeSearchLocation(b);
   if (!left || !right) return false;
   return left.toLowerCase() === right.toLowerCase();
-}
-
-function locationInActiveScope(name, locations = []) {
-  const target = canonicalizeSearchLocation(name);
-  if (!target) return false;
-  return (locations || []).some((loc) => locationNamesEqual(loc, target));
 }
 
 /**
@@ -4355,7 +4333,7 @@ function qualifyListingSearch(message, profile = {}) {
   console.log(
     '[SEARCH_CONTEXT BEFORE]',
     JSON.stringify({
-      action: String(message || '').slice(0, 80),
+      action: 'qualifyListingSearch',
       awaiting: awaiting || null,
       communities: last.locations || [],
       purpose: last.purpose || profile.purpose || null,
@@ -4642,14 +4620,6 @@ function qualifyListingSearch(message, profile = {}) {
   return { type: 'continue', profilePatch: patch, missing: null };
 }
 
-function bedroomClarificationFields() {
-  return {
-    requiresClarification: true,
-    options: BEDROOM_OPTIONS,
-    select: PURPOSE_SELECT,
-  };
-}
-
 function isProvidedText(value) {
   if (value === undefined || value === null) return false;
   return String(value).trim() !== '';
@@ -4816,15 +4786,6 @@ function isGeneralKnowledgeQuery(text) {
   return /\b(property\s+management|tell\s+me\s+about|what\s+is|what\s+are|how\s+do(?:es)?|explain|need\s+to\s+know\s+about)\b/.test(
     raw
   );
-}
-
-/** Service / PM questions after a sell flow — may need same vs different location. */
-function isSellServiceTransitionQuery(text) {
-  const raw = String(text || '').trim();
-  if (!raw) return false;
-  if (parseSellIntent(raw) || isSellCta(raw)) return false;
-  if (parsePurposeFromMessage(raw)) return false;
-  return matchesServiceInquiryPhrase(raw) || isMultiPropertyServiceQuery(raw);
 }
 
 const SELL_SERVICE_LOCATION_OPTIONS = ['Same property', 'Different location'];
@@ -5486,10 +5447,6 @@ function listingIntakeReply(intent) {
   return 'What type of property are you looking to buy — apartment, villa, townhouse, penthouse, or another type — and which area are you interested in?';
 }
 
-function needsListingIntake(filters = {}) {
-  return !filters.location && !filters.locationAny && !typesFromFilters(filters).length;
-}
-
 function parseConversationIntent(text) {
   const raw = String(text || '').trim();
   if (!raw) return null;
@@ -5649,14 +5606,6 @@ function trustedPurpose({ lastSearchFilters = {}, userMessage, slotFlow, intent,
   if (parsePropertyTypeChange(userMessage)) return locked;
 
   return locked;
-}
-
-function purposeClarificationFields() {
-  return {
-    requiresClarification: true,
-    options: PURPOSE_OPTIONS,
-    select: PURPOSE_SELECT,
-  };
 }
 
 function profilePatchFromPropertyFilters(filters) {
@@ -5942,14 +5891,6 @@ function missingSlotResult(slot, effectiveFilters, { previous, message } = {}) {
   };
 }
 
-function purposeMissingResult(effectiveFilters) {
-  return missingSlotResult('intent', effectiveFilters);
-}
-
-function bedroomsMissingResult(effectiveFilters) {
-  return missingSlotResult('bedrooms', effectiveFilters);
-}
-
 function emptyResultsClarificationFields() {
   return {
     requiresClarification: true,
@@ -5994,6 +5935,60 @@ async function countByFilters(filters, search) {
     console.error('countByFilters failed:', err);
     return 0;
   }
+}
+
+/**
+ * Live listing counts per community for the visitor's current search, so content answers
+ * (recommendations, comparisons) never imply availability the inventory does not have.
+ */
+async function communityInventoryFit({ filters = {}, userMessage = '', recommendedLocations = [] } = {}) {
+  const base = copySearchFilters(filters);
+  base.purpose = normalizePurpose(base.purpose);
+  if (!base.purpose) return null;
+  const named = parseLocationsFromMessage(userMessage);
+  const names = (named.length ? named : recommendedLocations.map((r) => r?.name || r))
+    .filter(Boolean)
+    .slice(0, 4);
+  if (!names.length) return null;
+  const communities = await Promise.all(
+    names.map(async (name) => {
+      const scoped = { ...base, location: name, locations: [name], locationAny: false, areaScopeLocked: false };
+      return { community: name, matchingListings: await countByFilters(scoped, name) };
+    })
+  );
+  return {
+    criteria: {
+      purpose: base.purpose,
+      propertyType: base.type || null,
+      bedrooms: base.bedrooms ?? base.bedroomsMin ?? null,
+      budgetMin: base.budgetMin ?? null,
+      budgetMax: base.budgetMax ?? null,
+      amenities: base.amenities || [],
+    },
+    communities,
+    instruction:
+      'inventoryFit holds live listing counts for the visitor\'s current search in each community. If a community has 0 matching listings, say so plainly in a few words; never imply availability, prices, or metro access beyond these counts and the content chunks.',
+  };
+}
+
+/** One backend-authored availability sentence, appended to content answers so the counts are never lost. */
+function inventoryFitLine(fit) {
+  const rows = fit?.communities || [];
+  if (!rows.length) return '';
+  const withStock = rows.filter((r) => r.matchingListings > 0);
+  const without = rows.filter((r) => !(r.matchingListings > 0)).map((r) => r.community);
+  const parts = withStock.map(
+    (r) => `${r.matchingListings} listing${r.matchingListings === 1 ? '' : 's'} in ${r.community}`
+  );
+  if (without.length) {
+    const list = without.length > 1 ? `${without.slice(0, -1).join(', ')} or ${without[without.length - 1]}` : without[0];
+    parts.push(`none right now in ${list}`);
+  }
+  const amenityLabels = normalizeAmenityList(fit.criteria?.amenities || [])
+    .map((id) => AMENITY_DEFINITIONS.find((def) => def.id === id)?.label)
+    .filter(Boolean);
+  const scope = amenityLabels.length ? ` (with ${amenityLabels.join(' and ')})` : '';
+  return `For your current search${scope}: ${parts.join('; ')}.`;
 }
 
 function forcedFromPurpose(purpose) {
@@ -6083,13 +6078,6 @@ function describeBedsAndType(filters = {}, { plural = false } = {}) {
   return type;
 }
 
-function budgetTooLowReply(filters = {}, stats = {}) {
-  const lines = [exactNoMatchLine(filters)];
-  const unconstrained = unconstrainedBudgetLine(stats.totalAvailable, filters);
-  if (unconstrained) lines.push(unconstrained);
-  return lines.join('\n\n');
-}
-
 function budgetTooLowOptions(filters = {}) {
   const opts = ['Any budget'];
   const complement = complementaryBudgetChip(filters);
@@ -6099,13 +6087,6 @@ function budgetTooLowOptions(filters = {}) {
   return opts.filter((opt, i, arr) => arr.indexOf(opt) === i);
 }
 
-function noInventoryReply(filters = {}) {
-  const area = describeLocationClause(filters);
-  const segment = describeBedsAndType(filters, { plural: true });
-  const purposeBit = purposePhrase(filters);
-  return `I couldn't find currently available ${segment} ${purposeBit}${area}.\n\n${searchBroadenReply(filters)}`;
-}
-
 function noInventoryOptions(filters = {}) {
   const opts = [...nearbyFallbackOptions(filters)];
   if (requiresBedroomsForSearch(filters)) opts.push('Change bedrooms');
@@ -6113,12 +6094,6 @@ function noInventoryOptions(filters = {}) {
   if (!requiresBedroomsForSearch(filters)) opts.push('Change budget');
   opts.push(...amenityRemovalOptions(filters));
   return opts.filter((opt, i, arr) => arr.indexOf(opt) === i);
-}
-
-function userBudgetBelowSegmentMin(filters = {}, stats = {}) {
-  const userMax = Number(filters.budgetMax);
-  const min = Number(stats.minimumPrice);
-  return Number.isFinite(userMax) && Number.isFinite(min) && userMax < min && (stats.totalAvailable || 0) > 0;
 }
 
 /**
@@ -6141,41 +6116,12 @@ function alternativeTypesFor(currentType) {
   return key ? ALTERNATIVE_TYPES[key] : ALTERNATIVE_TYPES.default;
 }
 
-/** Adjacent bedroom counts to try. */
-function adjacentBedroomCounts(filters) {
-  const adj = [];
-  const n = Number(filters.bedrooms);
-  const min = Number(filters.bedroomsMin);
-  if (filters.bedroomsAny) return [];
-  if (min >= 4) {
-    adj.push({ exact: 3, label: 'Try 3 BR' });
-  } else if (Number.isFinite(n)) {
-    if (n > 0) adj.push({ exact: n - 1, label: n - 1 === 0 ? 'Try Studio' : `Try ${n - 1} BR` });
-    if (n < 5) adj.push({ exact: n + 1, label: n + 1 >= 4 ? 'Try 4+ BR' : `Try ${n + 1} BR` });
-  }
-  return adj;
-}
-
 function pluraliseType(type) {
   const t = String(type || '').trim();
   if (!t) return t;
   if (t.toLowerCase().endsWith('s')) return t;   // already plural
   if (t.toLowerCase() === 'studio') return 'Studios';
   return `${t}s`;
-}
-
-/**
- * Chip label helpers — must round-trip through parseAlternativeChip().
- * Format: "<N> BR <Type> in <Area>" | "<Type> in <Area>" | "<N> BR <Type>" |
- *         "<N> BR in <Area>" | "Try <N> BR" | "Try Studio"
- */
-function nearbyAreaChipLabel(area, filters) {
-  const bedsPhrase = describeBedroomPhrase(filters).trim();
-  const type = pluraliseType((filters.type || '').trim());
-  if (bedsPhrase && type) return `${capitalise(bedsPhrase)} ${type} in ${area}`;
-  if (type) return `${type} in ${area}`;
-  if (bedsPhrase) return `${capitalise(bedsPhrase)} in ${area}`;
-  return area;
 }
 
 function altTypeChipLabel(altType, filters) {
@@ -6294,19 +6240,6 @@ function parseAlternativeChip(text, currentFilters = {}) {
  * bedroom count), only nearby-area chips are offered — never bedroom Try-N chips.
  */
 const MAX_ALT_CHIPS = 4;
-
-async function locationHasInventoryForPurposeType(effectiveFilters) {
-  const location = (effectiveFilters.location || '').toString().trim();
-  if (!location || !effectiveFilters.purpose) return false;
-  const anyBedFilters = {
-    ...effectiveFilters,
-    bedrooms: null,
-    bedroomsMin: null,
-    bedroomsAny: true,
-    bedroomsResolved: true,
-  };
-  return (await countByFilters(anyBedFilters, location)) > 0;
-}
 
 async function buildNearbyAreaChips(effectiveFilters) {
   const location = (effectiveFilters.location || '').trim();
@@ -6527,35 +6460,6 @@ function searchChangeSummary(previous = {}, next = {}) {
     changes.push(`keeping the rest of your search as ${nextPurpose === 'Rent' ? 'rent' : nextPurpose === 'Off-plan' ? 'off-plan' : 'purchase'}`);
   }
   return changes;
-}
-
-function formatListingBrief(card, index) {
-  const lines = [];
-  const title = card.title || card.id || `Listing ${index}`;
-  const loc = card.location ? ` — ${card.location}` : '';
-  lines.push(`${index}. ${title}${loc}`);
-  const spec = [];
-  if (card.beds === 0 || card.beds === '0') spec.push('Studio');
-  else if (card.beds !== '' && card.beds != null) spec.push(`${card.beds} beds`);
-  if (card.baths !== '' && card.baths != null) spec.push(`${card.baths} baths`);
-  if (card.area) spec.push(card.area);
-  if (spec.length) lines.push(`   ${spec.join(' · ')}`);
-  if (card.price) {
-    const raw = String(card.price).trim();
-    const n = Number(String(raw).replace(/,/g, '').replace(/[^\d.]/g, ''));
-    const formatted = /aed/i.test(raw)
-      ? raw
-      : Number.isFinite(n) && n >= 1000
-        ? formatAed(n)
-        : raw;
-    lines.push(`   ${formatted}`);
-  }
-  const tags = [card.completionStatus, card.furnished, ...(card.features || [])]
-    .map((v) => String(v || '').trim())
-    .filter(Boolean);
-  if (tags.length) lines.push(`   ${tags.slice(0, 4).join(' · ')}`);
-  if (card.listingUrl) lines.push(`   View listing: ${card.listingUrl}`);
-  return lines.join('\n');
 }
 
 function compactMarketSnapshot(stats = {}, purpose) {
@@ -8086,12 +7990,8 @@ async function searchContent({ query }) {
       slug: shortChunks[0]?.slug || topic?.id || null,
     });
     profilePatch.preferredAreas = recommendedLocations.map((r) => r.name);
-    const seeded = applyCmsLocationsToFilters(
-      { ...emptySearchFilters(), source: SEARCH_SOURCE_CMS },
-      recommendedLocations
-    );
-    profilePatch.lastSearchFilters = seeded;
-    profilePatch.propertySearch = propertySearchFromFilters(seeded);
+    // Recommendations are context only. The user's search (purpose, budget, bedrooms, type)
+    // stays intact; the areas are applied only when the user asks to see listings there.
 
     // Best Communities (and other multi-community topics): structured badge, not free-text.
     if (recommendedLocations.length > 1) {
@@ -8153,7 +8053,87 @@ function looksCollected(value) {
   return true;
 }
 
-async function captureLead({ name, phone, email, intent, whatsapp, emailOptional, phoneOptional }, sessionId, { leadAlreadyCaptured } = {}) {
+const LEAD_STAGES = [
+  'research',
+  'discovery',
+  'search',
+  'refinement',
+  'property_interest',
+  'high_intent',
+  'lead_conversion',
+];
+
+/**
+ * Deterministic funnel stage. Never moves backwards within a session, so an informational
+ * question (e.g. about regulations) mid-search does not reset a warm lead.
+ */
+function leadStageForTurn(profile = {}, message = '') {
+  const f = profile.lastSearchFilters || {};
+  const vr = profile.viewingRequest || {};
+  let stage = 'research';
+  if (profile.leadCaptured || vr.submitted) stage = 'lead_conversion';
+  else if (vr.active || isViewingRequestMessage(message) || isAgentContactRequest(message)) stage = 'high_intent';
+  else if (profile.selectedProperty?.refNo) stage = 'property_interest';
+  else if ((profile.shownPropertyIds || []).length && (f.budgetProvided || (f.amenities || []).length)) stage = 'refinement';
+  else if ((profile.shownPropertyIds || []).length) stage = 'search';
+  else if (f.purpose || f.location || (profile.recommendedLocations || []).length) stage = 'discovery';
+  const previous = LEAD_STAGES.indexOf(profile.leadStage);
+  return LEAD_STAGES.indexOf(stage) >= previous ? stage : profile.leadStage;
+}
+
+const LEAD_STAGE_GUIDANCE = {
+  research: 'Do not offer an agent, callback, viewing, or ask for contact details.',
+  discovery: 'Do not offer an agent or callback or ask for contact details. You may offer one relevant search next step.',
+  search: 'Do not ask for contact details. You may offer one way to refine the search.',
+  refinement: 'Do not ask for contact details. You may offer one way to refine the search.',
+  property_interest: 'You may offer, once and in one short sentence, to arrange a viewing or have an agent call about the selected property.',
+  high_intent: 'The visitor wants a viewing or a call. Help complete it: ask only for missing name and phone number.',
+  lead_conversion: 'Contact details were already submitted. Do not ask for them again or re-offer a callback.',
+};
+
+function leadStageInstruction(stage, { informational = false } = {}) {
+  const base = `LEAD STAGE: ${stage || 'research'}. ${LEAD_STAGE_GUIDANCE[stage] || LEAD_STAGE_GUIDANCE.research}`;
+  if (!informational || stage === 'high_intent' || stage === 'lead_conversion') return base;
+  return `${base} This turn is an informational question: answer it and do not offer an agent, a callback, or a viewing in this reply.`;
+}
+
+function leadContextFromProfile(profile = {}) {
+  const f = profile.lastSearchFilters || {};
+  const vr = profile.viewingRequest || {};
+  const locations = (f.locations || []).filter(Boolean);
+  return {
+    stage: profile.leadStage || null,
+    propertyRefNo: vr.propertyRefNo || profile.selectedProperty?.refNo || null,
+    propertyTitle: vr.propertyTitle || profile.selectedProperty?.title || null,
+    purpose: f.purpose || profile.purpose || null,
+    location: locations.length ? locations.join(', ') : f.location || null,
+    propertyType: f.type || null,
+    bedrooms: f.bedrooms ?? f.bedroomsMin ?? null,
+    budgetMin: f.budgetMin ?? null,
+    budgetMax: f.budgetMax ?? null,
+  };
+}
+
+function isValidLeadPhone(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits.length >= 7 && digits.length <= 15;
+}
+
+function leadSummaryForCrm(intent, context = {}) {
+  const parts = [
+    context.propertyRefNo && `Property: ${context.propertyRefNo}${context.propertyTitle ? ` (${context.propertyTitle})` : ''}`,
+    context.purpose && `Purpose: ${context.purpose}`,
+    context.location && `Area: ${context.location}`,
+    context.propertyType && `Type: ${context.propertyType}`,
+    context.bedrooms != null && `Bedrooms: ${context.bedrooms}`,
+    (context.budgetMin != null || context.budgetMax != null) &&
+      `Budget: ${context.budgetMin != null ? formatAed(context.budgetMin) : 'any'} – ${context.budgetMax != null ? formatAed(context.budgetMax) : 'any'}`,
+    context.stage && `Stage: ${context.stage}`,
+  ].filter(Boolean);
+  return [intent, ...parts].join('\n');
+}
+
+async function captureLead({ name, phone, email, intent, whatsapp, emailOptional, phoneOptional }, sessionId, { leadAlreadyCaptured, context = {} } = {}) {
   const contactPhone = looksCollected(phone) ? phone : whatsapp;
   const hasEmail = looksCollected(email);
   const hasPhone = looksCollected(contactPhone);
@@ -8183,29 +8163,85 @@ async function captureLead({ name, phone, email, intent, whatsapp, emailOptional
       profilePatch: {},
       modelPayload: {
         ok: false,
-        error: 'Missing real contact details. Ask the visitor for name, phone, and email — do not invent them.',
+        missingDetails: true,
+        error:
+          'Contact details are still missing. Nothing failed — do not mention errors or system issues. Ask the visitor for their name and phone number (email optional). Do not invent details.',
       },
     };
   }
 
+  if (hasPhone && !isValidLeadPhone(contactPhone)) {
+    return {
+      propertyCards: [],
+      sources: [],
+      leadCaptured: false,
+      profilePatch: {},
+      modelPayload: {
+        ok: false,
+        invalidPhone: true,
+        error: 'The phone number does not look valid. Ask the visitor to re-check it (include the country code).',
+      },
+    };
+  }
+
+  const cleanPhone = hasPhone ? String(contactPhone).trim() : '';
+  const cleanEmail = hasEmail ? String(email).trim().toLowerCase() : '';
+  const leadContext = { ...context };
+  const cleanIntent = String(intent).trim();
   try {
+    // Property requests dedupe per listing; other requests (sell, services) per exact request text.
+    const duplicate = await Lead.findOne({
+      sessionId,
+      'context.propertyRefNo': leadContext.propertyRefNo || null,
+      ...(leadContext.propertyRefNo ? {} : { intent: cleanIntent }),
+      ...(cleanPhone ? { phone: cleanPhone } : { email: cleanEmail }),
+    }).lean();
+    if (duplicate) {
+      return {
+        propertyCards: [],
+        sources: [],
+        leadCaptured: true,
+        profilePatch: { leadCaptured: true },
+        modelPayload: {
+          ok: true,
+          alreadyCaptured: true,
+          note: 'This exact request was already submitted in this chat. Confirm the team has it; do not ask for details again.',
+        },
+      };
+    }
+
     const lead = await Lead.create({
       name: String(name).trim(),
-      phone: hasPhone ? String(contactPhone).trim() : '',
-      email: hasEmail ? String(email).trim().toLowerCase() : '',
-      intent: String(intent).trim(),
+      phone: cleanPhone,
+      email: cleanEmail,
+      intent: cleanIntent,
       sessionId,
+      context: leadContext,
     });
+
+    // Mongo is the source of truth (same as the website lead forms); CRM delivery is recorded, never assumed.
+    const crm = await sendToZapier({
+      source: ZAPIER_SOURCES.ROCKY_AI_CHAT,
+      fullName: lead.name,
+      email: lead.email,
+      phone: lead.phone,
+      message: leadSummaryForCrm(lead.intent, leadContext),
+      sessionId,
+      ...leadContext,
+    });
+    const crmSync = crm.ok ? 'sent' : crm.skipped ? 'skipped' : 'failed';
+    await Lead.updateOne({ _id: lead._id }, { crmSync });
+    console.log('[lead] chat lead saved', { id: String(lead._id), stage: leadContext.stage || null, crmSync });
 
     return {
       propertyCards: [],
       sources: [],
       leadCaptured: true,
-      profilePatch: { leadCaptured: true },
+      profilePatch: { leadCaptured: true, leadStage: 'lead_conversion' },
       modelPayload: { ok: true, id: String(lead._id) },
     };
   } catch (err) {
-    console.error('captureLead failed:', err);
+    console.error('captureLead failed:', err.message);
     return {
       propertyCards: [],
       sources: [],
@@ -8222,7 +8258,7 @@ async function captureLead({ name, phone, email, intent, whatsapp, emailOptional
 async function executeTool(
   name,
   args,
-  { sessionId, lastSearchFilters, leadAlreadyCaptured, slotFlow, userMessage, intent, shownPropertyIds, previousSearch } = {}
+  { sessionId, lastSearchFilters, leadAlreadyCaptured, leadContext, slotFlow, userMessage, intent, shownPropertyIds, previousSearch } = {}
 ) {
   if (name === 'search_properties') {
     return searchProperties(args || {}, {
@@ -8241,7 +8277,10 @@ async function executeTool(
     const phoneOptional = !!argsCopy.phoneOptional;
     delete argsCopy.emailOptional;
     delete argsCopy.phoneOptional;
-    return captureLead({ ...argsCopy, emailOptional, phoneOptional }, sessionId, { leadAlreadyCaptured });
+    return captureLead({ ...argsCopy, emailOptional, phoneOptional }, sessionId, {
+      leadAlreadyCaptured,
+      context: leadContext,
+    });
   }
   return {
     propertyCards: [],
@@ -8302,7 +8341,6 @@ module.exports = {
   listingStartReply,
   listingStartOptions,
   listingIntakeReply,
-  needsListingIntake,
   applyMessageToSearchFilters,
   extractSearchPatch,
   mergeSearchPatch,
@@ -8331,7 +8369,6 @@ module.exports = {
   normalizeSearchProfileAfterPatch,
   getRequiredSearchFields,
   getMissingSearchFields,
-  isPropertyCategoryChange,
   purposeOptionsForFilters,
   isShowMoreRequest,
   hasActiveListingSearch,
@@ -8362,7 +8399,6 @@ module.exports = {
   parseSellListingDetails,
   sellClarificationReply,
   sellFlowOptions,
-  isSellServiceTransitionQuery,
   isMultiPropertyServiceQuery,
   parseSellServiceLocationChoice,
   sellServiceLocationReply,
@@ -8385,7 +8421,6 @@ module.exports = {
   viewingCloseReply,
   viewingContactPrompt,
   logViewingDebug,
-  VIEWING_TIME_OPTIONS,
   VIEWING_NEUTRAL_OPTIONS,
   VIEWING_WEEKEND_OPTIONS,
   resolveSelectedViewingProperty,
@@ -8397,7 +8432,6 @@ module.exports = {
   persistSellListing,
   normalizePurpose,
   parsePurposeFromMessage,
-  parseBedroomsFromMessage,
   parseBedroomChoice,
   applyBedroomChoice,
   isBedroomsSet,
@@ -8413,7 +8447,6 @@ module.exports = {
   isGoldenVisaPropertySearchIntent,
   isShowGoldenVisaPropertiesAction,
   isReadInvestorVisaGuideAction,
-  goldenVisaActionIdFromMessage,
   copyGoldenVisaFlow,
   markGoldenVisaAction,
   parseGoldenVisaMinInvestment,
@@ -8451,7 +8484,6 @@ module.exports = {
   bedroomsChangeReply,
   emptyResultOptions,
   emptyResultsReply,
-  locationEmptyNearbyReply,
   nearbyAreaOptions,
   matchesNamedOption,
   alternativeInventoryLine,
@@ -8472,28 +8504,31 @@ module.exports = {
   isPropertyUiAction,
   SEARCH_OUTCOME,
   formatAed,
-  budgetTooLowReply,
   budgetTooLowOptions,
-  noInventoryReply,
   noInventoryOptions,
   getSegmentMarketStats,
+  communityInventoryFit,
+  inventoryFitLine,
+  parseCardSelection,
+  isViewingRequestMessage,
+  isAgentContactRequest,
+  leadStageForTurn,
+  leadStageInstruction,
+  leadContextFromProfile,
+  isValidLeadPhone,
+  captureLead,
   nextMissingListingSlot,
   isBudgetProvided,
   listingSlotQuestion,
   listingSearchResetPatch,
   qualifyListingSearch,
-  BUY_BUDGET_OPTIONS,
-  RENT_BUDGET_OPTIONS,
-  PROPERTY_TYPE_OPTIONS,
   budgetClarificationReply,
   propertyTypeClarificationReply,
   moreMatchesOptions,
   exactResultsExhaustedOptions,
-  exactResultsExhaustedReply,
   noAdditionalSegmentOptions,
   noAdditionalSegmentReply,
   noMoreExactOptions: exactResultsExhaustedOptions,
-  noMoreExactMatchesReply: exactResultsExhaustedReply,
   extractRecommendedLocationsFromChunks,
   copyRecommendedLocations,
   isCmsPropertyHandoffMessage,
