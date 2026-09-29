@@ -29,6 +29,7 @@ const SINGLE_CHUNK_MAX = 1000;
 const MIN_TAIL_CHARS = 250;
 const EMBED_BATCH_SIZE = 50;
 const MIN_SCORE = 0.25;
+const MAX_CHUNKS_PER_DOCUMENT = 2;
 
 let openaiClient = null;
 const getOpenAI = () => {
@@ -247,11 +248,21 @@ const retrieve = async (query, k = 4) => {
   if (!chunkCache.length) return [];
 
   const [queryVector] = await embed(query);
-  return chunkCache
-    .map((c) => ({ source: c.source, title: c.title, text: c.text, score: cosine(queryVector, c.embedding) }))
+  const ranked = chunkCache
+    .map((c) => ({ source: c.source, refId: c.refId, title: c.title, text: c.text, score: cosine(queryVector, c.embedding) }))
     .filter((c) => c.score >= MIN_SCORE)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, k);
+    .sort((a, b) => b.score - a.score);
+
+  const perDocument = {};
+  const results = [];
+  for (const c of ranked) {
+    const key = `${c.source}|${c.refId || c.title}`;
+    if ((perDocument[key] || 0) >= MAX_CHUNKS_PER_DOCUMENT) continue;
+    perDocument[key] = (perDocument[key] || 0) + 1;
+    results.push(c);
+    if (results.length === k) break;
+  }
+  return results;
 };
 
 // ---------- Chat ----------
