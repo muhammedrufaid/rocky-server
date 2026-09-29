@@ -57,8 +57,24 @@ const sendChatMessage = async (req, res) => {
     }
     const sessionId = rawSessionId || crypto.randomUUID();
 
-    const { reply, properties } = await chat({ sessionId, message });
-    return res.status(200).json({ success: true, sessionId, reply, properties });
+    // Optional UI action, e.g. { type: 'book_viewing', propertyRefNo, location } from a "Book a Viewing" button.
+    const rawAction = req.body?.action;
+    const text = (value) => (typeof value === 'string' ? value.trim().slice(0, 200) : '');
+    const action =
+      rawAction?.type === 'book_viewing'
+        ? { type: 'book_viewing', propertyRefNo: text(rawAction.propertyRefNo), location: text(rawAction.location) }
+        : null;
+
+    const { reply, properties, propertyResult, recommendations, uiActions } = await chat({ sessionId, message, action });
+    return res.status(200).json({
+      success: true,
+      sessionId,
+      reply,
+      properties,
+      ...(propertyResult && { propertyResult }),
+      ...(recommendations?.length && { recommendations }),
+      ...(uiActions?.length && { uiActions }),
+    });
   } catch (error) {
     console.error('[Chatbot] Chat request failed:', error.message);
     return res.status(500).json({ success: false, message: 'Chat is unavailable right now' });

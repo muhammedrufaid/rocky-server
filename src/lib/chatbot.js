@@ -275,11 +275,30 @@ const toNumber = (field) => ({
   $convert: { input: { $replaceAll: { input: { $ifNull: [`$${field}`, ''] }, find: ',', replacement: '' } }, to: 'double', onError: null, onNull: null },
 });
 
-const searchProperties = async ({ purpose, location, type, bedrooms, min_price, max_price } = {}) => {
+// Same detail-page format as the website's property cards: /properties/{rent|buy}/in-dubai/{ref}
+const propertyUrl = (p) =>
+  p.propertyRefNo ? `/properties/${p.propertyPurpose === 'Rent' ? 'rent' : 'buy'}/in-dubai/${encodeURIComponent(p.propertyRefNo)}` : null;
+
+const formatProperty = (p) => ({
+  propertyRefNo: p.propertyRefNo,
+  title: p.propertyTitle,
+  purpose: p.propertyPurpose,
+  type: p.propertyType,
+  bedrooms: p.bedrooms === '0' ? 'Studio' : p.bedrooms,
+  priceAED: p.priceNum,
+  rentFrequency: p.rentFrequency || null,
+  location: [p.towerName, p.subLocality, p.locality].filter(Boolean).join(', '),
+  image: p.images?.[0] || null,
+  url: propertyUrl(p),
+});
+
+// Returns up to `limit` cheapest matches plus the total count and starting (minimum) price.
+const findProperties = async ({ purpose, location, type, bedrooms, min_price, max_price } = {}, limit = 6) => {
   const match = {};
   if (purpose) match.propertyPurpose = String(purpose).toLowerCase() === 'rent' ? 'Rent' : 'Buy';
-  if (location) {
-    const re = new RegExp(escapeRegex(location), 'i');
+  const terms = (Array.isArray(location) ? location : [location]).filter(Boolean);
+  if (terms.length) {
+    const re = new RegExp(terms.map(escapeRegex).join('|'), 'i');
     match.$or = ['locality', 'subLocality', 'towerName', 'city', 'propertyTitle'].map((f) => ({ [f]: re }));
   }
   if (type) match.propertyType = new RegExp(escapeRegex(type), 'i');
@@ -289,35 +308,56 @@ const searchProperties = async ({ purpose, location, type, bedrooms, min_price, 
   if (Number(min_price) > 0) priceMatch.$gte = Number(min_price);
   if (Number(max_price) > 0) priceMatch.$lte = Number(max_price);
 
-  const rows = await Property.aggregate([
+  const [result] = await Property.aggregate([
     { $match: match },
     { $addFields: { priceNum: toNumber('price') } },
     { $match: { priceNum: priceMatch } },
     { $sort: { priceNum: 1 } },
-    { $limit: 6 },
+    { $facet: { items: [{ $limit: limit }], meta: [{ $count: 'total' }] } },
   ]);
 
-  return rows.map((p) => ({
-    propertyRefNo: p.propertyRefNo,
-    title: p.propertyTitle,
-    purpose: p.propertyPurpose,
-    type: p.propertyType,
-    bedrooms: p.bedrooms === '0' ? 'Studio' : p.bedrooms,
-    priceAED: p.priceNum,
-    rentFrequency: p.rentFrequency || null,
-    location: [p.towerName, p.subLocality, p.locality].filter(Boolean).join(', '),
-    image: p.images?.[0] || null,
-  }));
+  const items = result.items.map(formatProperty);
+  return { items, total: result.meta[0]?.total || 0, startingPrice: items[0]?.priceAED || null };
 };
+
+const searchProperties = async (args = {}) => (await findProperties(args)).items;
 
 const LEAD_CONTEXT_FIELDS = [
   ['purpose', 'Purpose'],
   ['location', 'Location'],
+  ['propertyType', 'Property Type'],
   ['budget', 'Budget'],
   ['bedrooms', 'Bedrooms'],
   ['timeline', 'Timeline'],
   ['notes', 'Notes'],
 ];
+const INTEREST_FIELDS = [
+  ['interest', 'Interest'],
+  ['selectedPropertyRefNo', 'Property Ref'],
+  ['selectedPropertyTitle', 'Property'],
+  ['selectedLocation', 'Property Location'],
+];
+
+const fieldLines = (fields, args) =>
+  fields
+    .filter(([key]) => args[key] !== undefined && args[key] !== null && String(args[key]).trim())
+    .map(([key, label]) => `${label}: ${String(args[key]).trim()}`);
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
+
+// One lead per session: a later viewing request or email is added to the existing lead.
+const updateLead = async (sessionId, { email, ...interest } = {}) => {
+  const lead = await ChatbotLead.findOne({ sessionId });
+  if (!lead) return null;
+  if (email && EMAIL_RE.test(email) && !lead.email) lead.email = email;
+  if (interest.interest || interest.selectedPropertyRefNo || interest.selectedLocation) {
+    const lines = fieldLines(INTEREST_FIELDS, { interest: 'Book a Viewing', ...interest });
+    const key = interest.selectedPropertyRefNo ? `Property Ref: ${interest.selectedPropertyRefNo}` : lines.join('\n');
+    if (!lead.message.includes(key)) lead.message = `${lead.message}\n\n${lines.join('\n')}`;
+  }
+  if (lead.isModified()) await lead.save();
+  return lead;
+};
 
 const saveLead = async (args = {}, sessionId) => {
   const name = String(args.name || '').trim();
@@ -325,18 +365,19 @@ const saveLead = async (args = {}, sessionId) => {
   if (!name || !phone) return { ok: false, error: 'name and phone are required' };
 
   const existing = await ChatbotLead.findOne({ sessionId }).select('_id').lean();
-  if (existing) return { ok: true, alreadySaved: true, leadId: String(existing._id) };
+  if (existing) {
+    const { interest, selectedPropertyRefNo, selectedPropertyTitle, selectedLocation, email } = args;
+    await updateLead(sessionId, { email, interest, selectedPropertyRefNo, selectedPropertyTitle, selectedLocation });
+    return { ok: true, alreadySaved: true, leadId: String(existing._id) };
+  }
 
   const value = (key) => (args[key] === undefined || args[key] === null ? '' : String(args[key]).trim());
-  const message = [
-    `Session ID: ${sessionId}`,
-    ...LEAD_CONTEXT_FIELDS.filter(([key]) => value(key)).map(([key, label]) => `${label}: ${value(key)}`),
-  ].join('\n');
+  const message = [`Session ID: ${sessionId}`, ...fieldLines(LEAD_CONTEXT_FIELDS, args), ...fieldLines(INTEREST_FIELDS, args)].join('\n');
 
   const lead = await ChatbotLead.create({
     subSource: CHATBOT_SUB_SOURCE,
     fullName: name,
-    email: /^\S+@\S+\.\S+$/.test(value('email')) ? value('email') : '',
+    email: EMAIL_RE.test(value('email')) ? value('email') : '',
     phone,
     inquiryType: value('purpose') || 'General',
     message,
@@ -422,9 +463,14 @@ const QUESTION_FOR = {
 const OFFER_TEXT = 'Want me to have an agent send you more options or arrange a viewing?';
 const CONTACT_REQUEST_TEXT = "Sure. What's your name and best phone or WhatsApp number?";
 const OFFER_RE = /have an agent|arrange a viewing/i;
-const MISSING_NAME_TEXT = 'Thanks! And what name should the agent ask for?';
-const MISSING_PHONE_TEXT = "Thanks! What's the best phone or WhatsApp number to reach you?";
-const CONTACT_PROMPTS = [CONTACT_REQUEST_TEXT, MISSING_NAME_TEXT, MISSING_PHONE_TEXT];
+const MISSING_NAME_TEXT = "What's your name?";
+const MISSING_PHONE_TEXT = "What's the best phone number to reach you?";
+const EMAIL_TEXT = "What's your email address?";
+const INVALID_EMAIL_TEXT = "That email doesn't look right. What's a valid email address?";
+const CONTACT_PROMPTS = [CONTACT_REQUEST_TEXT, MISSING_NAME_TEXT, MISSING_PHONE_TEXT, EMAIL_TEXT, INVALID_EMAIL_TEXT];
+const EMAIL_FIND_RE = /[^\s@,;:<>()]+@[^\s@,;:<>()]+\.[a-z]{2,}/i;
+const EMAIL_ATTEMPT_RE = /@|\.(com|net|org|ae)\b/i;
+const SKIP_EMAIL_RE = /^\s*(no|nope|nah|skip)\b|no email|don'?t have (one|an email)|rather not|prefer not/i;
 const NEXT_QUESTION = {
   purpose: 'Are you looking to buy or rent?',
   location: 'Which area do you prefer?',
@@ -437,13 +483,39 @@ const DECLINE_RE = /^\s*(no|nope|nah)\b|no thanks|not now|not interested|maybe l
 const ACCEPT_RE = /^\s*(yes|yeah|yep|sure|ok|okay|please|please do|go ahead|of course|sounds good|definitely|why not)\b/i;
 const AGENT_REQUEST_RE = /\b(call me|contact me|talk to an? agent|speak (to|with) an? agent|(arrange|book|schedule) a viewing)\b/i;
 const LOCATION_FIXES = [[/\bDubai Lake Towers\b/gi, 'Jumeirah Lake Towers'], [/\bDubai Village Circle\b/gi, 'Jumeirah Village Circle']];
-const CONTACT_ASK_RE = /\b(agent|viewing|your name|phone|whatsapp|contact (details|number))\b/i;
-const PHONE_RE = /(?:\+?971[\s-]?|0)5\d(?:[\s-]?\d){7}|\+\d[\d\s-]{7,14}\d/;
+const CONTACT_ASK_RE = /\b(agent|viewing|your name|phone|whatsapp|e-?mail|contact (details|number))\b/i;
+// UAE mobile, any "+" international number, or a plain 9–13 digit number (not part of a price like 1,250,000).
+const PHONE_RE = /(?:\+?971[\s-]?|0)5\d(?:[\s-]?\d){7}|\+\d[\d\s-]{7,14}\d|(?<![\d.,])\d{9,13}(?![\d.,])/;
 const NAME_STOPWORDS = new Set([
   'looking', 'interested', 'just', 'here', 'trying', 'planning', 'searching', 'not', 'from', 'in', 'a', 'an', 'the',
   'ok', 'fine', 'good', 'call', 'me', 'contact', 'reach', 'my', 'number', 'is', 'on', 'at', 'phone', 'mobile', 'whatsapp',
 ]);
 const WORD_NUMBERS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+const PROPERTY_TYPES = [
+  [/\b(apartments?|flats?)\b/, 'Apartment'],
+  [/\bvillas?\b/, 'Villa'],
+  [/\btown ?houses?\b/, 'Townhouse'],
+  // Only with property context, so "where is your office?" is not a search.
+  [/\boffice (space|unit)s?\b|\boffices\b|\b(rent|buy|lease)\w* an? office\b/, 'Office'],
+  [/\b(shop|retail) (space|unit)s?\b|\b(rent|buy|lease)\w* an? shop\b/, 'Shop'],
+];
+const RECOMMEND_RE = new RegExp(
+  [
+    /\b(best|top|popular|recommend\w*|good|ideal|suitable|affordable|family[- ]friendly)\b[^?]*\b(areas?|communit(y|ies)|neighbou?rhoods?|locations?|places to live)\b/.source,
+    /\b(areas?|communit(y|ies)|neighbou?rhoods?)\b[^?]*\b(best|popular|recommend\w*|ideal)\b/.source,
+    /\bwhere should i (live|stay|buy|rent|invest)\b/.source,
+  ].join('|'),
+  'i'
+);
+const VIEWING_RE = /\b(arrange|book|schedule)\b[^.?!]*\bviewing\b/i;
+const VIEWING_CONFIRM_TEXT = "Thanks — I'll pass your viewing request to the team.";
+const NEARBY_AREAS = require('../constants/nearbyAreas.json');
+const PREVIEW_LIMIT = 3;
+const MAX_NEARBY_AREAS = 2;
+const MAX_RECOMMENDATIONS = 3;
+// Residential rents top out well below the cheapest sale listing, so budget alone can tell rent from buy.
+const RENT_BUDGET_MAX = 400000;
+const BUY_BUDGET_MIN = 500000;
 
 let locationCache = null;
 const getKnownLocations = async () => {
@@ -473,6 +545,9 @@ const extractQualification = (text, locations) => {
 
   const location = locations.find(([label]) => new RegExp(`\\b${escapeRegex(label)}\\b`, 'i').test(text));
   if (location) found.location = location[1];
+
+  const type = PROPERTY_TYPES.find(([re]) => re.test(t));
+  if (type) found.propertyType = type[1];
 
   if (/\bstudio\b/.test(t)) found.bedrooms = '0';
   const beds = t.match(/\b(\d|one|two|three|four|five|six)\s*-?\s*(bed|beds|bedroom|bedrooms|br|bhk)\b/);
@@ -518,7 +593,7 @@ const rememberSearchCriteria = (qualification, args = {}) => {
 };
 
 const searchArgsFromState = (q) => {
-  const args = { purpose: q.purpose, location: q.location, bedrooms: q.bedrooms, max_price: Number(q.budget) || undefined };
+  const args = { purpose: q.purpose, location: q.location, type: q.propertyType, bedrooms: q.bedrooms, max_price: Number(q.budget) || undefined };
   return Object.fromEntries(Object.entries(args).filter(([, v]) => v !== undefined && v !== ''));
 };
 
@@ -534,12 +609,250 @@ const looseName = (text) => {
   return NAME_STOPWORDS.has(cleaned.split(' ')[0].toLowerCase()) || ACCEPT_RE.test(cleaned) || DECLINE_RE.test(cleaned) ? '' : cleaned;
 };
 
-const describeSearch = (q, maxPrice) => {
-  const beds = q.bedrooms === '0' ? 'studio ' : q.bedrooms ? `${q.bedrooms}-bedroom ` : '';
-  const kind = q.purpose === 'rent' ? 'rental' : 'property for sale';
-  const where = q.location ? ` in ${q.location}` : '';
-  const price = maxPrice ? ` under AED ${Number(maxPrice).toLocaleString('en-US')}${q.purpose === 'rent' ? '/year' : ''}` : '';
-  return `${beds}${kind}${where}${price}`;
+// Clearly provided contact details in one message. A bare name is only accepted when we just asked for it.
+const extractContact = (text, { expectingName = false } = {}) => {
+  const found = {};
+  const email = text.match(EMAIL_FIND_RE);
+  if (email) found.email = email[0].toLowerCase();
+  const rest = text.replace(EMAIL_FIND_RE, ' ');
+
+  const phone = rest.match(PHONE_RE);
+  if (phone) found.phone = phone[0].trim();
+
+  const withPhone = detectContact(rest);
+  const introduced = rest.match(/\b(?:my name is|my name's|name is|name:)\s+([a-z][a-z'-]+(?:\s+[a-z][a-z'-]+)?)/i);
+  const name = withPhone?.name || (introduced && !NAME_STOPWORDS.has(introduced[1].split(/\s+/)[0].toLowerCase()) ? introduced[1] : '');
+  if (name) found.name = name;
+  else if (expectingName) {
+    const loose = looseName(rest);
+    if (loose) found.name = loose;
+  }
+  return found;
+};
+
+// Name, then phone, then email; one question at a time. Null when everything is known.
+const nextContactQuestion = (contact) => {
+  if (!contact.name && !contact.phone) return CONTACT_REQUEST_TEXT;
+  if (!contact.name) return MISSING_NAME_TEXT;
+  if (!contact.phone) return MISSING_PHONE_TEXT;
+  if (!contact.email) return EMAIL_TEXT;
+  return null;
+};
+
+// ---------- Property recommendations ----------
+
+const priceText = (amount, purpose, frequency) => {
+  const period = purpose === 'rent' ? `/${String(frequency || 'Yearly').toLowerCase() === 'yearly' ? 'year' : String(frequency).toLowerCase()}` : '';
+  return `AED ${Number(amount).toLocaleString('en-US')}${period}`;
+};
+
+const BED_WORDS = ['studio', 'one', 'two', 'three', 'four', 'five', 'six'];
+const bedsLabel = (bedrooms, words = false) => {
+  if (bedrooms === undefined || bedrooms === null || bedrooms === '') return '';
+  if (String(bedrooms) === '0') return 'studio';
+  return `${words ? BED_WORDS[bedrooms] || bedrooms : bedrooms}-bedroom`;
+};
+
+// "a 4-bedroom apartment for rent in Dubai Marina within AED 250,000/year" or, with a count, "two-bedroom apartments for rent ..."
+const describeCriteria = (q, { location = q.location, bedrooms = q.bedrooms, maxPrice = q.budget, plural = false, priceWord = 'under' } = {}) => {
+  let noun = q.propertyType ? q.propertyType.toLowerCase() : q.purpose === 'rent' ? 'rental' : 'property';
+  if (plural) noun = { property: 'properties', retail: 'retail units' }[noun] || `${noun}s`;
+  const forWhat = q.purpose === 'rent' ? ' for rent' : q.purpose === 'buy' ? ' for sale' : '';
+  const suffix = noun.startsWith('rental') ? '' : forWhat;
+  const where = location ? ` in ${location}` : '';
+  const price = Number(maxPrice) ? ` ${priceWord} ${priceText(maxPrice, q.purpose)}` : '';
+  const text = `${[bedsLabel(bedrooms, plural), noun].filter(Boolean).join(' ')}${suffix}${where}${price}`;
+  return plural ? text : `${/^[aeiou]/i.test(text) ? 'an' : 'a'} ${text}`;
+};
+
+const areaSlug = (locations) =>
+  locations.map((l) => l.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')).filter(Boolean).join('-or-');
+
+// Same query format as the website's PropertySearchBar: ?search=<area-slug>&type=&max=&beds=
+const listingUrl = ({ purpose, locations = [], propertyType, bedrooms, maxPrice }) => {
+  const params = new URLSearchParams();
+  const slug = areaSlug(locations);
+  if (slug) params.set('search', slug);
+  if (propertyType) params.set('type', propertyType);
+  if (Number(maxPrice)) params.set('max', String(Number(maxPrice)));
+  if (bedrooms !== undefined && bedrooms !== null && bedrooms !== '') params.set('beds', String(bedrooms));
+  const query = params.toString().replace(/\+/g, '%20');
+  return `/properties/${purpose === 'rent' ? 'rent' : 'buy'}/in-dubai${query ? `?${query}` : ''}`;
+};
+
+const bedroomAlternatives = (bedrooms) => {
+  const n = Number(bedrooms);
+  if (bedrooms === undefined || bedrooms === null || bedrooms === '' || !Number.isFinite(n)) return [];
+  return [n - 1, n + 1].filter((b) => b >= 0 && b <= 6).map(String);
+};
+
+// Checks each nearby area with the same criteria; only areas with real inventory are kept.
+const searchAreas = async (args, areas) => {
+  const groups = [];
+  for (const location of areas) {
+    const found = await findProperties({ ...args, location }, PREVIEW_LIMIT);
+    if (found.total) groups.push({ location, bedrooms: args.bedrooms, ...found });
+    if (groups.length === MAX_NEARBY_AREAS) break;
+  }
+  return groups;
+};
+
+// 1. requested area  2. nearby areas  3. requested area, closest bedrooms  4. nearby areas, closest bedrooms
+const searchWithFallback = async (q, maxPrice = q.budget) => {
+  const args = searchArgsFromState({ ...q, budget: maxPrice });
+  const nearby = (q.location && NEARBY_AREAS[q.location]) || [];
+
+  const exact = await findProperties(args, PREVIEW_LIMIT);
+  if (exact.total) return { stage: 'exact', nearby, groups: [{ location: q.location, bedrooms: args.bedrooms, ...exact }] };
+
+  const nearbyGroups = await searchAreas(args, nearby);
+  if (nearbyGroups.length) return { stage: 'nearby', nearby, groups: nearbyGroups };
+
+  const alternatives = bedroomAlternatives(q.bedrooms);
+  for (const bedrooms of alternatives) {
+    const found = await findProperties({ ...args, bedrooms }, PREVIEW_LIMIT);
+    if (found.total) return { stage: 'bedroom', nearby, groups: [{ location: q.location, bedrooms, ...found }] };
+  }
+  for (const bedrooms of alternatives) {
+    const groups = await searchAreas({ ...args, bedrooms }, nearby);
+    if (groups.length) return { stage: 'nearbyBedroom', nearby, groups };
+  }
+  return { stage: 'none', nearby, groups: [] };
+};
+
+// "Jumeirah Lake Towers has 3-bedroom options starting from AED 180,000/year (2 listings)"
+const groupPhrase = (q, g, qualifier = bedsLabel(g.bedrooms) || 'matching') => {
+  const where = g.location || 'Dubai';
+  const price = priceText(g.startingPrice, q.purpose, g.items[0]?.rentFrequency);
+  return g.total === 1
+    ? `${where} has a ${qualifier} option at ${price}`
+    : `${where} has ${qualifier} options starting from ${price} (${g.total} listings)`;
+};
+
+const joinPhrases = (phrases) => (phrases.length > 1 ? `${phrases.slice(0, -1).join(', ')} and ${phrases[phrases.length - 1]}` : phrases[0]);
+
+// Deterministic, precise wording: says exactly which criteria were not met and what changed.
+const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) => {
+  const wanted = describeCriteria(q, { maxPrice, priceWord: 'within' });
+  const missed = `I couldn't find ${cheaper ? wanted.replace(/^an? /, 'a cheaper ') : wanted}`;
+  const [first] = result.groups;
+  const total = result.groups.reduce((sum, g) => sum + g.total, 0);
+
+  if (result.stage === 'exact') {
+    const price = priceText(first.startingPrice, q.purpose, first.items[0]?.rentFrequency);
+    return total === 1
+      ? `I found ${describeCriteria(q, { maxPrice })}, priced at ${price}.`
+      : `I found ${total} ${describeCriteria(q, { maxPrice, plural: true })}, starting from ${price}.`;
+  }
+  if (result.stage === 'nearby') {
+    return `${missed}. Nearby, ${joinPhrases(result.groups.map((g) => groupPhrase(q, g, 'matching')))}.`;
+  }
+  const missedAround = `I couldn't find ${describeCriteria(q, {
+    maxPrice,
+    priceWord: 'within',
+    location: q.location && result.nearby.length ? `${q.location} or nearby areas` : q.location,
+  })}`;
+  if (result.stage === 'bedroom') {
+    return `${missedAround}, but ${groupPhrase(q, first)}.`;
+  }
+  if (result.stage === 'nearbyBedroom') {
+    return `${missedAround}. The closest alternative: ${joinPhrases(result.groups.map((g) => groupPhrase(q, g)))}.`;
+  }
+  let context = '';
+  if (q.location && !cheaper) {
+    const inArea = await findProperties({ purpose: q.purpose, location: q.location }, 1);
+    if (inArea.total) {
+      context = ` ${q.location} currently has ${inArea.total} ${q.purpose === 'rent' ? 'rental' : 'sale'} listing${inArea.total === 1 ? '' : 's'}, but none match all of these criteria.`;
+    }
+  }
+  return `${missed}.${context} Would you like to adjust the budget or try another area?`;
+};
+
+// Preview cards + View All metadata for the frontend.
+const buildPropertyResult = (q, groups, maxPrice) => {
+  const total = groups.reduce((sum, g) => sum + g.total, 0);
+  if (!total) return { properties: [], propertyResult: null, uiActions: [] };
+  const properties = groups
+    .flatMap((g) => g.items)
+    .sort((a, b) => a.priceAED - b.priceAED)
+    .slice(0, PREVIEW_LIMIT);
+  const locations = groups.map((g) => g.location).filter(Boolean);
+  const bedrooms = groups[0].bedrooms;
+  const filters = Object.fromEntries(
+    Object.entries({ purpose: q.purpose, locations, propertyType: q.propertyType, bedrooms, maxPrice: Number(maxPrice) || undefined }).filter(
+      ([, v]) => v !== undefined && v !== '' && !(Array.isArray(v) && !v.length)
+    )
+  );
+  const viewAllUrl = listingUrl({ purpose: q.purpose, locations, propertyType: q.propertyType, bedrooms, maxPrice });
+  const showViewAll = total > PREVIEW_LIMIT;
+  return {
+    properties,
+    propertyResult: { total, showViewAll, location: locations.join(', ') || 'Dubai', purpose: q.purpose, filters, viewAllUrl },
+    uiActions: showViewAll ? [{ type: 'view_all', label: 'View All Properties', url: viewAllUrl }] : [],
+  };
+};
+
+const pickReason = (guide, message) => {
+  const stems = (message.toLowerCase().match(/[a-z]{4,}/g) || []).map((w) => w.slice(0, 5));
+  const highlights = (guide.keyHighlights || []).map((h) => h.title);
+  const relevant = highlights.filter((h) => stems.some((s) => h.toLowerCase().includes(s)));
+  return [...new Set([...relevant, ...highlights])].slice(0, 2).join('; ');
+};
+
+// Areas from the area-guide knowledge, kept only when they have matching listings right now.
+const recommendAreas = async (message, q) => {
+  // Wide k so area guides aren't crowded out by blogs/FAQs; hits stay ordered by relevance.
+  const hits = await retrieve(message, 40);
+  const titles = [...new Set(hits.filter((h) => h.source === 'area').map((h) => h.title))];
+  if (!titles.length) return [];
+  const guides = await AreaGuide.find({ isActive: true, title: { $in: titles } }).select('title slug path keyHighlights listingsSearch').lean();
+  const purposes = q.purpose === 'rent' || q.purpose === 'buy' ? [q.purpose] : ['rent', 'buy'];
+
+  const recommendations = [];
+  for (const title of titles) {
+    const guide = guides.find((g) => g.title === title);
+    if (!guide) continue;
+    const location = guide.listingsSearch?.length ? guide.listingsSearch : guide.title;
+    const prices = [];
+    let total = 0;
+    for (const purpose of purposes) {
+      const found = await findProperties({ purpose, location, type: q.propertyType, bedrooms: q.bedrooms, max_price: Number(q.budget) || undefined }, 1);
+      if (!found.total) continue;
+      total += found.total;
+      prices.push({ purpose, startingPrice: found.startingPrice, rentFrequency: found.items[0].rentFrequency, total: found.total });
+    }
+    if (!total) continue;
+    const primary = [...prices].sort((a, b) => b.total - a.total)[0];
+    recommendations.push({
+      area: guide.title,
+      reason: pickReason(guide, message),
+      total,
+      startingPrices: prices,
+      areaGuideUrl: guide.path || `/area-guides/${guide.slug}`,
+      viewAllUrl: listingUrl({ purpose: primary.purpose, locations: [].concat(location), propertyType: q.propertyType, bedrooms: q.bedrooms, maxPrice: q.budget }),
+    });
+    if (recommendations.length === MAX_RECOMMENDATIONS) break;
+  }
+  return recommendations;
+};
+
+const describeRecommendations = (recommendations) => {
+  const lines = recommendations.map((r) => {
+    const prices = r.startingPrices
+      .map((p) => `${p.purpose === 'rent' ? 'rentals' : 'sales'} from ${priceText(p.startingPrice, p.purpose, p.rentFrequency)}`)
+      .join(', ');
+    return `- ${r.area}: ${r.reason}. ${r.total} listing${r.total === 1 ? '' : 's'}, ${prices}.`;
+  });
+  return `These areas fit, and all have current listings:\n${lines.join('\n')}\n\nWould you like to see listings in one of them?`;
+};
+
+const resolveViewingInterest = async (action, q) => {
+  const ref = String(action?.propertyRefNo || '').trim();
+  const property = ref ? await Property.findOne({ propertyRefNo: ref }).select('propertyRefNo propertyTitle locality').lean() : null;
+  const location = property?.locality?.replace(/\s*\([^)]*\)/, '').trim() || String(action?.location || '').trim() || q.location || '';
+  return Object.fromEntries(
+    Object.entries({ selectedPropertyRefNo: property?.propertyRefNo, selectedPropertyTitle: property?.propertyTitle, selectedLocation: location }).filter(([, v]) => v)
+  );
 };
 
 const mapSentences = (reply, keep) =>
@@ -557,18 +870,21 @@ const limitToOneQuestion = (reply) => {
 };
 const withQuestion = (reply, question) => [removeQuestions(reply), question].filter(Boolean).join('\n\n');
 
-const buildStateContext = (state, { savedName }) => {
+const buildStateContext = (state) => {
   const q = state.qualification;
+  const c = state.contact;
   const contactClosed = state.leadSaved || state.leadOfferDeclined;
+  const nextContactField = state.leadSaved ? 'none' : !c.name ? 'name' : !c.phone ? 'phone' : !c.email ? 'email' : 'none';
   const lines = [
     ...QUALIFICATION_FIELDS.map((field) => `${field}: ${q[field] || 'unknown'}`),
+    `propertyType: ${q.propertyType || 'any'}`,
     `leadOfferShown: ${state.leadOfferShown}`,
     `leadOfferDeclined: ${state.leadOfferDeclined}`,
     `leadSaved: ${state.leadSaved}`,
   ];
+  const contactLines = [`name: ${c.name || 'missing'}`, `phone: ${c.phone || 'missing'}`, `email: ${c.email || 'missing'}`];
 
   const steps = [];
-  if (savedName) steps.push(`A lead was just saved for ${savedName}. Thank them and confirm an agent will contact them shortly.`);
   if (q.purpose && q.purpose !== 'sell' && (q.location || q.budget || q.bedrooms)) {
     steps.push('If search results are provided, summarize them briefly. Only call search_properties again if the user asked for something different.');
   }
@@ -578,10 +894,15 @@ const buildStateContext = (state, { savedName }) => {
       ? `Ask at most ONE question; if it is a qualifying question ask ONLY ${QUESTION_FOR[missing]}. Never ask about known fields.`
       : 'Ask at most ONE question. All qualification details are known.'
   );
-  steps.push('Do NOT offer an agent or viewing and do NOT ask for name, phone or contact details; the system handles that.');
+  steps.push('Do NOT offer an agent or viewing and do NOT ask for name, phone, email or contact details; the system collects them.');
   if (contactClosed) steps.push('The lead is closed for this session (saved or declined).');
 
-  return `SESSION STATE (authoritative; never ask for values that are known):\n${lines.join('\n')}\n\nNEXT STEP:\n- ${steps.join('\n- ')}`;
+  return [
+    `SESSION STATE (authoritative; never ask for values that are known):\n${lines.join('\n')}`,
+    `CONTACT STATE:\n${contactLines.join('\n')}`,
+    `NEXT REQUIRED CONTACT FIELD: ${nextContactField} (asked by the system, never by you)`,
+    `NEXT STEP:\n- ${steps.join('\n- ')}`,
+  ].join('\n\n');
 };
 
 // Drops question sentences that offer an agent or ask for contact details.
@@ -595,11 +916,38 @@ const stripContactAsks = (reply) => {
   return cleaned || 'Happy to keep helping. What would you like to see next?';
 };
 
-const chat = async ({ sessionId, message }) => {
+const SEARCH_FIELDS = ['purpose', 'location', 'propertyType', 'budget', 'bedrooms'];
+
+const hasViewingInterest = (state) => Object.keys(state.viewingInterest).length > 0;
+
+// Saves (or updates) the session's single lead from the collected contact state; returns the confirmation.
+const completeLead = async (state, sessionId) => {
+  const interest = hasViewingInterest(state) ? { interest: 'Book a Viewing', ...state.viewingInterest } : {};
+  const result = await saveLead({ ...state.qualification, ...interest, ...state.contact }, sessionId);
+  if (!result.ok) return null;
+  state.leadSaved = true;
+  return interest.interest
+    ? `Thanks ${state.contact.name}. I'll pass your viewing request to the team.`
+    : `Thanks ${state.contact.name}. An agent will contact you shortly.`;
+};
+
+// Viewing requests are explicit contact actions, so they are allowed even after a generic decline.
+const requestViewing = async (state, sessionId) => {
+  if (state.leadSaved || (await ChatbotLead.exists({ sessionId }))) {
+    await updateLead(sessionId, { email: state.contact.email, ...state.viewingInterest });
+    state.leadSaved = true;
+    return VIEWING_CONFIRM_TEXT;
+  }
+  return nextContactQuestion(state.contact) || (await completeLead(state, sessionId)) || FALLBACK_REPLY;
+};
+
+const chat = async ({ sessionId, message, action }) => {
   const session = await ChatSession.findOne({ sessionId }).lean();
   const history = (session?.messages || []).slice(-HISTORY_LIMIT).map(({ role, content }) => ({ role, content }));
   const state = {
     qualification: { ...(session?.qualification || {}) },
+    viewingInterest: { ...(session?.viewingInterest || {}) },
+    contact: { ...(session?.contact || {}) },
     leadOfferShown: Boolean(session?.leadOfferShown),
     leadOfferDeclined: Boolean(session?.leadOfferDeclined),
     leadSaved: Boolean(session?.leadSaved),
@@ -607,79 +955,112 @@ const chat = async ({ sessionId, message }) => {
 
   let reply = FALLBACK_REPLY;
   let properties = [];
+  let propertyResult = null;
+  let recommendations = [];
+  let uiActions = [];
   let savedName = '';
+  let confirmation = '';
   let criteriaChanged = false;
-  let enforce = false; // true when the reply came from the model or a search and still needs lead/question guardrails
+  let enforce = false; // true when the reply still needs lead/question guardrails
+  let propertyTurn = false; // the soft agent offer only follows a property search
   try {
-    // 1. Qualification
-    const extracted = extractQualification(message, await getKnownLocations());
-    criteriaChanged = ['purpose', 'location', 'budget', 'bedrooms'].some((f) => extracted[f] && extracted[f] !== state.qualification[f]);
-    Object.assign(state.qualification, extracted);
     const q = state.qualification;
+    const isViewingClick = action?.type === 'book_viewing';
 
-    // 2. Offer acceptance / decline
+    // 1. Qualification (skipped for button clicks so a property title can't change the criteria)
+    let extracted = {};
+    if (!isViewingClick) {
+      extracted = extractQualification(message, await getKnownLocations());
+      criteriaChanged = SEARCH_FIELDS.some((f) => extracted[f] && extracted[f] !== q[f]);
+      Object.assign(q, extracted);
+      const budget = Number(q.budget);
+      if (!q.purpose && budget) q.purpose = budget < RENT_BUDGET_MAX ? 'rent' : budget >= BUY_BUDGET_MIN ? 'buy' : undefined;
+      if (!q.purpose) delete q.purpose;
+    }
+
+    // 2. Offer acceptance / decline / viewing requests
     const pastMessages = session?.messages || [];
     const lastAssistant = [...pastMessages].reverse().find((m) => m.role === 'assistant')?.content || '';
-    const previousUser = [...pastMessages].reverse().find((m) => m.role === 'user')?.content || '';
     const offerPending = state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved && OFFER_RE.test(lastAssistant);
     const awaitingContact = !state.leadSaved && CONTACT_PROMPTS.includes(lastAssistant);
-    if (!state.leadSaved && (/just (browsing|looking)/i.test(message) || (offerPending && DECLINE_RE.test(message)))) {
+    const typedViewing = !isViewingClick && VIEWING_RE.test(message);
+    if (!isViewingClick && !state.leadSaved && (/just (browsing|looking)/i.test(message) || (offerPending && DECLINE_RE.test(message)))) {
       state.leadOfferDeclined = true;
     }
     const acceptedOffer =
-      !state.leadSaved && !awaitingContact && ((offerPending && ACCEPT_RE.test(message)) || AGENT_REQUEST_RE.test(message));
+      !isViewingClick && !state.leadSaved && !awaitingContact && ((offerPending && ACCEPT_RE.test(message)) || AGENT_REQUEST_RE.test(message));
+    if (isViewingClick) state.viewingInterest = await resolveViewingInterest(action, q);
+    else if (typedViewing) state.viewingInterest = await resolveViewingInterest({}, q);
 
-    // 3. Contact details (volunteered, or answering the contact prompt)
-    let contact = state.leadSaved ? null : detectContact(message);
-    if (!contact && awaitingContact) {
-      const partial = lastAssistant !== CONTACT_REQUEST_TEXT ? previousUser : '';
-      const phone = (message.match(PHONE_RE) || partial.match(PHONE_RE) || [])[0] || '';
-      const name = looseName(message) || looseName(partial);
-      contact = { name, phone: phone.trim() };
+    // 3. Contact details: merged into the session's contact state; known fields are never cleared
+    const contact = state.contact;
+    let found = {};
+    if (!state.leadSaved && !isViewingClick) {
+      found = extractContact(message, { expectingName: awaitingContact && !contact.name });
+      Object.assign(contact, found);
     }
 
-    // 4. Save lead / fixed lead-flow replies
-    if (contact?.name && contact?.phone) {
-      const result = await saveLead({ ...q, ...contact }, sessionId);
-      if (result.ok) {
-        state.leadSaved = true;
-        savedName = contact.name;
-        reply = `Thanks ${contact.name}. An agent will contact you shortly.`;
+    // 4. Lead capture: ask only for the next missing field (name, phone, email), then save once
+    let contactReply = '';
+    let movedOn = false;
+    const askedEmail = lastAssistant === EMAIL_TEXT || lastAssistant === INVALID_EMAIL_TEXT;
+    const volunteered = Boolean(found.name && found.phone);
+    const wantsContact = acceptedOffer || volunteered || (awaitingContact && (Object.keys(found).length > 0 || askedEmail));
+    if (!state.leadSaved && !isViewingClick && wantsContact) {
+      const emailAttempt = !found.email && EMAIL_ATTEMPT_RE.test(message);
+      const skippedEmail = askedEmail && !found.email && !emailAttempt;
+      const gaveUpOnEmail = lastAssistant === INVALID_EMAIL_TEXT && emailAttempt;
+      if (contact.name && contact.phone && (contact.email || skippedEmail || gaveUpOnEmail)) {
+        confirmation = (await completeLead(state, sessionId)) || '';
+        if (confirmation) {
+          savedName = contact.name;
+          reply = confirmation;
+          movedOn = skippedEmail && !SKIP_EMAIL_RE.test(message);
+        }
+      } else if (contact.name && contact.phone && emailAttempt) {
+        contactReply = INVALID_EMAIL_TEXT;
+      } else {
+        contactReply = nextContactQuestion(contact);
       }
     }
 
-    if (acceptedOffer) {
-      reply = CONTACT_REQUEST_TEXT;
-    } else if (awaitingContact && !savedName && (contact?.name || contact?.phone)) {
-      reply = contact.phone ? MISSING_NAME_TEXT : MISSING_PHONE_TEXT;
-    } else if (savedName && !criteriaChanged) {
+    const wantsAreas = !isViewingClick && !extracted.location && RECOMMEND_RE.test(message);
+    if (wantsAreas) recommendations = await recommendAreas(message, q);
+
+    if (isViewingClick || (typedViewing && state.leadSaved && !savedName)) {
+      reply = await requestViewing(state, sessionId);
+    } else if (contactReply) {
+      reply = contactReply;
+    } else if (savedName && !criteriaChanged && !movedOn) {
       // confirmation already set above
+    } else if (recommendations.length) {
+      reply = describeRecommendations(recommendations);
     } else if (criteriaChanged && !q.location && !q.budget && !q.bedrooms && q.purpose && message.split(/\s+/).length <= 6 && !message.includes('?')) {
       reply = `Great, let's find you ${q.purpose === 'rent' ? 'a rental' : q.purpose === 'buy' ? 'a property to buy' : 'the right buyer'}. ${NEXT_QUESTION.location}`;
     } else {
-      // 5. Search when criteria changed or the user asked for cheaper
-      const canSearch = ['rent', 'buy'].includes(q.purpose) && Boolean(q.location || q.budget || q.bedrooms);
-      const forceRefineSearch = canSearch && !criteriaChanged && REFINE_RE.test(message);
-      let injectedSearch = null;
-      let noResultsText = '';
+      // 5. Property search: requested area first, then deterministic fallbacks
+      const canSearch = ['rent', 'buy'].includes(q.purpose) && Boolean(q.location || q.budget || q.bedrooms || q.propertyType);
+      const cheaper = canSearch && CHEAPER_RE.test(message);
 
-      if (canSearch && CHEAPER_RE.test(message)) {
-        const current = Number(q.budget) || 0;
-        const maxPrice = current ? Math.floor((current * 0.8) / 1000) * 1000 : 0;
-        injectedSearch = searchArgsFromState({ ...q, budget: maxPrice ? String(maxPrice) : q.budget });
-        properties = await searchProperties(injectedSearch);
-        if (properties.length && maxPrice) q.budget = String(maxPrice);
-        if (!properties.length) noResultsText = `I couldn't find a cheaper ${describeSearch(q, maxPrice || q.budget)}.`;
-      } else if (canSearch && criteriaChanged) {
-        injectedSearch = searchArgsFromState(q);
-        properties = await searchProperties(injectedSearch);
-        if (!properties.length) noResultsText = `I couldn't find a ${describeSearch(q, injectedSearch.max_price)}.`;
-      }
-
-      if (noResultsText) {
-        reply = `${noResultsText} Would you like nearby areas or a different budget?`;
+      if (cheaper || (canSearch && criteriaChanged)) {
+        let maxPrice = q.budget;
+        let result;
+        if (cheaper) {
+          const current = Number(q.budget) || 0;
+          if (current) maxPrice = String(Math.floor((current * 0.8) / 1000) * 1000);
+          const found = await findProperties(searchArgsFromState({ ...q, budget: maxPrice }), PREVIEW_LIMIT);
+          result = { stage: found.total ? 'exact' : 'none', nearby: [], groups: found.total ? [{ location: q.location, bedrooms: q.bedrooms, ...found }] : [] };
+        } else {
+          result = await searchWithFallback(q);
+        }
+        reply = await describeResults(q, result, maxPrice, { cheaper });
+        ({ properties, propertyResult, uiActions } = buildPropertyResult(q, result.groups, maxPrice));
+        if (cheaper && result.groups.length) q.budget = maxPrice;
         enforce = true;
+        propertyTurn = true;
       } else {
+        // 6. General questions: knowledge + model wording
+        const forceRefineSearch = canSearch && REFINE_RE.test(message);
         const hits = await retrieve(message, 4);
         const knowledge = hits.length
           ? hits.map((h, i) => `[${i + 1}] (${h.source}) ${h.title}\n${h.text}`).join('\n\n')
@@ -688,15 +1069,8 @@ const chat = async ({ sessionId, message }) => {
           { role: 'system', content: `${RULES}\n\nKNOWLEDGE (use only this for company/area facts):\n${knowledge}` },
           ...history,
           { role: 'user', content: message },
-          { role: 'system', content: buildStateContext(state, { savedName }) },
+          { role: 'system', content: buildStateContext(state) },
         ];
-
-        if (injectedSearch) {
-          messages.push(
-            { role: 'assistant', content: null, tool_calls: [{ id: 'call_state_search', type: 'function', function: { name: 'search_properties', arguments: JSON.stringify(injectedSearch) } }] },
-            { role: 'tool', tool_call_id: 'call_state_search', content: JSON.stringify(properties) }
-          );
-        }
 
         for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
           let toolChoice = round === MAX_TOOL_ROUNDS ? 'none' : 'auto';
@@ -725,7 +1099,7 @@ const chat = async ({ sessionId, message }) => {
               const args = JSON.parse(call.function.arguments || '{}');
               result = await runTool(call.function.name, args, sessionId);
               if (call.function.name === 'search_properties') {
-                properties = result;
+                properties = result.slice(0, PREVIEW_LIMIT);
                 rememberSearchCriteria(state.qualification, args);
               }
               if (call.function.name === 'save_lead' && result.ok) state.leadSaved = true;
@@ -742,7 +1116,7 @@ const chat = async ({ sessionId, message }) => {
     console.error('[Chatbot] Chat failed:', error.message);
   }
 
-  // 6. Guardrails over model/search wording: the offer and next question come from state, never from the model.
+  // 7. Guardrails over wording: the offer and next question come from state, never from the model.
   if (enforce) {
     const q = state.qualification;
     LOCATION_FIXES.forEach(([pattern, fixed]) => {
@@ -750,7 +1124,7 @@ const chat = async ({ sessionId, message }) => {
     });
     reply = stripContactAsks(reply);
     const missing = ['purpose', 'location', 'budget', 'bedrooms'].find((f) => !q[f]);
-    if (q.purpose && q.location && q.budget && !state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved) {
+    if (propertyTurn && q.purpose && q.location && q.budget && !state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved) {
       reply = withQuestion(reply, OFFER_TEXT);
       state.leadOfferShown = true;
     } else if (criteriaChanged && missing) {
@@ -758,8 +1132,8 @@ const chat = async ({ sessionId, message }) => {
     } else {
       reply = limitToOneQuestion(reply);
     }
-    if (savedName && !/agent will contact/i.test(reply)) reply = `Thanks ${savedName}. An agent will contact you shortly.\n\n${reply}`;
   }
+  if (confirmation && !/agent will contact|viewing request/i.test(reply)) reply = `${confirmation}\n\n${reply}`;
 
   const now = new Date();
   await ChatSession.findOneAndUpdate(
@@ -767,6 +1141,8 @@ const chat = async ({ sessionId, message }) => {
     {
       $set: {
         qualification: state.qualification,
+        contact: state.contact,
+        viewingInterest: state.viewingInterest,
         leadOfferShown: state.leadOfferShown,
         leadOfferDeclined: state.leadOfferDeclined,
         leadSaved: state.leadSaved,
@@ -776,7 +1152,7 @@ const chat = async ({ sessionId, message }) => {
     { upsert: true }
   );
 
-  return { reply, properties };
+  return { reply, properties, propertyResult, recommendations, uiActions };
 };
 
 const getHistory = async (sessionId) => {

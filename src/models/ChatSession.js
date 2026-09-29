@@ -35,9 +35,20 @@ const chatSessionSchema = new mongoose.Schema(
     qualification: {
       purpose: { type: String, trim: true },
       location: { type: String, trim: true },
+      propertyType: { type: String, trim: true },
       budget: { type: String, trim: true },
       bedrooms: { type: String, trim: true },
       timeline: { type: String, trim: true },
+    },
+    contact: {
+      name: { type: String, trim: true },
+      phone: { type: String, trim: true },
+      email: { type: String, trim: true, lowercase: true },
+    },
+    viewingInterest: {
+      selectedPropertyRefNo: { type: String, trim: true },
+      selectedPropertyTitle: { type: String, trim: true },
+      selectedLocation: { type: String, trim: true },
     },
     leadOfferShown: {
       type: Boolean,
