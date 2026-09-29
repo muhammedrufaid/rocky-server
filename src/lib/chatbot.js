@@ -224,7 +224,6 @@ const reindex = async () => {
 
   return {
     chunks: docs.length,
-    bySource: chunksBySource,
     documentsBySource,
     chunksBySource,
     duplicatesRemoved: built.length - chunks.length,
