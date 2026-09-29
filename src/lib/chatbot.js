@@ -4,6 +4,7 @@ const OpenAI = require('openai');
 const Faq = require('../models/Faq');
 const CompanyInfo = require('../models/CompanyInfo');
 const AreaGuide = require('../models/AreaGuide');
+const Service = require('../models/Service');
 const ChatbotChunk = require('../models/ChatbotChunk');
 const ChatSession = require('../models/ChatSession');
 const Property = require('../models/Property');
@@ -48,6 +49,8 @@ const embed = async (texts) => {
   return vectors;
 };
 
+const stripHtml = (s) => String(s || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/[ \t]+/g, ' ').trim();
+
 // Splits body by paragraph so each chunk (head + body part) stays under MAX_CHUNK_CHARS.
 const splitText = (head, body) => {
   const room = Math.max(MAX_CHUNK_CHARS - head.length, 200);
@@ -72,11 +75,12 @@ const splitText = (head, body) => {
 };
 
 const buildChunks = async () => {
-  const [faqs, company, areas, knowledge] = await Promise.all([
+  const [faqs, company, areas, knowledge, services] = await Promise.all([
     Faq.find({ isActive: true }).lean(),
     CompanyInfo.find({ isActive: true }).lean(),
     AreaGuide.find({ isActive: true }).lean(),
     ChatbotKnowledge ? ChatbotKnowledge.find({}).lean() : [],
+    Service.find({ isActive: true }).select('title description overview subservices').lean(),
   ]);
 
   const chunks = [];
@@ -95,6 +99,22 @@ const buildChunks = async () => {
     const summary = `${String(a.about || '').slice(0, 600)}${highlights ? `\nHighlights: ${highlights}` : ''}`;
     add('area', a, a.title, `Area guide: ${a.title}\n`, summary);
   });
+  services.forEach((s) => {
+    const subservices = (s.subservices || []).map((sub) => {
+      const detail = [sub.description, ...(sub.points || [])].map(stripHtml).filter(Boolean).join(' ');
+      return `- ${stripHtml(sub.title).replace(/:$/, '')}${detail ? `: ${detail}` : ''}`;
+    });
+    const body = [
+      stripHtml(s.description),
+      ...(s.overview || []).map(stripHtml),
+      subservices.length ? `What's included:\n${subservices.join('\n')}` : '',
+    ].filter(Boolean).join('\n');
+    add('service', s, s.title, `Service: ${s.title}\n\n`, body);
+  });
+  if (services.length) {
+    const overview = services.map((s) => `- ${s.title}: ${stripHtml(s.description)}`).join('\n');
+    add('service', {}, 'All services', 'Service: All Rocky Real Estate services\n\n', overview);
+  }
 
   return chunks;
 };
