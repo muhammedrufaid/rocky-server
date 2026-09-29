@@ -1,6 +1,6 @@
 const Property = require('../models/Property');
 
-// Stored on Mongo docs for AI/semantic search only — never expose via frontend APIs.
+// Legacy vector fields that may still exist on older Mongo docs — never expose via frontend APIs.
 const INTERNAL_PROPERTY_FIELDS = ['embedding', 'embeddingHash'];
 
 const stripInternalPropertyFields = (doc) => {
@@ -85,7 +85,6 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
     offPlan: normalizeStringList(filters.offPlan),
     propertyStatus: normalizeStringList(filters.propertyStatus),
     bedrooms: parseOptionalNumber(filters.bedrooms),
-    bedroomsMin: parseOptionalNumber(filters.bedroomsMin),
     bathrooms: parseOptionalNumber(filters.bathrooms),
     priceMin: parseOptionalNumber(filters.priceMin),
     priceMax: parseOptionalNumber(filters.priceMax),
@@ -127,11 +126,7 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
   };
 
   const numericMatch = {};
-  if (nf.bedroomsMin !== null) {
-    numericMatch.__bedroomsNum = { $gte: nf.bedroomsMin };
-  } else if (nf.bedrooms !== null) {
-    numericMatch.__bedroomsNum = nf.bedrooms;
-  }
+  if (nf.bedrooms !== null) numericMatch.__bedroomsNum = nf.bedrooms;
   if (nf.bathrooms !== null) numericMatch.__bathroomsNum = nf.bathrooms;
 
   if (nf.priceMin !== null || nf.priceMax !== null) {

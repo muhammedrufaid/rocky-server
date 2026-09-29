@@ -1,6 +1,5 @@
 const crypto = require('crypto');
 const Property = require('../models/Property');
-const PropertyEmbedding = require('../models/PropertyEmbedding');
 const propertyService = require('./propertyService');
 const {
   syncAllAreaGuideAgentOrders,
@@ -121,9 +120,6 @@ const removeStaleProperties = async (feedRefNos) => {
 
   const staleRefNos = staleDocs.map((doc) => doc.propertyRefNo);
   const deleteResult = await Property.deleteMany({
-    propertyRefNo: { $in: staleRefNos },
-  });
-  await PropertyEmbedding.deleteMany({
     propertyRefNo: { $in: staleRefNos },
   });
 
