@@ -11,8 +11,8 @@ const { reindex } = require('../src/lib/chatbot');
 
 const run = async () => {
   await connectDB();
-  const { chunks, bySource } = await reindex();
-  console.log(`Embedded ${chunks} chunks`, bySource);
+  const { chunks, documentsBySource, chunksBySource, duplicatesRemoved } = await reindex();
+  console.log(`Embedded ${chunks} chunks (${duplicatesRemoved} duplicates removed)`, { documentsBySource, chunksBySource });
 };
 
 run()

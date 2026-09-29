@@ -24,6 +24,9 @@ try {
 }
 
 const MAX_CHUNK_CHARS = 800;
+const LONG_CHUNK_CHARS = 900;
+const SINGLE_CHUNK_MAX = 1000;
+const MIN_TAIL_CHARS = 250;
 const EMBED_BATCH_SIZE = 50;
 const MIN_SCORE = 0.25;
 
@@ -72,27 +75,67 @@ const blogBlockToText = (block) => {
   return '';
 };
 
-// Splits body by paragraph so each chunk (head + body part) stays under MAX_CHUNK_CHARS.
-const splitText = (head, body) => {
-  const room = Math.max(MAX_CHUNK_CHARS - head.length, 200);
-  const clean = String(body || '').trim();
-  if (clean.length <= room) return [`${head}${clean}`];
+// A unit longer than room is broken by line, then by sentence, then hard-cut as a last resort.
+const splitUnit = (unit, room) => {
+  if (unit.length <= room) return [unit];
+  if (unit.includes('\n')) return packUnits(unit.split('\n'), room, '\n');
+  const sentences = unit.split(/(?<=[.!?])\s+/);
+  if (sentences.length > 1) return packUnits(sentences, room, ' ');
+  const cuts = [];
+  for (let i = 0; i < unit.length; i += room) cuts.push(unit.slice(i, i + room));
+  return cuts;
+};
 
+// Greedy packing of whole units (paragraphs/sections) into parts of at most `room` chars, no overlap.
+const packUnits = (units, room, sep = '\n') => {
   const parts = [];
   let current = '';
-  clean.split(/\n+/).map((p) => p.trim()).filter(Boolean).forEach((para) => {
-    for (let i = 0; i < para.length; i += room) {
-      const piece = para.slice(i, i + room);
-      if (current && current.length + piece.length + 1 > room) {
-        parts.push(current);
-        current = piece;
-      } else {
-        current = current ? `${current}\n${piece}` : piece;
-      }
+  units.flatMap((u) => splitUnit(u, room)).forEach((u) => {
+    if (current && current.length + sep.length + u.length > room) {
+      parts.push(current);
+      current = u;
+    } else {
+      current = current ? `${current}${sep}${u}` : u;
     }
   });
   if (current) parts.push(current);
-  return parts.map((p) => `${head}${p}`);
+
+  const last = parts[parts.length - 1];
+  if (parts.length > 1 && last.length < MIN_TAIL_CHARS && parts[parts.length - 2].length + last.length <= room * 1.2) {
+    parts[parts.length - 2] += `${sep}${parts.pop()}`;
+  }
+  return parts;
+};
+
+// Short documents stay as one chunk; long ones are packed by paragraph with only `head` repeated.
+const splitText = (head, body, maxChars = MAX_CHUNK_CHARS) => {
+  const units = (Array.isArray(body) ? body : String(body || '').split(/\n+/))
+    .map((u) => String(u || '').trim())
+    .filter(Boolean);
+  const joined = units.join('\n');
+  if (!joined) return [];
+  if (head.length + joined.length <= Math.max(maxChars, SINGLE_CHUNK_MAX)) return [`${head}${joined}`];
+
+  const room = Math.max(maxChars - head.length, 200);
+  return packUnits(units, room).map((p) => `${head}${p}`);
+};
+
+const blogUnits = (blog) => {
+  const units = blog.description ? [`Summary: ${stripHtml(blog.description)}`] : [];
+  let pendingHeading = '';
+  (blog.content || []).forEach((block) => {
+    const text = blogBlockToText(block);
+    if (!text) return;
+    if (block.type === 'heading2' || block.type === 'heading3') {
+      pendingHeading = pendingHeading ? `${pendingHeading}\n${text}` : text;
+      return;
+    }
+    units.push(pendingHeading ? `${pendingHeading}\n${text}` : text);
+    pendingHeading = '';
+  });
+  if (pendingHeading) units.push(pendingHeading);
+  (blog.faqs || []).forEach((f) => units.push(`Q: ${stripHtml(f.question)}\nA: ${stripHtml(f.answer)}`));
+  return units;
 };
 
 const buildChunks = async () => {
@@ -106,8 +149,8 @@ const buildChunks = async () => {
   ]);
 
   const chunks = [];
-  const add = (source, doc, title, head, body) => {
-    splitText(head, body).forEach((text) => chunks.push({ source, refId: doc._id, title, text }));
+  const add = (source, doc, title, head, body, maxChars) => {
+    splitText(head, body, maxChars).forEach((text) => chunks.push({ source, refId: doc._id, title, text }));
   };
 
   faqs.forEach((f) => add('faq', f, f.question, `Q: ${f.question}\nA: `, f.answer));
@@ -126,32 +169,40 @@ const buildChunks = async () => {
       const detail = [sub.description, ...(sub.points || [])].map(stripHtml).filter(Boolean).join(' ');
       return `- ${stripHtml(sub.title).replace(/:$/, '')}${detail ? `: ${detail}` : ''}`;
     });
-    const body = [
-      stripHtml(s.description),
-      ...(s.overview || []).map(stripHtml),
-      subservices.length ? `What's included:\n${subservices.join('\n')}` : '',
-    ].filter(Boolean).join('\n');
-    add('service', s, s.title, `Service: ${s.title}\n\n`, body);
+    const head = `Service: ${s.title}\n\n`;
+    const overview = [stripHtml(s.description), ...(s.overview || []).map(stripHtml)].filter(Boolean);
+    const included = subservices.length ? `What's included:\n${subservices.join('\n')}` : '';
+    const whole = [...overview, included].filter(Boolean).join('\n');
+
+    if (head.length + whole.length <= SINGLE_CHUNK_MAX) {
+      add('service', s, s.title, head, whole);
+    } else {
+      add('service', s, s.title, head, overview, LONG_CHUNK_CHARS);
+      add('service', s, s.title, `${head}What's included:\n`, subservices, LONG_CHUNK_CHARS);
+    }
   });
   if (services.length) {
     const overview = services.map((s) => `- ${s.title}: ${stripHtml(s.description)}`).join('\n');
     add('service', {}, 'All services', 'Service: All Rocky Real Estate services\n\n', overview);
   }
   blogs.forEach((b) => {
-    const body = [
-      b.description ? `Summary: ${stripHtml(b.description)}` : '',
-      ...(b.content || []).map(blogBlockToText),
-      ...(b.faqs || []).map((f) => `Q: ${stripHtml(f.question)}\nA: ${stripHtml(f.answer)}`),
-    ].filter(Boolean).join('\n');
     const head = `Blog: ${b.title}\n${b.category ? `Category: ${b.category}\n` : ''}\n`;
-    add('blog', b, b.title, head, body);
+    add('blog', b, b.title, head, blogUnits(b), LONG_CHUNK_CHARS);
   });
 
   return chunks;
 };
 
 const reindex = async () => {
-  const chunks = await buildChunks();
+  const built = await buildChunks();
+  const seen = new Set();
+  const chunks = built.filter((c) => {
+    const key = `${c.source}|${c.refId || ''}|${c.text.toLowerCase().replace(/\s+/g, ' ').trim()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
   const vectors = chunks.length ? await embed(chunks.map((c) => c.text)) : [];
   const docs = chunks.map((c, i) => ({ ...c, embedding: vectors[i] }));
 
@@ -159,8 +210,24 @@ const reindex = async () => {
   if (docs.length) await ChatbotChunk.insertMany(docs);
   chunkCache = null;
 
-  const bySource = docs.reduce((acc, d) => ({ ...acc, [d.source]: (acc[d.source] || 0) + 1 }), {});
-  return { chunks: docs.length, bySource };
+  const chunksBySource = {};
+  const refIdsBySource = {};
+  docs.forEach((d) => {
+    chunksBySource[d.source] = (chunksBySource[d.source] || 0) + 1;
+    refIdsBySource[d.source] = refIdsBySource[d.source] || new Set();
+    if (d.refId) refIdsBySource[d.source].add(String(d.refId));
+  });
+  const documentsBySource = Object.fromEntries(
+    Object.entries(refIdsBySource).map(([source, ids]) => [source, ids.size])
+  );
+
+  return {
+    chunks: docs.length,
+    bySource: chunksBySource,
+    documentsBySource,
+    chunksBySource,
+    duplicatesRemoved: built.length - chunks.length,
+  };
 };
 
 const cosine = (a, b) => {
