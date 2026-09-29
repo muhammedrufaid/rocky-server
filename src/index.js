@@ -78,6 +78,7 @@ app.use('/api/blogs', blogRoutes);
 app.use('/api/team-members', teamMemberRoutes);
 app.use('/api/company-info', companyInfoRoutes);
 app.use('/api/reviews', googleReviewRoutes);
+app.use('/api/chatbot', require('./routes/chatbotRoutes'));
 
 // Google Business Profile OAuth (company integration, not website login).
 // Must stay outside /api so the shared API key middleware does not block Google's redirect.
