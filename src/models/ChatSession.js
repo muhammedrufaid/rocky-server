@@ -32,6 +32,25 @@ const chatSessionSchema = new mongoose.Schema(
       type: [chatMessageSchema],
       default: [],
     },
+    qualification: {
+      purpose: { type: String, trim: true },
+      location: { type: String, trim: true },
+      budget: { type: String, trim: true },
+      bedrooms: { type: String, trim: true },
+      timeline: { type: String, trim: true },
+    },
+    leadOfferShown: {
+      type: Boolean,
+      default: false,
+    },
+    leadOfferDeclined: {
+      type: Boolean,
+      default: false,
+    },
+    leadSaved: {
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true }
 );

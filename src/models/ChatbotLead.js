@@ -36,6 +36,12 @@ const chatbotLeadSchema = new mongoose.Schema(
       trim: true,
       default: '',
     },
+    sessionId: {
+      type: String,
+      trim: true,
+      default: '',
+      index: true,
+    },
   },
   { timestamps: true }
 );

@@ -325,6 +325,9 @@ const saveLead = async (args = {}, sessionId) => {
   const phone = String(args.phone || '').trim();
   if (!name || !phone) return { ok: false, error: 'name and phone are required' };
 
+  const existing = await ChatbotLead.findOne({ sessionId }).select('_id').lean();
+  if (existing) return { ok: true, alreadySaved: true, leadId: String(existing._id) };
+
   const value = (key) => (args[key] === undefined || args[key] === null ? '' : String(args[key]).trim());
   const message = [
     `Session ID: ${sessionId}`,
@@ -338,6 +341,7 @@ const saveLead = async (args = {}, sessionId) => {
     phone,
     inquiryType: value('purpose') || 'General',
     message,
+    sessionId,
   });
 
   try {
@@ -406,58 +410,282 @@ const runTool = async (name, args, sessionId) => {
   return { error: `Unknown tool ${name}` };
 };
 
+// ---------- Session state guardrails ----------
+
+const QUALIFICATION_FIELDS = ['purpose', 'location', 'budget', 'bedrooms', 'timeline'];
+const QUESTION_FOR = {
+  purpose: 'whether they want to buy or rent',
+  location: 'which area they prefer',
+  budget: 'their budget in AED',
+  bedrooms: 'how many bedrooms they need',
+  timeline: 'when they plan to move or buy',
+};
+const OFFER_TEXT = 'Want me to have an agent send you more options or arrange a viewing?';
+const CONTACT_REQUEST_TEXT = "Great! What's your name and the best phone or WhatsApp number to reach you?";
+const OFFER_RE = /have an agent|arrange a viewing/i;
+const REFINE_RE = /\b(cheaper|more affordable|lower price|bigger|larger|more options|other options)\b/i;
+const DECLINE_RE = /^\s*(no|nope|nah)\b|no thanks|not now|not interested|maybe later|i'?m good/i;
+const ACCEPT_RE = /\b(yes|yeah|yep|sure|ok|okay|please|go ahead|of course)\b/i;
+const CONTACT_ASK_RE = /\b(agent|viewing|your name|phone|whatsapp|contact (details|number))\b/i;
+const PHONE_RE = /(?:\+?971[\s-]?|0)5\d(?:[\s-]?\d){7}|\+\d[\d\s-]{7,14}\d/;
+const NAME_STOPWORDS = new Set([
+  'looking', 'interested', 'just', 'here', 'trying', 'planning', 'searching', 'not', 'from', 'in', 'a', 'an', 'the',
+  'ok', 'fine', 'good', 'call', 'me', 'contact', 'reach', 'my', 'number', 'is', 'on', 'at', 'phone', 'mobile', 'whatsapp',
+]);
+const WORD_NUMBERS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+
+let locationCache = null;
+const getKnownLocations = async () => {
+  if (locationCache) return locationCache;
+  const [localities, areas] = await Promise.all([Property.distinct('locality'), AreaGuide.distinct('title')]);
+  // [text to match, canonical name], so "JVC" resolves to "Jumeirah Village Circle".
+  const names = new Map();
+  [...localities, ...areas].filter(Boolean).forEach((raw) => {
+    const canonical = raw.replace(/\s*\([^)]*\)/, '').trim();
+    names.set(canonical, canonical);
+    const alias = raw.match(/\(([^)]+)\)/);
+    if (alias && !names.has(alias[1].trim())) names.set(alias[1].trim(), canonical);
+  });
+  locationCache = [...names.entries()]
+    .filter(([label]) => label.length >= 3 && label.toLowerCase() !== 'dubai')
+    .sort((a, b) => b[0].length - a[0].length);
+  return locationCache;
+};
+
+const extractQualification = (text, locations) => {
+  const t = text.toLowerCase();
+  const found = {};
+  const rent = /\b(rent|renting|rental|lease)\b/.test(t);
+  const buy = /\b(buy|buying|purchase|purchasing|invest|investing)\b/.test(t);
+  const sell = /\b(sell|selling)\b/.test(t);
+  if (rent + buy + sell === 1) found.purpose = rent ? 'rent' : buy ? 'buy' : 'sell';
+
+  const location = locations.find(([label]) => new RegExp(`\\b${escapeRegex(label)}\\b`, 'i').test(text));
+  if (location) found.location = location[1];
+
+  if (/\bstudio\b/.test(t)) found.bedrooms = '0';
+  const beds = t.match(/\b(\d|one|two|three|four|five|six)\s*-?\s*(bed|beds|bedroom|bedrooms|br|bhk)\b/);
+  if (beds) found.bedrooms = String(WORD_NUMBERS[beds[1]] || beds[1]);
+
+  const noPhone = t.replace(new RegExp(PHONE_RE.source, 'g'), ' ');
+  const short = noPhone.match(/(\d+(?:\.\d+)?)\s*(k|m|mn|million)\b/);
+  const long =
+    noPhone.match(/(?:aed|budget|under|below|around|up to|upto|max)\s*(?:of\s*|is\s*)?(?:aed\s*)?(\d[\d,]{3,})/) ||
+    noPhone.match(/(\d[\d,]{4,})\s*(?:aed|dirhams?|per year|a year|yearly)/);
+  if (short) found.budget = String(Math.round(parseFloat(short[1]) * (short[2] === 'k' ? 1000 : 1000000)));
+  else if (long) found.budget = long[1].replace(/,/g, '');
+
+  const timeline = t.match(/\b(asap|immediately|right away|this (week|month|year)|next (week|month|year)|(in|within) \d+ (days?|weeks?|months?))\b/);
+  if (timeline) found.timeline = timeline[0];
+  return found;
+};
+
+// Returns { name, phone } only when the message clearly contains both.
+const detectContact = (text) => {
+  const phoneMatch = text.match(PHONE_RE);
+  if (!phoneMatch) return null;
+
+  const introduced = text.match(/\b(?:i'?m|i am|my name is|my name's|this is|name is|name:)\s+([a-z][a-z'-]+(?:\s+[a-z][a-z'-]+)?)/i);
+  let candidate = introduced ? introduced[1] : '';
+  if (!candidate) {
+    const before = text.slice(0, phoneMatch.index).replace(/[\s,;:–-]+$/, '').trim();
+    if (/^[a-z][a-z' -]{1,40}$/i.test(before) && before.split(/\s+/).length <= 3) candidate = before;
+  }
+
+  const words = [];
+  for (const word of candidate.split(/\s+/).filter(Boolean)) {
+    if (NAME_STOPWORDS.has(word.toLowerCase())) break;
+    words.push(word);
+  }
+  return words.length ? { name: words.join(' '), phone: phoneMatch[0].trim() } : null;
+};
+
+// Budget/bedrooms only come from the user's own words; model-chosen search args may be guesses.
+const rememberSearchCriteria = (qualification, args = {}) => {
+  if (!qualification.purpose && args.purpose) qualification.purpose = String(args.purpose).toLowerCase();
+  if (!qualification.location && args.location) qualification.location = String(args.location);
+};
+
+const searchArgsFromState = (q) => {
+  const args = { purpose: q.purpose, location: q.location, bedrooms: q.bedrooms, max_price: Number(q.budget) || undefined };
+  return Object.fromEntries(Object.entries(args).filter(([, v]) => v !== undefined && v !== ''));
+};
+
+// When the agent offer is shown, it must be the only question in the reply.
+const keepOnlyOfferQuestion = (reply) =>
+  reply
+    .split('\n')
+    .map((line) => line.split(/(?<=[.!?])\s+/).filter((s) => !s.includes('?') || OFFER_RE.test(s)).join(' '))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+const buildStateContext = (state, { savedName, acceptedOffer }) => {
+  const q = state.qualification;
+  const contactClosed = state.leadSaved || state.leadOfferDeclined;
+  const lines = [
+    ...QUALIFICATION_FIELDS.map((field) => `${field}: ${q[field] || 'unknown'}`),
+    `leadOfferShown: ${state.leadOfferShown}`,
+    `leadOfferDeclined: ${state.leadOfferDeclined}`,
+    `leadSaved: ${state.leadSaved}`,
+  ];
+
+  const steps = [];
+  if (savedName) steps.push(`A lead was just saved for ${savedName}. Thank them and confirm an agent will contact them shortly.`);
+  if (acceptedOffer) steps.push('The user accepted the agent offer. Ask ONLY for their name and phone/WhatsApp number.');
+  if (q.purpose && q.purpose !== 'sell' && (q.location || q.budget || q.bedrooms)) {
+    steps.push('If the latest message adds or changes search criteria, call search_properties with ALL known criteria (use budget as max_price).');
+  }
+  if (!acceptedOffer) {
+    const missing = QUALIFICATION_FIELDS.find((field) => !q[field]);
+    if (q.purpose && q.location && q.budget && !state.leadOfferShown && !contactClosed) {
+      steps.push(`End your reply with exactly: "${OFFER_TEXT}" and ask no other question.`);
+    } else if (missing) {
+      steps.push(`Ask at most ONE question, and if it is a qualifying question ask ONLY ${QUESTION_FOR[missing]}. Never ask about known fields.`);
+    } else {
+      steps.push('All qualification details are known. Do not ask qualifying questions.');
+    }
+  }
+  if (contactClosed) steps.push('Do NOT offer an agent or viewing, and do NOT ask for name, phone or contact details.');
+
+  return `SESSION STATE (authoritative; never ask for values that are known):\n${lines.join('\n')}\n\nNEXT STEP:\n- ${steps.join('\n- ')}`;
+};
+
+// Drops question sentences that offer an agent or ask for contact details.
+const stripContactAsks = (reply) => {
+  const cleaned = reply
+    .split('\n')
+    .map((line) => line.split(/(?<=[.!?])\s+/).filter((s) => !(s.includes('?') && CONTACT_ASK_RE.test(s))).join(' '))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return cleaned || 'Happy to keep helping. What would you like to see next?';
+};
+
 const chat = async ({ sessionId, message }) => {
   const session = await ChatSession.findOne({ sessionId }).lean();
   const history = (session?.messages || []).slice(-HISTORY_LIMIT).map(({ role, content }) => ({ role, content }));
+  const state = {
+    qualification: { ...(session?.qualification || {}) },
+    leadOfferShown: Boolean(session?.leadOfferShown),
+    leadOfferDeclined: Boolean(session?.leadOfferDeclined),
+    leadSaved: Boolean(session?.leadSaved),
+  };
 
   let reply = FALLBACK_REPLY;
   let properties = [];
+  let savedName = '';
   try {
-    const hits = await retrieve(message, 4);
-    const knowledge = hits.length
-      ? hits.map((h, i) => `[${i + 1}] (${h.source}) ${h.title}\n${h.text}`).join('\n\n')
-      : 'No relevant knowledge found.';
-    const messages = [
-      { role: 'system', content: `${RULES}\n\nKNOWLEDGE (use only this for company/area facts):\n${knowledge}` },
-      ...history,
-      { role: 'user', content: message },
-    ];
+    const extracted = extractQualification(message, await getKnownLocations());
+    const criteriaChanged = ['purpose', 'location', 'budget', 'bedrooms'].some(
+      (f) => extracted[f] && extracted[f] !== state.qualification[f]
+    );
+    Object.assign(state.qualification, extracted);
 
-    for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
-      const completion = await getOpenAI().chat.completions.create({
-        model: process.env.OPENAI_CHAT_MODEL,
-        reasoning_effort: process.env.OPENAI_REASONING_EFFORT,
-        messages,
-        tools: TOOLS,
-        tool_choice: round === MAX_TOOL_ROUNDS ? 'none' : 'auto',
-      });
-      const msg = completion.choices[0].message;
-      if (!msg.tool_calls?.length) {
-        if (msg.content?.trim()) reply = msg.content.trim();
-        break;
+    const lastAssistant = [...(session?.messages || [])].reverse().find((m) => m.role === 'assistant');
+    const offerPending =
+      state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved && OFFER_RE.test(lastAssistant?.content || '');
+    if (!state.leadSaved && (/just (browsing|looking)/i.test(message) || (offerPending && DECLINE_RE.test(message)))) {
+      state.leadOfferDeclined = true;
+    }
+    const acceptedOffer = offerPending && !state.leadOfferDeclined && ACCEPT_RE.test(message);
+
+    const contact = !state.leadSaved && detectContact(message);
+    if (contact) {
+      const result = await saveLead({ ...state.qualification, ...contact }, sessionId);
+      if (result.ok) {
+        state.leadSaved = true;
+        savedName = contact.name;
+        reply = `Thanks, ${contact.name}! An agent will contact you shortly.`;
+      }
+    }
+
+    if (acceptedOffer && !state.leadSaved) {
+      reply = CONTACT_REQUEST_TEXT;
+    } else {
+      const q = state.qualification;
+      const canSearch = ['rent', 'buy'].includes(q.purpose) && Boolean(q.location || q.budget || q.bedrooms);
+      const forceRefineSearch = canSearch && !criteriaChanged && REFINE_RE.test(message);
+      const hits = await retrieve(message, 4);
+      const knowledge = hits.length
+        ? hits.map((h, i) => `[${i + 1}] (${h.source}) ${h.title}\n${h.text}`).join('\n\n')
+        : 'No relevant knowledge found.';
+      const messages = [
+        { role: 'system', content: `${RULES}\n\nKNOWLEDGE (use only this for company/area facts):\n${knowledge}` },
+        ...history,
+        { role: 'user', content: message },
+        { role: 'system', content: buildStateContext(state, { savedName, acceptedOffer }) },
+      ];
+
+      if (canSearch && criteriaChanged) {
+        const args = searchArgsFromState(q);
+        properties = await searchProperties(args);
+        messages.push(
+          { role: 'assistant', content: null, tool_calls: [{ id: 'call_state_search', type: 'function', function: { name: 'search_properties', arguments: JSON.stringify(args) } }] },
+          { role: 'tool', tool_call_id: 'call_state_search', content: JSON.stringify(properties) }
+        );
       }
 
-      messages.push(msg);
-      for (const call of msg.tool_calls) {
-        let result;
-        try {
-          result = await runTool(call.function.name, JSON.parse(call.function.arguments || '{}'), sessionId);
-          if (call.function.name === 'search_properties') properties = result;
-        } catch (toolError) {
-          console.error(`[Chatbot] Tool ${call.function.name} failed:`, toolError.message);
-          result = { error: 'Tool failed' };
+      for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
+        let toolChoice = round === MAX_TOOL_ROUNDS ? 'none' : 'auto';
+        if (round === 0 && forceRefineSearch) toolChoice = { type: 'function', function: { name: 'search_properties' } };
+
+        const completion = await getOpenAI().chat.completions.create({
+          model: process.env.OPENAI_CHAT_MODEL,
+          reasoning_effort: process.env.OPENAI_REASONING_EFFORT,
+          messages,
+          tools: TOOLS,
+          tool_choice: toolChoice,
+        });
+        const msg = completion.choices[0].message;
+        if (!msg.tool_calls?.length) {
+          if (msg.content?.trim()) reply = msg.content.trim();
+          break;
         }
-        messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
+
+        messages.push(msg);
+        for (const call of msg.tool_calls) {
+          let result;
+          try {
+            const args = JSON.parse(call.function.arguments || '{}');
+            result = await runTool(call.function.name, args, sessionId);
+            if (call.function.name === 'search_properties') {
+              properties = result;
+              rememberSearchCriteria(state.qualification, args);
+            }
+            if (call.function.name === 'save_lead' && result.ok) state.leadSaved = true;
+          } catch (toolError) {
+            console.error(`[Chatbot] Tool ${call.function.name} failed:`, toolError.message);
+            result = { error: 'Tool failed' };
+          }
+          messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
+        }
       }
     }
   } catch (error) {
     console.error('[Chatbot] Chat failed:', error.message);
   }
 
+  if (savedName && !/\bagent\b/i.test(reply)) reply = `Thanks, ${savedName}! An agent will contact you shortly.\n\n${reply}`;
+  if (state.leadSaved || state.leadOfferDeclined) {
+    reply = stripContactAsks(reply);
+  } else if (OFFER_RE.test(reply)) {
+    state.leadOfferShown = true;
+    reply = keepOnlyOfferQuestion(reply);
+  }
+
   const now = new Date();
   await ChatSession.findOneAndUpdate(
     { sessionId },
-    { $push: { messages: { $each: [{ role: 'user', content: message, at: now }, { role: 'assistant', content: reply, at: now }] } } },
+    {
+      $set: {
+        qualification: state.qualification,
+        leadOfferShown: state.leadOfferShown,
+        leadOfferDeclined: state.leadOfferDeclined,
+        leadSaved: state.leadSaved,
+      },
+      $push: { messages: { $each: [{ role: 'user', content: message, at: now }, { role: 'assistant', content: reply, at: now }] } },
+    },
     { upsert: true }
   );
 
