@@ -38,6 +38,7 @@ const chatSessionSchema = new mongoose.Schema(
       propertyType: { type: String, trim: true },
       budget: { type: String, trim: true },
       bedrooms: { type: String, trim: true },
+      furnishing: { type: String, trim: true },
       timeline: { type: String, trim: true },
     },
     contact: {

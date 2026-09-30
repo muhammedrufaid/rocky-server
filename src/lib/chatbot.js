@@ -307,7 +307,9 @@ const formatProperty = (p) => ({
 
 // Same query as the buy/rent listing pages, so a View All URL built from these args shows the same total.
 // Area terms are what the listing page derives from the URL slug ("dubai-marina" -> "dubai marina").
-const findProperties = async ({ purpose, location, type, bedrooms, min_price, max_price } = {}, limit = 6) => {
+const FURNISHED_VALUES = { furnished: 'Yes', unfurnished: 'No', 'partly furnished': 'Partly' };
+
+const findProperties = async ({ purpose, location, type, bedrooms, furnishing, min_price, max_price } = {}, limit = 6) => {
   const search = (Array.isArray(location) ? location : [location]).filter(Boolean).map((l) => areaSlug([l]).replace(/-/g, ' '));
   const hasBeds = bedrooms !== undefined && bedrooms !== null && bedrooms !== '';
   const filters = {
@@ -315,6 +317,7 @@ const findProperties = async ({ purpose, location, type, bedrooms, min_price, ma
     priceMin: Number(min_price) > 0 ? Number(min_price) : undefined,
     priceMax: Number(max_price) > 0 ? Number(max_price) : undefined,
     beds: hasBeds ? parseInt(bedrooms, 10) || 0 : undefined,
+    furnished: FURNISHED_VALUES[furnishing],
   };
   const forced = CATEGORY_MATCH[toCategory(purpose)] || {};
 
@@ -538,26 +541,36 @@ const getKnownLocations = async () => {
     const alias = raw.match(/\(([^)]+)\)/);
     if (alias && !names.has(alias[1].trim())) names.set(alias[1].trim(), canonical);
   });
-  locationCache = [...names.entries()]
+  const entries = [...names.entries()]
     .filter(([label]) => label.length >= 3 && label.toLowerCase() !== 'dubai')
-    .sort((a, b) => b[0].length - a[0].length);
+    .map(([label, canonical]) => [label, canonical, new RegExp(`\\b${escapeRegex(label)}\\b`, 'i')]);
+  // "in springs" -> "The Springs". Without "The" the name must follow a place word, so "sea views" or "lush greens" don't match.
+  names.forEach((canonical, label) => {
+    const bare = label.match(/^the\s+(.{3,})$/i);
+    if (bare && !names.has(bare[1])) entries.push([bare[1], canonical, new RegExp(`\\b(?:in|at|near|around|about|for)\\s+${escapeRegex(bare[1])}\\b`, 'i')]);
+  });
+  locationCache = entries.sort((a, b) => b[0].length - a[0].length);
   return locationCache;
 };
 
 const extractQualification = (text, locations) => {
   const t = text.toLowerCase();
   const found = {};
-  const rent = /\b(rent|renting|rental|lease)\b/.test(t);
+  const rent = /\b(rent|rents|renting|rentals?|lease|leasing)\b/.test(t);
   const buy = /\b(buy|buying|purchase|purchasing|invest|investing)\b/.test(t);
   const sell = /\b(sell|selling)\b/.test(t);
   if (/\boff[- ]?plan\b/.test(t)) found.purpose = 'off-plan';
   else if (rent + buy + sell === 1) found.purpose = rent ? 'rent' : buy ? 'buy' : 'sell';
 
-  const location = locations.find(([label]) => new RegExp(`\\b${escapeRegex(label)}\\b`, 'i').test(text));
+  const location = locations.find(([, , re]) => re.test(text));
   if (location) found.location = location[1];
 
   const type = PROPERTY_TYPES.find(([re]) => re.test(t));
   if (type) found.propertyType = type[1];
+
+  if (/\b(unfurnished|not furnished)\b/.test(t)) found.furnishing = 'unfurnished';
+  else if (/\b(semi|partly|partially)[- ]?furnished\b/.test(t)) found.furnishing = 'partly furnished';
+  else if (/\bfurnished\b/.test(t)) found.furnishing = 'furnished';
 
   if (/\bstudio\b/.test(t)) found.bedrooms = '0';
   const beds = t.match(/\b(\d|one|two|three|four|five|six)\s*-?\s*(bed|beds|bedroom|bedrooms|br|bhk)\b/);
@@ -603,7 +616,7 @@ const rememberSearchCriteria = (qualification, args = {}) => {
 };
 
 const searchArgsFromState = (q) => {
-  const args = { purpose: q.purpose, location: q.location, type: q.propertyType, bedrooms: q.bedrooms, max_price: Number(q.budget) || undefined };
+  const args = { purpose: q.purpose, location: q.location, type: q.propertyType, bedrooms: q.bedrooms, furnishing: q.furnishing, max_price: Number(q.budget) || undefined };
   return Object.fromEntries(Object.entries(args).filter(([, v]) => v !== undefined && v !== ''));
 };
 
@@ -677,7 +690,7 @@ const describeCriteria = (q, { location = q.location, bedrooms = q.bedrooms, max
   const where = location ? ` in ${location}` : '';
   const price = Number(maxPrice) ? ` ${priceWord} ${priceText(maxPrice, q.purpose)}` : '';
   const offPlan = q.purpose === 'off-plan' ? 'off-plan' : '';
-  const text = `${[bedsLabel(bedrooms, plural), offPlan, noun].filter(Boolean).join(' ')}${suffix}${where}${price}`;
+  const text = `${[bedsLabel(bedrooms, plural), q.furnishing, offPlan, noun].filter(Boolean).join(' ')}${suffix}${where}${price}`;
   return plural ? text : `${/^[aeiou]/i.test(text) ? 'an' : 'a'} ${text}`;
 };
 
@@ -826,12 +839,13 @@ const buildPropertyResult = async (q, groups, maxPrice) => {
     total = (await findProperties({ ...searchArgsFromState({ ...q, location: undefined, bedrooms, budget: maxPrice }), location: locations }, 1)).total;
   }
   const filters = Object.fromEntries(
-    Object.entries({ purpose: q.purpose, locations, propertyType: q.propertyType, bedrooms, maxPrice: Number(maxPrice) || undefined }).filter(
+    Object.entries({ purpose: q.purpose, locations, propertyType: q.propertyType, bedrooms, furnishing: q.furnishing, maxPrice: Number(maxPrice) || undefined }).filter(
       ([, v]) => v !== undefined && v !== '' && !(Array.isArray(v) && !v.length)
     )
   );
   const viewAllUrl = listingUrl({ purpose: q.purpose, locations, propertyType: q.propertyType, bedrooms, maxPrice });
-  const showViewAll = total > PREVIEW_LIMIT;
+  // The listing pages have no furnishing filter, so their count would not match a furnishing-filtered total.
+  const showViewAll = total > PREVIEW_LIMIT && !q.furnishing;
   return {
     properties,
     propertyResult: { total, showViewAll, location: locations.join(', ') || 'Dubai', purpose: q.purpose, category: q.purpose, filters, viewAllUrl },
@@ -933,6 +947,7 @@ const buildStateContext = (state) => {
   const lines = [
     ...QUALIFICATION_FIELDS.map((field) => `${field}: ${q[field] || 'unknown'}`),
     `propertyType: ${q.propertyType || 'any'}`,
+    `furnishing: ${q.furnishing || 'any'}`,
     `leadOfferShown: ${state.leadOfferShown}`,
     `leadOfferDeclined: ${state.leadOfferDeclined}`,
     `leadSaved: ${state.leadSaved}`,
@@ -971,7 +986,7 @@ const stripContactAsks = (reply) => {
   return cleaned || 'Happy to keep helping. What would you like to see next?';
 };
 
-const SEARCH_FIELDS = ['purpose', 'location', 'propertyType', 'budget', 'bedrooms'];
+const SEARCH_FIELDS = ['purpose', 'location', 'propertyType', 'budget', 'bedrooms', 'furnishing'];
 
 const hasViewingInterest = (state) => Object.keys(state.viewingInterest).length > 0;
 
@@ -1017,6 +1032,7 @@ const chat = async ({ sessionId, message, action }) => {
   let savedName = '';
   let confirmation = '';
   let criteriaChanged = false;
+  let criteriaGiven = false; // the message states a search field, even one already known (e.g. "rent" again)
   let enforce = false; // true when the reply still needs lead/question guardrails
   let propertyTurn = false; // the soft agent offer only follows a property search
   try {
@@ -1028,6 +1044,7 @@ const chat = async ({ sessionId, message, action }) => {
     if (!isViewingClick) {
       extracted = extractQualification(message, await getKnownLocations());
       criteriaChanged = SEARCH_FIELDS.some((f) => extracted[f] && extracted[f] !== q[f]);
+      criteriaGiven = !message.includes('?') && SEARCH_FIELDS.some((f) => extracted[f]);
       Object.assign(q, extracted);
       if (!q.purpose) delete q.purpose;
     }
@@ -1132,7 +1149,7 @@ const chat = async ({ sessionId, message, action }) => {
 
       if (broad) {
         // reply set above from the category counts
-      } else if (cheaper || (canSearch && criteriaChanged)) {
+      } else if (cheaper || (canSearch && (criteriaChanged || criteriaGiven))) {
         let maxPrice = q.budget;
         let result;
         if (cheaper) {
@@ -1217,8 +1234,8 @@ const chat = async ({ sessionId, message, action }) => {
     if (propertyTurn && q.purpose && q.location && q.budget && !state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved) {
       reply = withQuestion(reply, OFFER_TEXT);
       state.leadOfferShown = true;
-    } else if (criteriaChanged && missing) {
-      reply = withQuestion(reply, NEXT_QUESTION[missing]);
+    } else if ((criteriaChanged || propertyTurn) && missing) {
+      reply = withQuestion(reply, missing === 'budget' && q.purpose === 'rent' ? "What's your yearly budget in AED?" : NEXT_QUESTION[missing]);
     } else {
       reply = limitToOneQuestion(reply);
     }
