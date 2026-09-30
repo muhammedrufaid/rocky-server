@@ -557,7 +557,62 @@ const getKnownLocations = async () => {
   return locationCache;
 };
 
-const extractQualification = (text, locations) => {
+// Edit distance where swapping two neighbouring letters counts as one edit ("buisness" -> "business").
+const editDistance = (a, b) => {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j += 1) d[0][j] = j;
+  for (let i = 1; i <= a.length; i += 1) {
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+  }
+  return d[a.length][b.length];
+};
+
+const compact = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+const PLACE_WORDS = new Set(['in', 'at', 'near', 'around', 'about']);
+// Never part of a place name: a candidate cannot start with one and stops before one.
+const NOT_PLACE_WORDS = new Set([
+  'a', 'an', 'my', 'our', 'your', 'this', 'that', 'for', 'with', 'and', 'or', 'me', 'us', 'family', 'families',
+  'rent', 'rental', 'rentals', 'renting', 'buy', 'buying', 'sale',
+  'apartment', 'apartments', 'flat', 'flats', 'villa', 'villas', 'townhouse', 'townhouses', 'studio', 'bedroom', 'bedrooms',
+  'property', 'properties', 'listing', 'listings', 'budget', 'under', 'below', 'furnished', 'unfurnished', 'yes', 'no', 'ok',
+  'okay', 'sure', 'thanks', 'please', 'hello', 'hi', 'offplan', 'off', 'plan', 'next', 'month', 'year',
+]);
+
+// Typo-tolerant match against known location names, used only when no exact name matched. Candidates are the words right
+// after "in/at/near/…", or the whole message when it is just a few words (a reply to the area question).
+// Returns { canonical, confident } or null.
+const fuzzyLocation = (text, locations) => {
+  const words = text.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+  const starts = words.flatMap((w, i) => (PLACE_WORDS.has(w) ? [i + 1] : []));
+  if (words.length <= 4) starts.push(...words.map((_, i) => i));
+  let best = null;
+  for (const start of new Set(starts)) {
+    if (!words[start] || NOT_PLACE_WORDS.has(words[start]) || /\d/.test(words[start])) continue;
+    for (let n = 1; n <= 4 && start + n <= words.length; n += 1) {
+      if (NOT_PLACE_WORDS.has(words[start + n - 1]) || /\d/.test(words[start + n - 1])) break;
+      const candidate = words.slice(start, start + n).join('');
+      if (candidate.length < 4) continue;
+      for (const [label, canonical] of locations) {
+        const target = compact(label);
+        if (target.length < 5 || Math.abs(target.length - candidate.length) > 3) continue;
+        const distance = editDistance(candidate, target);
+        if (!best || distance / target.length < best.score) best = { canonical, distance, length: target.length, score: distance / target.length, candidate, target };
+      }
+    }
+  }
+  if (!best) return null;
+  const { distance, length, candidate, target } = best;
+  const confident = distance === 0 || (distance === 1 && length >= 6) || (distance === 2 && length >= 9);
+  const possible = distance <= 3 && best.score <= 0.4 && candidate[0] === target[0];
+  if (confident) return { canonical: best.canonical, confident: true };
+  return possible ? { canonical: best.canonical, confident: false } : null;
+};
+
+const extractQualification = (text, locations, { fuzzy = true } = {}) => {
   const t = text.toLowerCase();
   const found = {};
   const rent = /\b(rent|rents|renting|rentals?|lease|leasing|per (year|month|annum)|yearly|monthly)\b/.test(t);
@@ -568,6 +623,11 @@ const extractQualification = (text, locations) => {
 
   const location = locations.find(([, , re]) => re.test(text));
   if (location) found.location = location[1];
+  else if (fuzzy && !PHONE_ATTEMPT_RE.test(text) && !EMAIL_FIND_RE.test(text)) {
+    const close = fuzzyLocation(text, locations);
+    if (close?.confident) found.location = close.canonical;
+    else if (close) found.locationSuggestion = close.canonical;
+  }
 
   const type = PROPERTY_TYPES.find(([re]) => re.test(t));
   if (type) found.propertyType = type[1];
@@ -1036,6 +1096,7 @@ const chat = async ({ sessionId, message, action }) => {
     viewingInterest: { ...(session?.viewingInterest || {}) },
     contact: { ...(session?.contact || {}) },
     budgetFallback: { ...(session?.budgetFallback || {}) },
+    locationSuggestion: session?.locationSuggestion || '',
     leadOfferShown: Boolean(session?.leadOfferShown),
     leadOfferDeclined: Boolean(session?.leadOfferDeclined),
     leadSaved: Boolean(session?.leadSaved),
@@ -1059,11 +1120,21 @@ const chat = async ({ sessionId, message, action }) => {
     // A higher-price offer only applies to the very next reply.
     const fallbackPending = Boolean(state.budgetFallback.pending);
     state.budgetFallback.pending = false;
+    // "Did you mean Jebel Ali?" is answered on the very next reply.
+    const pendingLocation = state.locationSuggestion;
+    state.locationSuggestion = '';
+    const pastMessages = session?.messages || [];
+    const lastAssistant = [...pastMessages].reverse().find((m) => m.role === 'assistant')?.content || '';
 
     // 1. Qualification (skipped for button clicks so a property title can't change the criteria)
     let extracted = {};
+    let locationSuggestion = '';
     if (!isViewingClick) {
-      extracted = extractQualification(message, await getKnownLocations());
+      // No typo matching on replies to the contact prompt, so a name like "Arjun" is never read as an area.
+      extracted = extractQualification(message, await getKnownLocations(), { fuzzy: !isContactPrompt(lastAssistant) });
+      if (!extracted.location && pendingLocation && ACCEPT_RE.test(message)) extracted.location = pendingLocation;
+      ({ locationSuggestion = '' } = extracted);
+      delete extracted.locationSuggestion;
       criteriaChanged = SEARCH_FIELDS.some((f) => extracted[f] && extracted[f] !== q[f]);
       criteriaGiven = !message.includes('?') && SEARCH_FIELDS.some((f) => extracted[f]);
       Object.assign(q, extracted);
@@ -1071,8 +1142,6 @@ const chat = async ({ sessionId, message, action }) => {
     }
 
     // 2. Offer acceptance / decline / viewing requests
-    const pastMessages = session?.messages || [];
-    const lastAssistant = [...pastMessages].reverse().find((m) => m.role === 'assistant')?.content || '';
     const offerPending = state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved && OFFER_RE.test(lastAssistant);
     const awaitingContact = !state.leadSaved && isContactPrompt(lastAssistant);
     const typedViewing = !isViewingClick && VIEWING_RE.test(message);
@@ -1131,6 +1200,10 @@ const chat = async ({ sessionId, message, action }) => {
       reply = contactReply;
     } else if (savedName && !criteriaChanged) {
       // confirmation already set above
+    } else if (locationSuggestion) {
+      // Close to a known area but not certain: confirm before storing it; other details from the message are kept.
+      state.locationSuggestion = locationSuggestion;
+      reply = `Did you mean ${locationSuggestion}?`;
     } else if (fallbackPending && !criteriaChanged && (DECLINE_RE.test(message) || TOO_EXPENSIVE_RE.test(message))) {
       reply = FALLBACK_DECLINE_TEXT;
     } else if (fallbackPending && !criteriaChanged && (ACCEPT_RE.test(message) || SHOW_ME_RE.test(message))) {
@@ -1291,6 +1364,7 @@ const chat = async ({ sessionId, message, action }) => {
         contact: state.contact,
         viewingInterest: state.viewingInterest,
         budgetFallback: state.budgetFallback,
+        locationSuggestion: state.locationSuggestion,
         leadOfferShown: state.leadOfferShown,
         leadOfferDeclined: state.leadOfferDeclined,
         leadSaved: state.leadSaved,

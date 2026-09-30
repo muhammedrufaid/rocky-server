@@ -57,6 +57,8 @@ const chatSessionSchema = new mongoose.Schema(
       originalMaxPrice: { type: Number },
       suggestedMinPrice: { type: Number },
     },
+    // Close location match waiting for the user's "yes" ("Did you mean Jebel Ali?"); cleared on the next reply.
+    locationSuggestion: { type: String, trim: true, default: '' },
     leadOfferShown: {
       type: Boolean,
       default: false,
