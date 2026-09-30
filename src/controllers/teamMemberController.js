@@ -40,6 +40,9 @@ const validateStringArray = (value, fieldName) => {
   return null;
 };
 
+// Inactive members are hidden unless explicitly requested with ?isActive=false
+const resolveIsActiveFilter = (value) => value !== 'false';
+
 const resolveSlug = ({ slug, name }) => {
   const fromSlug = normalizeSlug(slug);
   if (fromSlug) return fromSlug;
@@ -169,11 +172,7 @@ const createTeamMember = async (req, res) => {
 // 2. Get all Team Members - GET /api/team-members
 const getTeamMembers = async (req, res) => {
   try {
-    const filter = {};
-
-    if (req.query.isActive !== undefined) {
-      filter.isActive = req.query.isActive === 'true';
-    }
+    const filter = { isActive: resolveIsActiveFilter(req.query.isActive) };
 
     const isAgent = parseBooleanQuery(req.query.isAgent);
     if (isAgent !== undefined) {
@@ -216,7 +215,10 @@ const getTeamMemberById = async (req, res) => {
       });
     }
 
-    const teamMember = await TeamMember.findById(id);
+    const teamMember = await TeamMember.findOne({
+      _id: id,
+      isActive: resolveIsActiveFilter(req.query.isActive),
+    });
     if (!teamMember) {
       return res.status(404).json({
         success: false,
@@ -248,14 +250,7 @@ const getTeamMemberBySlug = async (req, res) => {
       });
     }
 
-    const filter = { slug };
-
-    // Mirror Service/Blog convention: inactive content is hidden unless explicitly requested
-    if (req.query.isActive === 'false') {
-      filter.isActive = false;
-    } else if (req.query.isActive === 'true' || req.query.isActive === undefined) {
-      filter.isActive = true;
-    }
+    const filter = { slug, isActive: resolveIsActiveFilter(req.query.isActive) };
 
     const teamMember = await TeamMember.findOne(filter);
     if (!teamMember) {
