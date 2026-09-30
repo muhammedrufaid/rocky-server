@@ -51,6 +51,12 @@ const chatSessionSchema = new mongoose.Schema(
       selectedPropertyTitle: { type: String, trim: true },
       selectedLocation: { type: String, trim: true },
     },
+    // Set when no listing fit the budget and the lowest real price was offered; cleared on the next reply.
+    budgetFallback: {
+      pending: { type: Boolean, default: false },
+      originalMaxPrice: { type: Number },
+      suggestedMinPrice: { type: Number },
+    },
     leadOfferShown: {
       type: Boolean,
       default: false,

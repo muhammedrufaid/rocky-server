@@ -494,6 +494,9 @@ const NEXT_QUESTION = {
 const CHEAPER_RE = /\b(cheaper|lower budget|lower price|more affordable|less expensive)\b/i;
 const REFINE_RE = /\b(bigger|larger|more options|other options)\b/i;
 const DECLINE_RE = /^\s*(no|nope|nah)\b|no thanks|not now|not interested|maybe later|i'?m good/i;
+const SHOW_ME_RE = /^\s*(show\b|that'?s (fine|ok|okay)\b|fine\b)/i;
+const TOO_EXPENSIVE_RE = /too (expensive|high|much)|out of (my )?budget/i;
+const FALLBACK_DECLINE_TEXT = 'No problem. I can help you look in another area or adjust the property type. Which would you prefer?';
 const ACCEPT_RE = /^\s*(yes|yeah|yep|sure|ok|okay|please|please do|go ahead|of course|sounds good|definitely|why not)\b/i;
 const AGENT_REQUEST_RE = /\b(call me|contact me|talk to an? agent|speak (to|with) an? agent|(arrange|book|schedule) a viewing)\b/i;
 const LOCATION_FIXES = [[/\bDubai Lake Towers\b/gi, 'Jumeirah Lake Towers'], [/\bDubai Village Circle\b/gi, 'Jumeirah Village Circle']];
@@ -557,7 +560,7 @@ const getKnownLocations = async () => {
 const extractQualification = (text, locations) => {
   const t = text.toLowerCase();
   const found = {};
-  const rent = /\b(rent|rents|renting|rentals?|lease|leasing)\b/.test(t);
+  const rent = /\b(rent|rents|renting|rentals?|lease|leasing|per (year|month|annum)|yearly|monthly)\b/.test(t);
   const buy = /\b(buy|buying|purchase|purchasing|invest|investing|for sale)\b/.test(t);
   const sell = /\b(sell|selling)\b/.test(t);
   if (/\boff[- ]?plan\b/.test(t)) found.purpose = 'off-plan';
@@ -752,13 +755,19 @@ const searchAreas = async (args, areas) => {
   return groups;
 };
 
-// 1. requested area  2. nearby areas  3. requested area, closest bedrooms  4. nearby areas, closest bedrooms
+// 1. requested area  2. same criteria without the budget (price only, no listings)  3. nearby areas
+// 4. requested area, closest bedrooms  5. nearby areas, closest bedrooms
 const searchWithFallback = async (q, maxPrice = q.budget) => {
   const args = searchArgsFromState({ ...q, budget: maxPrice });
   const nearby = (q.location && NEARBY_AREAS[q.location]) || [];
 
   const exact = await findProperties(args, PREVIEW_LIMIT);
   if (exact.total) return { stage: 'exact', nearby, groups: [{ location: q.location, bedrooms: args.bedrooms, ...exact }] };
+
+  if (Number(maxPrice) && q.location) {
+    const lowest = await findProperties(searchArgsFromState({ ...q, budget: undefined }), 1);
+    if (lowest.total) return { stage: 'overBudget', nearby, groups: [], lowestPrice: lowest.startingPrice, rentFrequency: lowest.items[0].rentFrequency };
+  }
 
   const nearbyGroups = await searchAreas(args, nearby);
   if (nearbyGroups.length) return { stage: 'nearby', nearby, groups: nearbyGroups };
@@ -799,6 +808,10 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
       ? `I found ${describeCriteria(q, { maxPrice })}, priced at ${price}.`
       : `I found ${total} ${describeCriteria(q, { maxPrice, plural: true })}, starting from ${price}.`;
   }
+  if (result.stage === 'overBudget') {
+    const price = priceText(result.lowestPrice, q.purpose, result.rentFrequency);
+    return `I couldn't find any ${describeCriteria(q, { maxPrice, plural: true, priceWord: 'within' })}. The lowest available option currently starts from ${price}. Would you like to see listings from ${price}?`;
+  }
   if (result.stage === 'nearby') {
     return `${missed}. Nearby, ${joinPhrases(result.groups.map((g) => groupPhrase(q, g, 'matching')))}.`;
   }
@@ -820,6 +833,10 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
       const kind = { rent: 'rental', buy: 'sale', 'off-plan': 'off-plan' }[q.purpose];
       context = ` ${q.location} currently has ${inArea.total} ${kind} listing${inArea.total === 1 ? '' : 's'}, but none match all of these criteria.`;
     }
+  }
+  if (Number(maxPrice) && q.location && !cheaper) {
+    // Nothing matches at any price, so there is no higher price to offer.
+    return `I couldn't find any ${describeCriteria(q, { plural: true, maxPrice: null })} right now.${context} Would you like to try a nearby area or adjust the property type or bedrooms?`;
   }
   return `${missed}.${context} Would you like to adjust the budget or try another area?`;
 };
@@ -1018,6 +1035,7 @@ const chat = async ({ sessionId, message, action }) => {
     qualification: { ...(session?.qualification || {}) },
     viewingInterest: { ...(session?.viewingInterest || {}) },
     contact: { ...(session?.contact || {}) },
+    budgetFallback: { ...(session?.budgetFallback || {}) },
     leadOfferShown: Boolean(session?.leadOfferShown),
     leadOfferDeclined: Boolean(session?.leadOfferDeclined),
     leadSaved: Boolean(session?.leadSaved),
@@ -1038,6 +1056,9 @@ const chat = async ({ sessionId, message, action }) => {
   try {
     const q = state.qualification;
     const isViewingClick = action?.type === 'book_viewing';
+    // A higher-price offer only applies to the very next reply.
+    const fallbackPending = Boolean(state.budgetFallback.pending);
+    state.budgetFallback.pending = false;
 
     // 1. Qualification (skipped for button clicks so a property title can't change the criteria)
     let extracted = {};
@@ -1110,6 +1131,17 @@ const chat = async ({ sessionId, message, action }) => {
       reply = contactReply;
     } else if (savedName && !criteriaChanged) {
       // confirmation already set above
+    } else if (fallbackPending && !criteriaChanged && (DECLINE_RE.test(message) || TOO_EXPENSIVE_RE.test(message))) {
+      reply = FALLBACK_DECLINE_TEXT;
+    } else if (fallbackPending && !criteriaChanged && (ACCEPT_RE.test(message) || SHOW_ME_RE.test(message))) {
+      // Same criteria without the old ceiling, starting from the lowest real price that was offered.
+      const open = { ...q, budget: undefined };
+      const found = await findProperties({ ...searchArgsFromState(open), min_price: state.budgetFallback.suggestedMinPrice }, PREVIEW_LIMIT);
+      const groups = found.total ? [{ location: q.location, bedrooms: q.bedrooms, ...found }] : [];
+      reply = await describeResults(open, { stage: found.total ? 'exact' : 'none', nearby: [], groups });
+      ({ properties, propertyResult, uiActions } = await buildPropertyResult(open, groups));
+      enforce = true;
+      propertyTurn = true;
     } else if (recommendations.length) {
       reply = describeRecommendations(recommendations);
     } else if (
@@ -1160,10 +1192,16 @@ const chat = async ({ sessionId, message, action }) => {
           result = await searchWithFallback(q);
         }
         reply = await describeResults(q, result, maxPrice, { cheaper });
-        ({ properties, propertyResult, uiActions } = await buildPropertyResult(q, result.groups, maxPrice));
-        if (cheaper && result.groups.length) q.budget = maxPrice;
-        enforce = true;
-        propertyTurn = true;
+        if (result.stage === 'overBudget') {
+          // Only the price is offered; listings are shown after the user agrees.
+          state.budgetFallback = { pending: true, originalMaxPrice: Number(maxPrice), suggestedMinPrice: result.lowestPrice };
+        } else {
+          ({ properties, propertyResult, uiActions } = await buildPropertyResult(q, result.groups, maxPrice));
+          if (cheaper && result.groups.length) q.budget = maxPrice;
+          // A no-results reply already ends with its own next-step question.
+          enforce = result.groups.length > 0;
+          propertyTurn = enforce;
+        }
       } else {
         // 6. General questions: knowledge + model wording
         const forceRefineSearch = canSearch && REFINE_RE.test(message);
@@ -1252,6 +1290,7 @@ const chat = async ({ sessionId, message, action }) => {
         qualification: state.qualification,
         contact: state.contact,
         viewingInterest: state.viewingInterest,
+        budgetFallback: state.budgetFallback,
         leadOfferShown: state.leadOfferShown,
         leadOfferDeclined: state.leadOfferDeclined,
         leadSaved: state.leadSaved,
