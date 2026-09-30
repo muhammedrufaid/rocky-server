@@ -147,7 +147,7 @@ const buildChunks = async () => {
     ChatbotKnowledge ? ChatbotKnowledge.find({}).lean() : [],
     Service.find({ isActive: true }).select('title description overview subservices').lean(),
     Blog.find({ isActive: true }).select('title category description content faqs').lean(),
-    // Contact details and admin flags are never indexed.
+    // Only leadership roles are indexed (filtered below); contact details and admin flags never are.
     TeamMember.find({ isActive: true }).select('name designation department').sort({ order: 1 }).lean(),
   ]);
 
@@ -191,9 +191,11 @@ const buildChunks = async () => {
     const head = `Blog: ${b.title}\n${b.category ? `Category: ${b.category}\n` : ''}\n`;
     add('blog', b, b.title, head, blogUnits(b), LONG_CHUNK_CHARS);
   });
-  team.forEach((m) =>
-    add('team', m, m.name, `${COMPANY} team member: ${m.name}\n`, `Designation: ${m.designation}\nDepartment: ${m.department}`)
-  );
+  team
+    .filter((m) => leadershipRoleOf(m.designation))
+    .forEach((m) =>
+      add('team', m, m.name, `${COMPANY} team member: ${m.name}\n`, `Designation: ${m.designation}\nDepartment: ${m.department}`)
+    );
 
   return chunks;
 };
@@ -287,42 +289,58 @@ const teamRoster = async () =>
       designation: chunkField(c.text, 'Designation'),
       department: chunkField(c.text, 'Department'),
     }))
-    .filter((m) => m.name && m.designation);
+    .filter((m) => m.name && leadershipRoleOf(m.designation));
 
-// Each role only matches its own titles; roles are never inferred from one another.
-const TEAM_ROLES = [
-  { label: 'Managing Director', ask: /\bmanaging directors?\b/i, titles: ['managing director'] },
-  { label: 'General Manager', ask: /\bgeneral managers?\b/i, titles: ['general manager'] },
-  { label: 'CEO', ask: /\bceos?\b|\bchief executive\b/i, titles: ['ceo', 'chief executive officer'] },
-  { label: 'Founder', ask: /\bfound(er|ers|ed)\b/i, titles: ['founder'] },
-  { label: 'Owner', ask: /\bowners?\b|\bowns\b/i, titles: ['owner'] },
-  { label: 'Chairman', ask: /\bchair(man|woman|person)?\b/i, titles: ['chairman', 'chairwoman', 'chairperson'] },
-  { label: 'Partner', ask: /\bpartners?\b/i, titles: ['partner'] },
-  { label: 'Director', ask: /\bdirectors?\b/i, titles: ['director'] },
-  { label: 'Manager', ask: /\bmanagers?\b/i, test: (designation) => /\bmanager\b/i.test(designation) },
+// The chatbot only shares these leadership roles; other staff are never indexed or answered.
+const LEADERSHIP_ROLES = ['Founder', 'Director', 'CEO', 'General Manager', 'Head of Operations'];
+// Wording -> role, most specific first. Owner and Founder are the same role for Rocky; every other role is distinct.
+// Managing Director, Chairman and Partner are recognised only so they are never read as "Director" or answered by guessing.
+const ROLE_WORDS = [
+  ['Managing Director', /\bmanaging directors?\b/i],
+  ['General Manager', /\b(general managers?|gm)\b/i],
+  ['Head of Operations', /\b(head of operations|operations head)\b/i],
+  ['CEO', /\b(ceos?|chief executive( officer)?)\b/i],
+  ['Founder', /\b(founders?|founded|owners?|owns)\b/i],
+  ['Chairman', /\bchair(man|woman|person)?\b/i],
+  ['Partner', /\bpartners?\b/i],
+  ['Director', /\bdirectors?\b/i],
 ];
-const TEAM_ASK_RE = /\b(who|whom|who's|name of|names of|tell me about)\b/i;
-const NOT_TEAM_RE = /\b(apartments?|villas?|propert(y|ies)|units?|buildings?|listings?|flats?|landlords?|towers?|townhouses?|penthouses?|developers?|plots?)\b/i;
+const normalizeLeadershipRole = (text) => ROLE_WORDS.find(([, re]) => re.test(text))?.[0] || null;
+// Exact designation -> leadership role, so "Director of Marketing" or "Head of Property Management" never count.
+const LEADERSHIP_DESIGNATIONS = {
+  founder: 'Founder',
+  owner: 'Founder',
+  director: 'Director',
+  ceo: 'CEO',
+  'chief executive officer': 'CEO',
+  'general manager': 'General Manager',
+  gm: 'General Manager',
+  'head of operations': 'Head of Operations',
+  'operations head': 'Head of Operations',
+};
+const leadershipRoleOf = (designation) => LEADERSHIP_DESIGNATIONS[String(designation || '').trim().toLowerCase()] || null;
 
-const titleParts = (designation) =>
-  designation.toLowerCase().split(/\s*(?:&|,|\/|\band\b)\s*/).map((p) => p.trim()).filter(Boolean);
+const TEAM_ASK_RE = /\b(who|whom|who's|name of|names of|tell me about)\b/i;
+const NOT_TEAM_RE = /\b(apartments?|villas?|propert(y|ies)(?! management)|units?|buildings?|listings?|flats?|landlords?|towers?|townhouses?|penthouses?|developers?|plots?)\b/i;
+// Other staff roles and departments: answered with LEADERSHIP_ONLY_TEXT, never looked up.
+const OTHER_STAFF_RE = /\b(receptionists?|designers?|coordinators?|accountants?|photographers?|videographers?|editors?|telesales|sales|marketing|finance|crm|hr|recruit\w*|secretar(y|ies)|assistants?|executives?|team leaders?|consultants?|agents?|brokers?|staff|employees?|managers?|head of|department|team)\b/i;
+const LEADERSHIP_ONLY_TEXT = `I can only share details of ${COMPANY}'s leadership team: ${LEADERSHIP_ROLES.slice(0, -1).join(', ')} and ${LEADERSHIP_ROLES.slice(-1)}.`;
+
+const LEADERSHIP_TOPIC_CONTEXT = [
+  `CURRENT TOPIC: ${COMPANY} leadership. The latest message is a follow-up on that topic.`,
+  '- Answer it using only the leadership list and KNOWLEDGE (name, designation, department). If the detail asked for is not there, say so briefly.',
+  '- Do NOT ask property questions (buy/rent, area, budget, bedrooms, furnishing) and do NOT offer a property search.',
+].join('\n');
+
+const isLeadershipQuery = (text) => TEAM_ASK_RE.test(text) && !NOT_TEAM_RE.test(text);
 const withArticle = (label) => `${/^[aeiou]/i.test(label) ? 'an' : 'a'} ${label}`;
 const memberLines = (members) => members.map((m) => `- ${m.name} — ${m.designation}`).join('\n');
-const titleCase = (s) => s.trim().replace(/\b(?!of\b|and\b)\w/g, (c) => c.toUpperCase());
 const normDept = (s) => String(s).toLowerCase().replace(/\b(the|department|dept|team)\b/g, ' ').replace(/\s+/g, ' ').trim();
 
-const roleAnswer = (text, roster) => {
-  const headOf = text.match(/\bhead of (?:the )?([a-z&' ]+?)(?:\s+(?:department|dept|team))?\s*[?.!]*$/i);
-  const role = headOf
-    ? { label: `Head of ${titleCase(headOf[1])}`, titles: [`head of ${headOf[1].trim().toLowerCase()}`] }
-    : TEAM_ROLES.find((r) => r.ask.test(text));
-  if (!role) return null;
-
-  const matches = roster.filter((m) =>
-    role.test ? role.test(m.designation) : titleParts(m.designation).some((p) => role.titles.includes(p))
-  );
-  if (!matches.length) return `I don't have ${withArticle(role.label)} listed in the current ${COMPANY} team information.`;
-  if (matches.length === 1 && !role.test) return `The ${role.label} of ${COMPANY} is ${matches[0].name}.`;
+const roleAnswer = (role, roster) => {
+  const matches = roster.filter((m) => leadershipRoleOf(m.designation) === role);
+  if (!matches.length) return `I don't have ${withArticle(role)} listed in the current ${COMPANY} team information.`;
+  if (matches.length === 1) return `The ${role} of ${COMPANY} is ${matches[0].name}.`;
   return `${COMPANY} currently lists:\n${memberLines(matches)}`;
 };
 
@@ -332,22 +350,10 @@ const departmentAnswer = (text, roster) => {
   );
   if (!asked) return null;
   const term = normDept(asked[1]);
-  const explicit = /\b(department|dept|team)\b/i.test(asked[1]);
   if (!term) return null;
 
-  const departments = [...new Set(roster.map((m) => m.department).filter(Boolean))];
-  const exact = departments.find((d) => normDept(d) === term);
-  const list = (dept) => memberLines(roster.filter((m) => m.department === dept));
-  if (exact) return `The ${exact} department currently includes:\n${list(exact)}`;
-
-  const related = term.length >= 4 ? departments.filter((d) => normDept(d).includes(term)) : [];
-  const label = titleCase(term);
-  if (related.length) {
-    return `I don't have a department called ${label} listed, but ${COMPANY} has:\n${related
-      .map((d) => `${d}:\n${list(d)}`)
-      .join('\n')}`;
-  }
-  return explicit ? `I don't have ${withArticle(label)} department listed in the current ${COMPANY} team information.` : null;
+  const exact = [...new Set(roster.map((m) => m.department).filter(Boolean))].find((d) => normDept(d) === term);
+  return exact ? `The ${exact} department currently includes:\n${memberLines(roster.filter((m) => m.department === exact))}` : null;
 };
 
 const personAnswer = (text, roster) => {
@@ -365,17 +371,14 @@ const personAnswer = (text, roster) => {
   return `${m.name} is listed as ${m.designation}${m.department ? ` in the ${m.department} department` : ''}.`;
 };
 
-// Deterministic answers for company role / department / person questions; null when the message isn't one.
+// Deterministic answers for leadership role / department / person questions; null when the message isn't one.
 const teamAnswer = async (text) => {
-  if (!TEAM_ASK_RE.test(text)) return null;
+  if (!isLeadershipQuery(text)) return null;
   const roster = await teamRoster();
   if (!roster.length) return null;
-  const teamTerms = [...new Set(roster.flatMap((m) => [m.department, m.designation]).filter(Boolean))].sort(
-    (a, b) => b.length - a.length
-  );
-  const rest = teamTerms.reduce((s, term) => s.replace(new RegExp(`\\b${escapeRegex(term)}\\b`, 'gi'), ' '), text);
-  if (NOT_TEAM_RE.test(rest)) return null;
-  return roleAnswer(text, roster) || departmentAnswer(text, roster) || personAnswer(text, roster);
+  const role = normalizeLeadershipRole(text);
+  if (role) return roleAnswer(role, roster);
+  return departmentAnswer(text, roster) || personAnswer(text, roster) || (OTHER_STAFF_RE.test(text) ? LEADERSHIP_ONLY_TEXT : null);
 };
 
 // ---------- Chat ----------
@@ -657,6 +660,9 @@ const getKnownLocations = async () => {
     names.set(canonical, canonical);
     const alias = raw.match(/\(([^)]+)\)/);
     if (alias && !names.has(alias[1].trim())) names.set(alias[1].trim(), canonical);
+    // "Dubai Hills" -> "Dubai Hills Estate" as an exact alias, so it is never fuzzy-matched to DAMAC Hills or The Hills.
+    const withoutEstate = canonical.match(/^(.{3,}?)\s+Estate$/i);
+    if (withoutEstate && !names.has(withoutEstate[1])) names.set(withoutEstate[1], canonical);
   });
   const entries = [...names.entries()]
     .filter(([label]) => label.length >= 3 && label.toLowerCase() !== 'dubai')
@@ -725,16 +731,50 @@ const fuzzyLocation = (text, locations) => {
   return possible ? { canonical: best.canonical, confident: false } : null;
 };
 
-// "any area", "anywhere in Dubai", "any community is fine": always means no area restriction.
-const ANY_LOCATION_RE = /\b(anywhere|any ?where|any (areas?|locations?|communit(y|ies)|neighbou?rhoods?)|no (location|area) preference)\b/i;
+// "any area", "all Dubai", "any other locations", "anywhere in Dubai": always means no area restriction.
+const ANY_LOCATION_RE =
+  /\b(anywhere|any ?where|any (other )?(areas?|locations?|communit(y|ies)|neighbou?rhoods?)|all (areas|locations|communities|(of |over )?dubai)|(across|whole|entire) (of )?dubai|no (location|area) preference)\b/i;
 // Generic answers that only mean "no area restriction" when we just asked for the area.
 const NO_PREFERENCE_RE = /^\s*(no preference|(it )?(doesn'?t|does not|don'?t) matter|i don'?t mind|anything is fine)\b/i;
-const AREA_QUESTION_RE = /\b(areas?|locations?|communit(y|ies))\b[^.!?]*\?/i;
+const CONFIRM_RE = /^\s*(yes|yeah|yep|sure|ok|okay|fine|it'?s fine|its fine|that'?s fine|that works|sounds good)\b/i;
 
-const noLocationPreference = (text, { areaAsked = false } = {}) =>
+// Which search fields a question asks about: used to read bare answers ("1", "800,000") and to block repeated questions.
+const FIELD_QUESTION_RES = {
+  purpose: /\b(buy(ing)?|rent(ing)?|off[- ]?plan)\b[^?]*\bor\b/i,
+  location: /\b(areas?|locations?|communit(y|ies)|neighbou?rhoods?|where)\b/i,
+  budget: /\bbudget\b/i,
+  bedrooms: /\b(bedrooms?|studio)\b/i,
+  furnishing: /\bfurnish/i,
+  propertyType: /\b(property type|type of property|apartment or (a )?villa|villa or (an )?apartment)\b/i,
+};
+const questionFields = (question) => Object.keys(FIELD_QUESTION_RES).filter((f) => FIELD_QUESTION_RES[f].test(question));
+const lastQuestionOf = (text) => String(text || '').split(/(?<=[.!?])\s+/).filter((s) => s.includes('?')).pop() || '';
+
+const isAllDubaiPhrase = (text, { areaAsked = false } = {}) =>
   !text.includes('?') && (ANY_LOCATION_RE.test(text) || (areaAsked && NO_PREFERENCE_RE.test(text)));
 
-const extractQualification = (text, locations, { fuzzy = true, areaAsked = false } = {}) => {
+const bedroomValue = (word) => (word === 'studio' ? '0' : String(WORD_NUMBERS[word] || word));
+
+// Bare replies to the question just asked: "800,000" to a budget question, "1" to a bedrooms question, and
+// "it's fine" to "... or is 1 bedroom fine?".
+const answerToQuestion = (text, question, noPhone) => {
+  const found = {};
+  const fields = questionFields(question);
+  const t = text.toLowerCase();
+  if (fields.includes('budget')) {
+    const amount = noPhone.match(/\b(\d{1,3}(?:,\d{3})+|\d{4,})\b/);
+    if (amount) found.budget = amount[1].replace(/,/g, '');
+  }
+  // A message that is only "1" / "two" / "studio" can only be a bedroom count, unless we just asked for the budget.
+  const bare = t.match(/^\s*(\d|one|two|three|four|five|six|studio)\s*[.!]?\s*$/);
+  const offered = question.toLowerCase().match(/\bis (?:a )?(\d|one|two|three|four|five|six|studio)[- ]?(?:bed(?:room)?s?)? (?:fine|ok|okay)\b/);
+  if (bare && !fields.includes('budget')) found.bedrooms = bedroomValue(bare[1]);
+  else if (fields.includes('bedrooms') && offered && CONFIRM_RE.test(t)) found.bedrooms = bedroomValue(offered[1]);
+  return found;
+};
+
+const extractQualification = (text, locations, { fuzzy = true, lastQuestion = '' } = {}) => {
+  const areaAsked = questionFields(lastQuestion).includes('location');
   const t = text.toLowerCase();
   const found = {};
   const rent = /\b(rent|rents|renting|rentals?|lease|leasing|per (year|month|annum)|yearly|monthly)\b/.test(t);
@@ -745,7 +785,7 @@ const extractQualification = (text, locations, { fuzzy = true, areaAsked = false
 
   // Checked before any area matching, so "any areas" is never read as an area name or typo.
   const location = locations.find(([, , re]) => re.test(text));
-  if (noLocationPreference(text, { areaAsked })) found.locationFlexible = true;
+  if (isAllDubaiPhrase(text, { areaAsked })) found.locationFlexible = true;
   else if (location) found.location = location[1];
   else if (fuzzy && !PHONE_ATTEMPT_RE.test(text) && !EMAIL_FIND_RE.test(text)) {
     const close = fuzzyLocation(text, locations);
@@ -776,6 +816,9 @@ const extractQualification = (text, locations, { fuzzy = true, areaAsked = false
   else if (/\b(any|no|flexible|open) (budget|price)\b|\bbudget (doesn'?t|does not|won'?t|isn'?t|is not) (matter|an issue|a problem)\b|\bno (price |budget )?limit\b|\bshow me anything\b/.test(t)) {
     found.budgetFlexible = true;
   }
+  const answered = answerToQuestion(text, lastQuestion, noPhone);
+  if (!found.budget && !found.budgetFlexible && answered.budget) found.budget = answered.budget;
+  if (found.bedrooms === undefined && answered.bedrooms !== undefined) found.bedrooms = answered.bedrooms;
 
   const timeline = t.match(/\b(asap|immediately|right away|this (week|month|year)|next (week|month|year)|(in|within) \d+ (days?|weeks?|months?))\b/);
   if (timeline) found.timeline = timeline[0];
@@ -1264,22 +1307,38 @@ const buildStateContext = (state) => {
   ].join('\n\n');
 };
 
-// Drops question sentences that offer an agent or ask for contact details.
-const stripContactAsks = (reply) => {
+// Drops the question sentences for which shouldDrop(sentence) is true.
+const dropQuestions = (reply, shouldDrop) => {
   const cleaned = reply
     .split('\n')
-    .map((line) => line.split(/(?<=[.!?])\s+/).filter((s) => !(s.includes('?') && CONTACT_ASK_RE.test(s))).join(' '))
+    .map((line) => line.split(/(?<=[.!?])\s+/).filter((s) => !(s.includes('?') && shouldDrop(s))).join(' '))
     .join('\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
   return cleaned || 'Happy to keep helping. What would you like to see next?';
 };
+const stripContactAsks = (reply) => dropQuestions(reply, (s) => CONTACT_ASK_RE.test(s));
+// Deterministic duplicate guard: a model question about any field already in the session state is removed.
+const dropKnownQuestions = (reply, q) => dropQuestions(reply, (s) => questionFields(s).some((f) => fieldKnown(q, f)));
 
 const SEARCH_FIELDS = ['purpose', 'location', 'locationFlexible', 'propertyType', 'budget', 'budgetFlexible', 'bedrooms', 'furnishing'];
 // "any budget" / "any area" count as answers, so those questions are never asked again.
 const budgetKnown = (q) => Boolean(q.budget || q.budgetFlexible);
 const locationKnown = (q) => Boolean(q.location || q.locationFlexible);
 const fieldKnown = (q, field) => (field === 'budget' ? budgetKnown(q) : field === 'location' ? locationKnown(q) : Boolean(q[field]));
+// The user answered our qualifying question with something that sets no value ("it's fine", "ok"): search with what is known.
+const answeredOurQuestion = (message, lastQuestion, q) =>
+  !message.includes('?') && message.trim().split(/\s+/).length <= 6 && questionFields(lastQuestion).some((f) => !fieldKnown(q, f));
+const SEARCH_PROMISE_RE = /\b(i'?ll|i will|let me|i can|i'?m going to)\s+(search|look|find|check|broaden)\b/i;
+
+// "I want to buy an apartment in Dubai Hills" during a furnished rental search in Arjan: the purpose is restated with an area
+// or type and conflicts with a stored value, so it starts a new search. A bare "buy" or "Dubai Marina" still refines the current one.
+const detectNewPropertySearch = (extracted, q) =>
+  Boolean(extracted.purpose && (extracted.location || extracted.propertyType)) &&
+  ['purpose', 'location', 'propertyType'].some((f) => extracted[f] && q[f] && extracted[f] !== q[f]);
+
+// A new search keeps only what the new message states (merged afterwards); old furnishing, bedrooms, budget etc. are dropped.
+const resetSearchFilters = (q) => SEARCH_FIELDS.forEach((f) => delete q[f]);
 
 const hasViewingInterest = (state) => Object.keys(state.viewingInterest).length > 0;
 
@@ -1313,6 +1372,7 @@ const chat = async ({ sessionId, message, action }) => {
     contact: { ...(session?.contact || {}) },
     budgetFallback: { ...(session?.budgetFallback || {}) },
     locationSuggestion: session?.locationSuggestion || '',
+    currentTopic: session?.currentTopic || '',
     leadOfferShown: Boolean(session?.leadOfferShown),
     leadOfferDeclined: Boolean(session?.leadOfferDeclined),
     leadSaved: Boolean(session?.leadSaved),
@@ -1331,6 +1391,7 @@ const chat = async ({ sessionId, message, action }) => {
   let criteriaGiven = false; // the message states a search field, even one already known (e.g. "rent" again)
   let enforce = false; // true when the reply still needs lead/question guardrails
   let propertyTurn = false; // the soft agent offer only follows a property search
+  let modelReply = false; // the reply was worded by the model, so repeated qualification questions are removed
   try {
     const q = state.qualification;
     const isViewingClick = action?.type === 'book_viewing';
@@ -1342,6 +1403,7 @@ const chat = async ({ sessionId, message, action }) => {
     state.locationSuggestion = '';
     const pastMessages = session?.messages || [];
     const lastAssistant = [...pastMessages].reverse().find((m) => m.role === 'assistant')?.content || '';
+    const lastQuestion = lastQuestionOf(lastAssistant);
     // Company team questions are answered from the team records only and never touch search or contact state.
     const teamReply = isViewingClick ? null : await teamAnswer(message);
 
@@ -1352,16 +1414,19 @@ const chat = async ({ sessionId, message, action }) => {
       // No typo matching on replies to the contact prompt, so a name like "Arjun" is never read as an area.
       extracted = extractQualification(message, await getKnownLocations(), {
         fuzzy: !isContactPrompt(lastAssistant),
-        areaAsked: AREA_QUESTION_RE.test(lastAssistant),
+        lastQuestion,
       });
       if (!extracted.location && pendingLocation && ACCEPT_RE.test(message)) extracted.location = pendingLocation;
       ({ locationSuggestion = '' } = extracted);
       delete extracted.locationSuggestion;
+      // "No, Dubai Hills" after "Did you mean DAMAC Hills?": never offer the rejected suggestion again.
+      if (locationSuggestion === pendingLocation) locationSuggestion = '';
       if (!extracted.furnishing && /\beither\b/i.test(message) && /furnish/i.test(lastAssistant)) extracted.furnishing = 'any';
       // Furnishing is a rental attribute: "furnished apartment" means rent unless a purpose is already known.
       if (extracted.furnishing && extracted.furnishing !== 'any' && !extracted.purpose && !q.purpose) extracted.purpose = 'rent';
       criteriaChanged = SEARCH_FIELDS.some((f) => extracted[f] && extracted[f] !== q[f]);
       criteriaGiven = !message.includes('?') && SEARCH_FIELDS.some((f) => extracted[f]);
+      if (detectNewPropertySearch(extracted, q)) resetSearchFilters(q);
       if (extracted.budget) delete q.budgetFlexible;
       if (extracted.budgetFlexible) delete q.budget;
       if (extracted.location) delete q.locationFlexible;
@@ -1424,6 +1489,13 @@ const chat = async ({ sessionId, message, action }) => {
     const wantsAreas = !isViewingClick && !teamReply && !extracted.location && RECOMMEND_RE.test(message);
     if (wantsAreas) recommendations = await recommendAreas(message, q);
 
+    // A leadership question opens that topic; it stays open for follow-ups ("yes I need to know") until the user
+    // clearly returns to property (search criteria, area recommendations, viewing or contact).
+    if (teamReply) state.currentTopic = 'leadership';
+    else if (criteriaGiven || criteriaChanged || locationSuggestion || isViewingClick || typedViewing || wantsAreas || wantsContact) {
+      state.currentTopic = '';
+    }
+
     if (isViewingClick || (typedViewing && state.leadSaved && !savedName)) {
       reply = await requestViewing(state, sessionId);
     } else if (teamReply) {
@@ -1482,10 +1554,11 @@ const chat = async ({ sessionId, message, action }) => {
       }
       const canSearch = !broad && CATEGORIES.includes(q.purpose) && hasCriteria;
       const cheaper = canSearch && CHEAPER_RE.test(message);
+      // The backend, not the model, decides to search: whenever the state is searchable and this message set a criterion
+      // or answered our last qualifying question.
+      const searchNow = cheaper || (canSearch && (criteriaChanged || criteriaGiven || answeredOurQuestion(message, lastQuestion, q)));
 
-      if (broad) {
-        // reply set above from the category counts
-      } else if (cheaper || (canSearch && (criteriaChanged || criteriaGiven))) {
+      const runSearch = async () => {
         let maxPrice = q.budget;
         let result;
         if (cheaper) {
@@ -1508,22 +1581,34 @@ const chat = async ({ sessionId, message, action }) => {
           enforce = result.groups.length > 0;
           propertyTurn = enforce;
         }
+      };
+
+      if (broad) {
+        // reply set above from the category counts
+      } else if (searchNow) {
+        await runSearch();
       } else {
         // 6. General questions: knowledge + model wording
-        const forceRefineSearch = canSearch && REFINE_RE.test(message);
+        // A leadership follow-up is answered on that topic; the stored property state must not steer it back to a search.
+        const onLeadership = state.currentTopic === 'leadership';
+        const forceRefineSearch = !onLeadership && canSearch && REFINE_RE.test(message);
         const hits = await retrieve(message, 4);
-        const knowledge = hits.length
+        let knowledge = hits.length
           ? hits.map((h, i) => `[${i + 1}] (${h.source}) ${h.title}\n${h.text}`).join('\n\n')
           : 'No relevant knowledge found.';
+        if (onLeadership) {
+          const leaders = (await teamRoster()).map((m) => `- ${m.name} — ${m.designation} (${m.department})`).join('\n');
+          knowledge = `${COMPANY} leadership:\n${leaders}\n\n${knowledge}`;
+        }
         const messages = [
           { role: 'system', content: `${RULES}\n\nKNOWLEDGE (use only this for company/area facts):\n${knowledge}` },
           ...history,
           { role: 'user', content: message },
-          { role: 'system', content: buildStateContext(state) },
+          { role: 'system', content: onLeadership ? LEADERSHIP_TOPIC_CONTEXT : buildStateContext(state) },
         ];
 
         for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
-          let toolChoice = round === MAX_TOOL_ROUNDS ? 'none' : 'auto';
+          let toolChoice = onLeadership || round === MAX_TOOL_ROUNDS ? 'none' : 'auto';
           if (round === 0 && forceRefineSearch) toolChoice = { type: 'function', function: { name: 'search_properties' } };
 
           const completion = await getOpenAI().chat.completions.create({
@@ -1538,6 +1623,7 @@ const chat = async ({ sessionId, message, action }) => {
             if (msg.content?.trim()) {
               reply = msg.content.trim();
               enforce = true;
+              modelReply = true;
             }
             break;
           }
@@ -1562,6 +1648,11 @@ const chat = async ({ sessionId, message, action }) => {
             messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
           }
         }
+        // "I'll search across Dubai..." without results is never sent: the search runs now instead.
+        if (!onLeadership && canSearch && !properties.length && SEARCH_PROMISE_RE.test(reply)) {
+          modelReply = false;
+          await runSearch();
+        }
       }
     }
   } catch (error) {
@@ -1575,6 +1666,7 @@ const chat = async ({ sessionId, message, action }) => {
       reply = reply.replace(pattern, fixed);
     });
     reply = stripContactAsks(reply);
+    if (modelReply) reply = dropKnownQuestions(reply, q);
     const missing = ['purpose', 'location', 'budget', 'bedrooms'].find((f) => !fieldKnown(q, f));
     if (propertyTurn && q.purpose && locationKnown(q) && budgetKnown(q) && !state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved) {
       reply = withQuestion(reply, OFFER_TEXT);
@@ -1600,6 +1692,7 @@ const chat = async ({ sessionId, message, action }) => {
         viewingInterest: state.viewingInterest,
         budgetFallback: state.budgetFallback,
         locationSuggestion: state.locationSuggestion,
+        currentTopic: state.currentTopic,
         leadOfferShown: state.leadOfferShown,
         leadOfferDeclined: state.leadOfferDeclined,
         leadSaved: state.leadSaved,

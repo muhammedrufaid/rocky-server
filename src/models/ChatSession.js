@@ -61,6 +61,8 @@ const chatSessionSchema = new mongoose.Schema(
     },
     // Close location match waiting for the user's "yes" ("Did you mean Jebel Ali?"); cleared on the next reply.
     locationSuggestion: { type: String, trim: true, default: '' },
+    // Non-property topic the conversation is on (e.g. 'leadership'); cleared when the user returns to a property search.
+    currentTopic: { type: String, trim: true, default: '' },
     leadOfferShown: {
       type: Boolean,
       default: false,
