@@ -1,6 +1,6 @@
 const Property = require('../models/Property');
 
-// Stored on Mongo docs for AI/semantic search only — never expose via frontend APIs.
+// Legacy vector fields that may still exist on older Mongo docs — never expose via frontend APIs.
 const INTERNAL_PROPERTY_FIELDS = ['embedding', 'embeddingHash'];
 
 const stripInternalPropertyFields = (doc) => {
@@ -72,7 +72,8 @@ const numberExprFromStringField = (field) => {
 };
 
 const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
-  const q = normalizeToLower(search);
+  // One term or several (union), e.g. ['dubai marina', 'jumeirah lake towers'].
+  const terms = (Array.isArray(search) ? search : [search]).map(normalizeToLower).filter(Boolean);
 
   const nf = {
     propertyType: normalizeStringList(filters.propertyType),
@@ -85,8 +86,9 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
     offPlan: normalizeStringList(filters.offPlan),
     propertyStatus: normalizeStringList(filters.propertyStatus),
     bedrooms: parseOptionalNumber(filters.bedrooms),
-    bedroomsMin: parseOptionalNumber(filters.bedroomsMin),
     bathrooms: parseOptionalNumber(filters.bathrooms),
+    beds: parseOptionalNumber(filters.beds),
+    baths: parseOptionalNumber(filters.baths),
     priceMin: parseOptionalNumber(filters.priceMin),
     priceMax: parseOptionalNumber(filters.priceMax),
     propertySizeMin: parseOptionalNumber(filters.propertySizeMin),
@@ -112,10 +114,12 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
     match.push({ [key]: value });
   });
 
-  if (q) {
-    const re = new RegExp(escapeRegex(q), 'i');
-    match.push({ $or: SEARCH_FIELDS.map((f) => ({ [f]: re })) });
+  if (terms.length) {
+    match.push({ $or: terms.flatMap((t) => SEARCH_FIELDS.map((f) => ({ [f]: new RegExp(escapeRegex(t), 'i') }))) });
   }
+
+  // Listing-page `beds`: studio (0) is apartments only.
+  if (nf.beds === 0) match.push({ propertyType: /apartment/i });
 
   const mongoMatch = match.length ? { $and: match } : {};
 
@@ -127,12 +131,11 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
   };
 
   const numericMatch = {};
-  if (nf.bedroomsMin !== null) {
-    numericMatch.__bedroomsNum = { $gte: nf.bedroomsMin };
-  } else if (nf.bedrooms !== null) {
-    numericMatch.__bedroomsNum = nf.bedrooms;
-  }
+  if (nf.bedrooms !== null) numericMatch.__bedroomsNum = nf.bedrooms;
   if (nf.bathrooms !== null) numericMatch.__bathroomsNum = nf.bathrooms;
+  // Listing-page `beds` / `baths`: 6 means 6+.
+  if (nf.beds !== null) numericMatch.__bedroomsNum = nf.beds >= 6 ? { $gte: 6 } : nf.beds;
+  if (nf.baths !== null) numericMatch.__bathroomsNum = nf.baths >= 6 ? { $gte: 6 } : nf.baths;
 
   if (nf.priceMin !== null || nf.priceMax !== null) {
     numericMatch.__priceNum = {};
@@ -190,9 +193,10 @@ const paginateProperties = async ({
   page = 1,
   limit = 10,
   sort = { _id: -1 },
+  maxLimit = 100,
 }) => {
   const safePage = Math.max(parseInt(page, 10) || 1, 1);
-  const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
+  const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 10, 1), maxLimit);
   const skip = (safePage - 1) * safeLimit;
   const { mongoMatch, addFields, numericMatch, hasNumericFilters } = buildListQuery({
     search,
@@ -254,9 +258,24 @@ const fetchAllProperties = async (opts = {}) => {
   return paginateProperties({ page, limit, search, filters });
 };
 
+// Website listing categories; each listing belongs to exactly one, so off-plan sales are never counted as buy.
+const CATEGORY_MATCH = {
+  rent: { propertyPurpose: 'Rent' },
+  buy: { propertyPurpose: 'Buy', offPlan: { $ne: 'Yes' } },
+  'off-plan': { propertyPurpose: 'Buy', offPlan: 'Yes' },
+};
+
+const propertyCategory = (property) => {
+  if (property.propertyPurpose === 'Rent') return 'rent';
+  return property.offPlan === 'Yes' ? 'off-plan' : 'buy';
+};
+
+// The buy/rent/off-plan listing pages request a 500-item window when price/bed filters are active.
+const LISTING_WINDOW_LIMIT = 500;
+
 const fetchOffPlanProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {} } = opts;
-  return paginateProperties({ page, limit, search, filters, forced: { offPlan: 'Yes' } });
+  return paginateProperties({ page, limit, search, filters, forced: CATEGORY_MATCH['off-plan'], maxLimit: LISTING_WINDOW_LIMIT });
 };
 
 const fetchReadyProperties = async (opts = {}) => {
@@ -266,12 +285,12 @@ const fetchReadyProperties = async (opts = {}) => {
 
 const fetchBuyProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {} } = opts;
-  return paginateProperties({ page, limit, search, filters, forced: { propertyPurpose: 'Buy' } });
+  return paginateProperties({ page, limit, search, filters, forced: CATEGORY_MATCH.buy, maxLimit: LISTING_WINDOW_LIMIT });
 };
 
 const fetchRentProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {} } = opts;
-  return paginateProperties({ page, limit, search, filters, forced: { propertyPurpose: 'Rent' } });
+  return paginateProperties({ page, limit, search, filters, forced: CATEGORY_MATCH.rent, maxLimit: LISTING_WINDOW_LIMIT });
 };
 
 const {
@@ -541,6 +560,10 @@ const fetchSearchByAreaSuggestions = async (opts = {}) => {
 };
 
 module.exports = {
+  buildCommonPipeline,
+  CATEGORY_MATCH,
+  propertyCategory,
+  LISTING_WINDOW_LIMIT,
   fetchAllProperties,
   fetchOffPlanProperties,
   fetchReadyProperties,

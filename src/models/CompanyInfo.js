@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 /**
- * Flexible company / personal Q&A for the chatbot.
+ * Flexible company / personal Q&A content.
  * Add new entries without schema changes — topic + question + answer is enough.
  */
 const companyInfoSchema = new mongoose.Schema(

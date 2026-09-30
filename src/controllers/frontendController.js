@@ -24,6 +24,16 @@ const FILTER_QUERY_KEYS = [
     'propertySizeMax'
 ];
 
+// The buy/rent listing pages send their URL filters as min / max / beds / baths.
+const listingPageFilters = (query) => {
+    const positive = (value) => (Number(value) > 0 ? Number(value) : undefined);
+    const beds = query.beds !== undefined && query.beds !== '' && Number(query.beds) >= 0 ? Number(query.beds) : undefined;
+    return Object.fromEntries(
+        Object.entries({ priceMin: positive(query.min), priceMax: positive(query.max), beds, baths: positive(query.baths) })
+            .filter(([, value]) => value !== undefined)
+    );
+};
+
 const parsePropertyListQuery = (req, options = {}) => {
     const { page, limit } = parsePaginationParams(req, options);
     const search = (req.query.search || '').toString().trim();
@@ -152,12 +162,12 @@ const getAllProperties = async (req, res) => {
 };
 
 /**
- * GET /properties/off-plan - Fetches and returns only off-plan properties (offPlan === "Yes")
+ * GET /properties/off-plan - Fetches and returns only off-plan sale properties (offPlan === "Yes", propertyPurpose === "Buy")
  * Query params: page (default: 1), limit (default: 10)
  */
 const getAllOffPlanProperties = async (req, res) => {
     try {
-        const { page, limit } = parsePaginationParams(req);
+        const { page, limit } = parsePaginationParams(req, { maxLimit: propertyService.LISTING_WINDOW_LIMIT });
         const search = (req.query.search || '').toString().trim();
 
         let filters = {};
@@ -199,7 +209,7 @@ const getAllOffPlanProperties = async (req, res) => {
             if (req.query[key] !== undefined) directFilters[key] = req.query[key];
         });
 
-        const mergedFilters = { ...directFilters, ...filters };
+        const mergedFilters = { ...listingPageFilters(req.query), ...directFilters, ...filters };
 
         const { properties, total, pagination } = await propertyService.fetchOffPlanProperties({
             page,
@@ -282,12 +292,12 @@ const getAllReadyProperties = async (req, res) => {
 };
 
 /**
- * GET /properties/buy - Fetches and returns only Buy properties (propertyPurpose === "Buy")
+ * GET /properties/buy - Fetches and returns only Buy properties (propertyPurpose === "Buy"), excluding off-plan
  * Query params: page (default: 1), limit (default: 10)
  */
 const getBuyProperties = async (req, res) => {
     try {
-        const { page, limit } = parsePaginationParams(req);
+        const { page, limit } = parsePaginationParams(req, { maxLimit: propertyService.LISTING_WINDOW_LIMIT });
         const search = (req.query.search || '').toString().trim();
 
         let filters = {};
@@ -329,7 +339,7 @@ const getBuyProperties = async (req, res) => {
             if (req.query[key] !== undefined) directFilters[key] = req.query[key];
         });
 
-        const mergedFilters = { ...directFilters, ...filters };
+        const mergedFilters = { ...listingPageFilters(req.query), ...directFilters, ...filters };
 
         const { properties, total, pagination } = await propertyService.fetchBuyProperties({
             page,
@@ -352,7 +362,7 @@ const getBuyProperties = async (req, res) => {
  */
 const getRentProperties = async (req, res) => {
     try {
-        const { page, limit } = parsePaginationParams(req);
+        const { page, limit } = parsePaginationParams(req, { maxLimit: propertyService.LISTING_WINDOW_LIMIT });
         const search = (req.query.search || '').toString().trim();
 
         let filters = {};
@@ -396,7 +406,7 @@ const getRentProperties = async (req, res) => {
             if (req.query[key] !== undefined) directFilters[key] = req.query[key];
         });
 
-        const mergedFilters = { ...directFilters, ...filters };
+        const mergedFilters = { ...listingPageFilters(req.query), ...directFilters, ...filters };
 
         const { properties, total, pagination } = await propertyService.fetchRentProperties({
             page,
