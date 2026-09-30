@@ -23,6 +23,7 @@ const teamMemberRoutes = require('./routes/teamMemberRoutes');
 const companyInfoRoutes = require('./routes/companyInfo.routes');
 const googleBusinessProfileAuthRoutes = require('./routes/googleBusinessProfileAuthRoutes');
 const googleReviewRoutes = require('./routes/googleReviewRoutes');
+const chatbotRoutes = require('./routes/chatbotRoutes');
 const { startSalesforceMigrateScheduler } = require('./jobs/salesforceMigrateScheduler');
 const { startTeamTailorSyncScheduler } = require('./jobs/teamtailorSyncScheduler');
 const { startGoogleReviewsSyncScheduler } = require('./jobs/googleReviewsSyncScheduler');
@@ -78,7 +79,7 @@ app.use('/api/blogs', blogRoutes);
 app.use('/api/team-members', teamMemberRoutes);
 app.use('/api/company-info', companyInfoRoutes);
 app.use('/api/reviews', googleReviewRoutes);
-app.use('/api/chatbot', require('./routes/chatbotRoutes'));
+app.use('/api/chatbot', chatbotRoutes);
 
 // Google Business Profile OAuth (company integration, not website login).
 // Must stay outside /api so the shared API key middleware does not block Google's redirect.

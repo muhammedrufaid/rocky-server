@@ -370,9 +370,11 @@ const updateLead = async (sessionId, { email, ...interest } = {}) => {
 
 const saveLead = async (args = {}, sessionId) => {
   const name = String(args.name || '').trim();
-  const phone = String(args.phone || '').trim();
-  if (!name || !phone) return { ok: false, error: 'name and phone are required' };
-  if (!PHONE_RE.test(phone)) return { ok: false, error: 'phone must be a valid UAE mobile or +international number' };
+  const rawPhone = String(args.phone || '').trim();
+  if (!name || !rawPhone) return { ok: false, error: 'name and phone are required' };
+  const phoneMatch = rawPhone.match(PHONE_RE);
+  if (!phoneMatch) return { ok: false, error: INVALID_PHONE_TEXT };
+  const phone = normalizePhone(phoneMatch[0]);
 
   const existing = await ChatbotLead.findOne({ sessionId }).select('_id').lean();
   if (existing) {
@@ -439,7 +441,7 @@ const TOOLS = [
         type: 'object',
         properties: {
           name: { type: 'string' },
-          phone: { type: 'string', description: 'Phone or WhatsApp number' },
+          phone: { type: 'string', description: 'Phone or WhatsApp number with country code, e.g. +447911123456' },
           email: { type: 'string', description: 'Only if the user gave one' },
           purpose: { type: 'string', enum: ['rent', 'buy', 'sell', 'property management'] },
           location: { type: 'string' },
@@ -471,16 +473,15 @@ const QUESTION_FOR = {
   timeline: 'when they plan to move or buy',
 };
 const OFFER_TEXT = 'Want me to have an agent send you more options or arrange a viewing?';
-const CONTACT_REQUEST_TEXT = "Sure. What's your name and best phone or WhatsApp number?";
 const OFFER_RE = /have an agent|arrange a viewing/i;
+const CONTACT_REQUEST_TEXT = "Please share your name and phone number with country code. You can also include your email if you'd like.";
 const MISSING_NAME_TEXT = "What's your name?";
-const MISSING_PHONE_TEXT = "What's the best phone number to reach you?";
-const PHONE_HELP_TEXT = 'Please enter a valid UAE mobile number, for example 0501234567 or +971501234567.';
-const CONTACT_PROMPTS = [CONTACT_REQUEST_TEXT, MISSING_NAME_TEXT, MISSING_PHONE_TEXT];
-const isContactPrompt = (text) => CONTACT_PROMPTS.includes(text) || text.endsWith(PHONE_HELP_TEXT);
+const INVALID_PHONE_TEXT = 'Please enter a valid phone number, including your country code.';
+const CONTACT_PROMPTS = [CONTACT_REQUEST_TEXT, MISSING_NAME_TEXT, INVALID_PHONE_TEXT];
+const isContactPrompt = (text) => CONTACT_PROMPTS.includes(text);
 const EMAIL_FIND_RE = /[^\s@,;:<>()]+@[^\s@,;:<>()]+\.[a-z]{2,}/i;
-// Anything that looks like a typed number (6+ digit characters), checked only when a phone is expected.
-const PHONE_ATTEMPT_RE = /\+?\d[\d\s().-]{4,}\d/;
+// Anything that looks like a typed number ("+" and digits, or 6+ digit characters), checked only when a phone is expected.
+const PHONE_ATTEMPT_RE = /\+[\d\s().-]*\d|\d[\d\s().-]{4,}\d/;
 const NEXT_QUESTION = {
   purpose: 'Are you looking to buy or rent?',
   location: 'Which area do you prefer?',
@@ -494,8 +495,8 @@ const ACCEPT_RE = /^\s*(yes|yeah|yep|sure|ok|okay|please|please do|go ahead|of c
 const AGENT_REQUEST_RE = /\b(call me|contact me|talk to an? agent|speak (to|with) an? agent|(arrange|book|schedule) a viewing)\b/i;
 const LOCATION_FIXES = [[/\bDubai Lake Towers\b/gi, 'Jumeirah Lake Towers'], [/\bDubai Village Circle\b/gi, 'Jumeirah Village Circle']];
 const CONTACT_ASK_RE = /\b(agent|viewing|your name|phone|whatsapp|e-?mail|contact (details|number))\b/i;
-// Valid phone: UAE mobile (05X / 9715X / +9715X / 009715X, spaces or dashes allowed) or an explicit "+" international number.
-const PHONE_RE = /(?<![\d+])(?:(?:\+971|00971|971|0)[\s-]?5[024568](?:[\s-]?\d){7}|\+(?!971)\d(?:[\s-]?\d){9,14})(?![\d])/;
+// Valid phone: "+" and country code, 8–15 digits in total (E.164), with optional spaces, hyphens, dots or parentheses.
+const PHONE_RE = /(?<![\d+])\+[1-9](?:[\s().-]*\d){7,14}(?![\d])/;
 const NAME_STOPWORDS = new Set([
   'looking', 'interested', 'just', 'here', 'trying', 'planning', 'searching', 'not', 'from', 'in', 'a', 'an', 'the',
   'ok', 'fine', 'good', 'call', 'me', 'contact', 'reach', 'my', 'number', 'is', 'on', 'at', 'phone', 'mobile', 'whatsapp',
@@ -618,21 +619,11 @@ const looseName = (text) => {
   return NAME_STOPWORDS.has(cleaned.split(' ')[0].toLowerCase()) || ACCEPT_RE.test(cleaned) || DECLINE_RE.test(cleaned) ? '' : cleaned;
 };
 
-// Why a typed number is not a valid phone, e.g. "12344321" -> too short.
-const phoneProblem = (raw) => {
-  const digits = raw.replace(/\D/g, '').replace(/^00/, '');
-  const local = digits.startsWith('971') ? `0${digits.slice(3)}` : digits;
-  const problem =
-    local.length < 10
-      ? 'That number looks too short.'
-      : local.length > 10
-        ? 'That number looks too long.'
-        : "That doesn't look like a UAE mobile number (they start with 05 or +971 5).";
-  return `${problem} ${PHONE_HELP_TEXT}`;
-};
+// "+1 (202) 555-0123" -> "+12025550123"
+const normalizePhone = (raw) => `+${raw.replace(/\D/g, '')}`;
 
 // Contact details in one message. A bare name is only accepted when we just asked for it; a typed number that
-// isn't a valid phone returns `phoneError` when a phone is expected or the message is just "name, number".
+// isn't a valid phone sets `phoneError` when a phone is expected or the message is just "name, number".
 const extractContact = (text, { expectingName = false, expectingPhone = false } = {}) => {
   const found = {};
   const email = text.match(EMAIL_FIND_RE);
@@ -640,10 +631,9 @@ const extractContact = (text, { expectingName = false, expectingPhone = false } 
   const rest = text.replace(EMAIL_FIND_RE, ' ');
 
   const phone = rest.match(PHONE_RE);
-  if (phone) found.phone = phone[0].trim().replace(/\s+/g, ' ');
-  const nameThenNumber = /^\s*[a-z][a-z' -]{0,40}[\s,;:–-]+\+?[\d\s().-]+[\s,;.]*$/i.test(rest);
-  const typed = rest.match(PHONE_ATTEMPT_RE);
-  if (!phone && typed && (expectingPhone || nameThenNumber)) found.phoneError = phoneProblem(typed[0]);
+  if (phone) found.phone = normalizePhone(phone[0]);
+  const nameThenNumber = /^\s*[a-z][a-z' -]{0,40}[\s,;:–-]+[+(]?[\d\s().-]+[\s,;.]*$/i.test(rest);
+  if (!phone && PHONE_ATTEMPT_RE.test(rest) && (expectingPhone || nameThenNumber)) found.phoneError = INVALID_PHONE_TEXT;
 
   const withPhone = detectContact(rest);
   const introduced = rest.match(/\b(?:my name is|my name's|name is|name:)\s+([a-z][a-z'-]+(?:\s+[a-z][a-z'-]+)?)/i);
@@ -656,11 +646,11 @@ const extractContact = (text, { expectingName = false, expectingPhone = false } 
   return found;
 };
 
-// Name, then phone; one question at a time. Email is optional and never asked. Null when the lead is complete.
+// One combined request, then only the missing required field. Email is optional and never asked. Null when the lead can be saved.
 const nextContactQuestion = (contact) => {
   if (!contact.name && !contact.phone) return CONTACT_REQUEST_TEXT;
   if (!contact.name) return MISSING_NAME_TEXT;
-  if (!contact.phone) return MISSING_PHONE_TEXT;
+  if (!contact.phone) return INVALID_PHONE_TEXT;
   return null;
 };
 
@@ -985,8 +975,8 @@ const completeLead = async (state, sessionId) => {
   if (!result.ok) return null;
   state.leadSaved = true;
   return interest.interest
-    ? `Thanks ${state.contact.name}. I'll pass your viewing request to the team.`
-    : `Thanks ${state.contact.name}. An agent will contact you shortly.`;
+    ? `Thanks, ${state.contact.name}. I'll pass your viewing request to the team.`
+    : `Thanks, ${state.contact.name}. An agent will contact you shortly.`;
 };
 
 // Viewing requests are explicit contact actions, so they are allowed even after a generic decline.
@@ -1069,7 +1059,7 @@ const chat = async ({ sessionId, message, action }) => {
     const { phoneError, ...details } = found;
     Object.assign(contact, details);
 
-    // 4. Lead capture: name + one valid phone completes the lead; email is optional and never asked
+    // 4. Lead capture: name + valid phone save the lead immediately; email is optional and never asked
     let contactReply = '';
     const volunteered = Boolean(details.name && (details.phone || phoneError));
     const wantsContact = acceptedOffer || volunteered || (awaitingContact && Object.keys(found).length > 0);
