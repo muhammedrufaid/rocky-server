@@ -1,5 +1,5 @@
 /**
- * Rebuild chatbot embeddings (FAQs, company info, area guides) into `chatbotchunks`.
+ * Rebuild chatbot embeddings (FAQs, area guides, services, blogs, team) into `chatbotchunks`.
  *
  * Usage:
  *   node scripts/embed-faqs.js

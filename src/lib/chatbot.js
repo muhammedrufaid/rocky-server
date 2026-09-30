@@ -2,7 +2,6 @@ const fs = require('fs');
 const path = require('path');
 const OpenAI = require('openai');
 const Faq = require('../models/Faq');
-const CompanyInfo = require('../models/CompanyInfo');
 const AreaGuide = require('../models/AreaGuide');
 const Service = require('../models/Service');
 const Blog = require('../models/Blog');
@@ -142,9 +141,8 @@ const blogUnits = (blog) => {
 };
 
 const buildChunks = async () => {
-  const [faqs, company, areas, knowledge, services, blogs, team] = await Promise.all([
+  const [faqs, areas, knowledge, services, blogs, team] = await Promise.all([
     Faq.find({ isActive: true }).lean(),
-    CompanyInfo.find({ isActive: true }).lean(),
     AreaGuide.find({ isActive: true }).lean(),
     ChatbotKnowledge ? ChatbotKnowledge.find({}).lean() : [],
     Service.find({ isActive: true }).select('title description overview subservices').lean(),
@@ -159,7 +157,6 @@ const buildChunks = async () => {
   };
 
   faqs.forEach((f) => add('faq', f, f.question, `Q: ${f.question}\nA: `, f.answer));
-  company.forEach((c) => add('company', c, c.topic, `Q: ${c.question}\nA: `, c.answer));
   knowledge.forEach((k) => {
     const title = k.title || k.question || 'Knowledge';
     add('knowledge', k, title, `${title}\n`, k.content || k.answer || k.text);
