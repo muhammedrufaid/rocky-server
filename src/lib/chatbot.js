@@ -469,7 +469,7 @@ const runTool = async (name, args, sessionId) => {
 
 const QUALIFICATION_FIELDS = ['purpose', 'location', 'budget', 'bedrooms', 'timeline'];
 const QUESTION_FOR = {
-  purpose: 'whether they want to buy or rent',
+  purpose: 'whether they want to buy, rent, or explore off-plan properties',
   location: 'which area they prefer',
   budget: 'their budget in AED',
   bedrooms: 'how many bedrooms they need',
@@ -528,6 +528,7 @@ const PREVIEW_LIMIT = 3;
 const MAX_NEARBY_AREAS = 2;
 const MAX_RECOMMENDATIONS = 3;
 const CATEGORY_QUESTION = 'Which category would you like to explore?';
+const categoryQuestion = (location) => `Would you like to buy, rent, or explore off-plan properties in ${location}?`;
 
 let locationCache = null;
 const getKnownLocations = async () => {
@@ -557,7 +558,7 @@ const extractQualification = (text, locations) => {
   const t = text.toLowerCase();
   const found = {};
   const rent = /\b(rent|rents|renting|rentals?|lease|leasing)\b/.test(t);
-  const buy = /\b(buy|buying|purchase|purchasing|invest|investing)\b/.test(t);
+  const buy = /\b(buy|buying|purchase|purchasing|invest|investing|for sale)\b/.test(t);
   const sell = /\b(sell|selling)\b/.test(t);
   if (/\boff[- ]?plan\b/.test(t)) found.purpose = 'off-plan';
   else if (rent + buy + sell === 1) found.purpose = rent ? 'rent' : buy ? 'buy' : 'sell';
@@ -609,9 +610,8 @@ const detectContact = (text) => {
   return words.length ? { name: words.join(' '), phone: phoneMatch[0].trim() } : null;
 };
 
-// Budget/bedrooms only come from the user's own words; model-chosen search args may be guesses.
+// Purpose, budget and bedrooms only come from the user's own words; model-chosen search args may be guesses.
 const rememberSearchCriteria = (qualification, args = {}) => {
-  if (!qualification.purpose && args.purpose) qualification.purpose = String(args.purpose).toLowerCase();
   if (!qualification.location && args.location) qualification.location = String(args.location);
 };
 
@@ -1122,26 +1122,25 @@ const chat = async ({ sessionId, message, action }) => {
       // 5. Property search: requested area first, then deterministic fallbacks
       const hasCriteria = Boolean(q.location || q.budget || q.bedrooms || q.propertyType);
       let broad = false;
-      if (criteriaChanged && !q.purpose && hasCriteria) {
-        // No category chosen yet: real rent / buy / off-plan counts; a single matching category is searched directly.
+      // Purpose is never inferred: an area without a category gets the category question and no search.
+      if (!q.purpose && q.location && (criteriaChanged || criteriaGiven)) {
+        broad = true;
+        reply = categoryQuestion(q.location);
+      } else if (criteriaChanged && !q.purpose && hasCriteria) {
+        // No area and no category yet: real rent / buy / off-plan counts, then the user picks a category.
         const counts = await countByCategory(q);
-        const matching = CATEGORIES.filter((category) => counts[COUNT_KEYS[category]] > 0);
-        if (matching.length === 1) {
-          q.purpose = matching[0];
+        broad = true;
+        if (CATEGORIES.some((category) => counts[COUNT_KEYS[category]] > 0)) {
+          propertyCounts = counts;
+          reply = describeCounts(counts, q.propertyType);
+          const filters = { propertyType: q.propertyType, bedrooms: q.bedrooms, maxPrice: Number(q.budget) || undefined };
+          propertyResult = {
+            showViewAll: false,
+            location: 'Dubai',
+            filters: Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined && v !== '')),
+          };
         } else {
-          broad = true;
-          if (matching.length) {
-            propertyCounts = counts;
-            reply = describeCounts(counts, q.propertyType);
-            const filters = { locations: q.location ? [q.location] : undefined, propertyType: q.propertyType, bedrooms: q.bedrooms, maxPrice: Number(q.budget) || undefined };
-            propertyResult = {
-              showViewAll: false,
-              location: q.location || 'Dubai',
-              filters: Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined && v !== '')),
-            };
-          } else {
-            reply = `I couldn't find any ${describeCriteria(q, { plural: true, priceWord: 'within' })}. Would you like to adjust the budget or try another area?`;
-          }
+          reply = `I couldn't find any ${describeCriteria(q, { plural: true, priceWord: 'within' })}. Would you like to adjust the budget or try another area?`;
         }
       }
       const canSearch = !broad && CATEGORIES.includes(q.purpose) && hasCriteria;
@@ -1235,7 +1234,10 @@ const chat = async ({ sessionId, message, action }) => {
       reply = withQuestion(reply, OFFER_TEXT);
       state.leadOfferShown = true;
     } else if ((criteriaChanged || propertyTurn) && missing) {
-      reply = withQuestion(reply, missing === 'budget' && q.purpose === 'rent' ? "What's your yearly budget in AED?" : NEXT_QUESTION[missing]);
+      let question = NEXT_QUESTION[missing];
+      if (missing === 'purpose' && q.location) question = categoryQuestion(q.location);
+      if (missing === 'budget' && q.purpose === 'rent') question = "What's your yearly budget in AED?";
+      reply = withQuestion(reply, question);
     } else {
       reply = limitToOneQuestion(reply);
     }
