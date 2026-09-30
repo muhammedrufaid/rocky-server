@@ -647,6 +647,9 @@ const extractQualification = (text, locations, { fuzzy = true } = {}) => {
     noPhone.match(/(\d[\d,]{4,})\s*(?:aed|dirhams?|per year|a year|yearly)/);
   if (short) found.budget = String(Math.round(parseFloat(short[1]) * (short[2] === 'k' ? 1000 : 1000000)));
   else if (long) found.budget = long[1].replace(/,/g, '');
+  else if (/\b(any|no|flexible|open) (budget|price)\b|\bbudget (doesn'?t|does not|won'?t|isn'?t|is not) (matter|an issue|a problem)\b|\bno (price |budget )?limit\b|\bshow me anything\b/.test(t)) {
+    found.budgetFlexible = true;
+  }
 
   const timeline = t.match(/\b(asap|immediately|right away|this (week|month|year)|next (week|month|year)|(in|within) \d+ (days?|weeks?|months?))\b/);
   if (timeline) found.timeline = timeline[0];
@@ -815,8 +818,57 @@ const searchAreas = async (args, areas) => {
   return groups;
 };
 
-// 1. requested area  2. same criteria without the budget (price only, no listings)  3. nearby areas
-// 4. requested area, closest bedrooms  5. nearby areas, closest bedrooms
+const RESIDENTIAL_TYPES = ['Apartment', 'Villa', 'Townhouse'];
+const COMMERCIAL_TYPES = ['Office', 'Shop', 'Retail', 'Showroom'];
+const MAX_SAME_AREA_ALTERNATIVES = 5;
+
+// Same area, one requirement changed at a time (bedrooms, property type, furnishing or category), with real counts and
+// lowest prices. The budget is not applied here; a price above it is flagged instead. Never changes the saved criteria.
+const sameAreaAlternatives = async (q) => {
+  const base = { ...q, budget: undefined };
+  const options = bedroomAlternatives(q.bedrooms).map((bedrooms) => ({ difference: 'bedrooms', changes: { bedrooms } }));
+  if (q.propertyType) {
+    const family = COMMERCIAL_TYPES.includes(q.propertyType) ? COMMERCIAL_TYPES : RESIDENTIAL_TYPES;
+    family.filter((t) => t !== q.propertyType).forEach((propertyType) => options.push({ difference: 'propertyType', changes: { propertyType } }));
+  }
+  if (q.furnishing) options.push({ difference: 'furnishing', changes: { furnishing: undefined } });
+  CATEGORIES.filter((c) => c !== q.purpose).forEach((purpose) => options.push({ difference: 'purpose', changes: { purpose } }));
+
+  const results = await Promise.all(options.map(({ changes }) => findProperties(searchArgsFromState({ ...base, ...changes }), 1)));
+  return options
+    .flatMap(({ difference, changes }, i) => {
+      const { total, startingPrice, items } = results[i];
+      if (!total) return [];
+      const alt = { ...base, ...changes };
+      return [{
+        location: q.location,
+        purpose: alt.purpose,
+        propertyType: alt.propertyType || null,
+        bedrooms: alt.bedrooms ?? null,
+        furnishing: alt.furnishing || null,
+        count: total,
+        startingPrice,
+        priceFrequency: alt.purpose === 'rent' ? items[0].rentFrequency || 'Yearly' : null,
+        difference,
+        aboveBudget: difference !== 'purpose' && Number(q.budget) > 0 && startingPrice > Number(q.budget),
+      }];
+    })
+    .slice(0, MAX_SAME_AREA_ALTERNATIVES);
+};
+
+const nearbyAlternative = (q, g) => ({
+  location: g.location,
+  purpose: q.purpose,
+  propertyType: q.propertyType || null,
+  bedrooms: q.bedrooms ?? null,
+  count: g.total,
+  startingPrice: g.startingPrice,
+  priceFrequency: q.purpose === 'rent' ? g.items[0]?.rentFrequency || 'Yearly' : null,
+  difference: 'location',
+});
+
+// 1. exact match  2. same criteria without the budget (price only)  3. same-area alternatives (summary only)
+// 4. nearby areas with the original criteria. Without an area: exact match, then closest bedroom counts.
 const searchWithFallback = async (q, maxPrice = q.budget) => {
   const args = searchArgsFromState({ ...q, budget: maxPrice });
   const nearby = (q.location && NEARBY_AREAS[q.location]) || [];
@@ -824,23 +876,23 @@ const searchWithFallback = async (q, maxPrice = q.budget) => {
   const exact = await findProperties(args, PREVIEW_LIMIT);
   if (exact.total) return { stage: 'exact', nearby, groups: [{ location: q.location, bedrooms: args.bedrooms, ...exact }] };
 
-  if (Number(maxPrice) && q.location) {
+  if (!q.location) {
+    for (const bedrooms of bedroomAlternatives(q.bedrooms)) {
+      const found = await findProperties({ ...args, bedrooms }, PREVIEW_LIMIT);
+      if (found.total) return { stage: 'bedroom', nearby, groups: [{ location: q.location, bedrooms, ...found }] };
+    }
+    return { stage: 'none', nearby, groups: [] };
+  }
+
+  if (Number(maxPrice)) {
     const lowest = await findProperties(searchArgsFromState({ ...q, budget: undefined }), 1);
     if (lowest.total) return { stage: 'overBudget', nearby, groups: [], lowestPrice: lowest.startingPrice, rentFrequency: lowest.items[0].rentFrequency };
   }
 
-  const nearbyGroups = await searchAreas(args, nearby);
-  if (nearbyGroups.length) return { stage: 'nearby', nearby, groups: nearbyGroups };
-
-  const alternatives = bedroomAlternatives(q.bedrooms);
-  for (const bedrooms of alternatives) {
-    const found = await findProperties({ ...args, bedrooms }, PREVIEW_LIMIT);
-    if (found.total) return { stage: 'bedroom', nearby, groups: [{ location: q.location, bedrooms, ...found }] };
-  }
-  for (const bedrooms of alternatives) {
-    const groups = await searchAreas({ ...args, bedrooms }, nearby);
-    if (groups.length) return { stage: 'nearbyBedroom', nearby, groups };
-  }
+  const [sameArea, nearbyGroups] = await Promise.all([sameAreaAlternatives(q), searchAreas(args, nearby)]);
+  const alternatives = { sameArea, nearby: nearbyGroups.map((g) => nearbyAlternative(q, g)) };
+  if (sameArea.length) return { stage: 'alternatives', nearby, groups: [], alternatives };
+  if (nearbyGroups.length) return { stage: 'nearby', nearby, groups: nearbyGroups, alternatives };
   return { stage: 'none', nearby, groups: [] };
 };
 
@@ -851,6 +903,22 @@ const groupPhrase = (q, g, qualifier = bedsLabel(g.bedrooms) || 'matching') => {
   return g.total === 1
     ? `${where} has a ${qualifier} option at ${price}`
     : `${where} has ${qualifier} options starting from ${price} (${g.total} listings)`;
+};
+
+const listingCount = (n) => `${n} listing${n === 1 ? '' : 's'}`;
+const bedsText = (b) => (String(b) === '0' ? 'studio' : `${b} bedroom${String(b) === '1' ? '' : 's'}`);
+
+// "Townhouses for rent: 1 listing from AED 260,000/year (same area, townhouse instead of apartment)"
+const alternativeLine = (q, a) => {
+  const label = describeCriteria({ ...q, purpose: a.purpose, propertyType: a.propertyType, bedrooms: a.bedrooms, furnishing: a.furnishing }, { plural: true, location: '', maxPrice: null });
+  const changed = {
+    bedrooms: () => `same area and type, ${bedsText(a.bedrooms)} instead of ${bedsText(q.bedrooms)}`,
+    propertyType: () => `same area, ${String(a.propertyType).toLowerCase()} instead of ${String(q.propertyType).toLowerCase()}`,
+    furnishing: () => 'same area and type, any furnishing',
+    purpose: () => `same area, ${a.purpose} instead of ${q.purpose}`,
+  }[a.difference]();
+  const price = priceText(a.startingPrice, a.purpose, a.priceFrequency);
+  return `${label.charAt(0).toUpperCase()}${label.slice(1)}: ${listingCount(a.count)} from ${price} (${changed}${a.aboveBudget ? ', above your budget' : ''})`;
 };
 
 const joinPhrases = (phrases) => (phrases.length > 1 ? `${phrases.slice(0, -1).join(', ')} and ${phrases[phrases.length - 1]}` : phrases[0]);
@@ -872,19 +940,21 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
     const price = priceText(result.lowestPrice, q.purpose, result.rentFrequency);
     return `I couldn't find any ${describeCriteria(q, { maxPrice, plural: true, priceWord: 'within' })}. The lowest available option currently starts from ${price}. Would you like to see listings from ${price}?`;
   }
+  if (result.stage === 'alternatives') {
+    const { sameArea, nearby } = result.alternatives;
+    const nearbyLines = nearby.map((a) => `• ${a.location}: ${listingCount(a.count)} from ${priceText(a.startingPrice, a.purpose, a.priceFrequency)}`);
+    return [
+      `${missed}.`,
+      `In ${q.location}, I found:\n${sameArea.map((a) => `• ${alternativeLine(q, a)}`).join('\n')}`,
+      nearbyLines.length ? `If you'd rather keep the same requirements, nearby options include:\n${nearbyLines.join('\n')}` : '',
+      'Would you like to see one of these?',
+    ].filter(Boolean).join('\n\n');
+  }
   if (result.stage === 'nearby') {
     return `${missed}. Nearby, ${joinPhrases(result.groups.map((g) => groupPhrase(q, g, 'matching')))}.`;
   }
-  const missedAround = `I couldn't find ${describeCriteria(q, {
-    maxPrice,
-    priceWord: 'within',
-    location: q.location && result.nearby.length ? `${q.location} or nearby areas` : q.location,
-  })}`;
   if (result.stage === 'bedroom') {
-    return `${missedAround}, but ${groupPhrase(q, first)}.`;
-  }
-  if (result.stage === 'nearbyBedroom') {
-    return `${missedAround}. The closest alternative: ${joinPhrases(result.groups.map((g) => groupPhrase(q, g)))}.`;
+    return `${missed}, but ${groupPhrase(q, first)}.`;
   }
   let context = '';
   if (q.location && !cheaper) {
@@ -1022,7 +1092,7 @@ const buildStateContext = (state) => {
   const contactClosed = state.leadSaved || state.leadOfferDeclined;
   const nextContactField = state.leadSaved ? 'none' : !c.name ? 'name' : !c.phone ? 'phone' : 'none';
   const lines = [
-    ...QUALIFICATION_FIELDS.map((field) => `${field}: ${q[field] || 'unknown'}`),
+    ...QUALIFICATION_FIELDS.map((field) => `${field}: ${q[field] || (field === 'budget' && q.budgetFlexible ? 'any (no limit, never ask)' : 'unknown')}`),
     `propertyType: ${q.propertyType || 'any'}`,
     `furnishing: ${q.furnishing || 'any'}`,
     `leadOfferShown: ${state.leadOfferShown}`,
@@ -1035,7 +1105,7 @@ const buildStateContext = (state) => {
   if (q.purpose && q.purpose !== 'sell' && (q.location || q.budget || q.bedrooms)) {
     steps.push('If search results are provided, summarize them briefly. Only call search_properties again if the user asked for something different.');
   }
-  const missing = QUALIFICATION_FIELDS.find((field) => !q[field]);
+  const missing = QUALIFICATION_FIELDS.find((field) => (field === 'budget' ? !budgetKnown(q) : !q[field]));
   steps.push(
     missing
       ? `Ask at most ONE question; if it is a qualifying question ask ONLY ${QUESTION_FOR[missing]}. Never ask about known fields.`
@@ -1063,7 +1133,9 @@ const stripContactAsks = (reply) => {
   return cleaned || 'Happy to keep helping. What would you like to see next?';
 };
 
-const SEARCH_FIELDS = ['purpose', 'location', 'propertyType', 'budget', 'bedrooms', 'furnishing'];
+const SEARCH_FIELDS = ['purpose', 'location', 'propertyType', 'budget', 'budgetFlexible', 'bedrooms', 'furnishing'];
+// "any budget" counts as an answer, so the budget question is never asked again.
+const budgetKnown = (q) => Boolean(q.budget || q.budgetFlexible);
 
 const hasViewingInterest = (state) => Object.keys(state.viewingInterest).length > 0;
 
@@ -1108,6 +1180,7 @@ const chat = async ({ sessionId, message, action }) => {
   let propertyCounts = null;
   let recommendations = [];
   let uiActions = [];
+  let alternatives = null;
   let savedName = '';
   let confirmation = '';
   let criteriaChanged = false;
@@ -1137,6 +1210,8 @@ const chat = async ({ sessionId, message, action }) => {
       delete extracted.locationSuggestion;
       criteriaChanged = SEARCH_FIELDS.some((f) => extracted[f] && extracted[f] !== q[f]);
       criteriaGiven = !message.includes('?') && SEARCH_FIELDS.some((f) => extracted[f]);
+      if (extracted.budget) delete q.budgetFlexible;
+      if (extracted.budgetFlexible) delete q.budget;
       Object.assign(q, extracted);
       if (!q.purpose) delete q.purpose;
     }
@@ -1145,7 +1220,7 @@ const chat = async ({ sessionId, message, action }) => {
     const offerPending = state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved && OFFER_RE.test(lastAssistant);
     const awaitingContact = !state.leadSaved && isContactPrompt(lastAssistant);
     const typedViewing = !isViewingClick && VIEWING_RE.test(message);
-    if (!isViewingClick && !state.leadSaved && (/just (browsing|looking)/i.test(message) || (offerPending && DECLINE_RE.test(message)))) {
+    if (!isViewingClick && !state.leadSaved && (/just (browsing|looking)/i.test(message) || (offerPending && DECLINE_RE.test(message) && !extracted.budgetFlexible))) {
       state.leadOfferDeclined = true;
     }
     const acceptedOffer =
@@ -1265,6 +1340,7 @@ const chat = async ({ sessionId, message, action }) => {
           result = await searchWithFallback(q);
         }
         reply = await describeResults(q, result, maxPrice, { cheaper });
+        alternatives = result.alternatives || null;
         if (result.stage === 'overBudget') {
           // Only the price is offered; listings are shown after the user agrees.
           state.budgetFallback = { pending: true, originalMaxPrice: Number(maxPrice), suggestedMinPrice: result.lowestPrice };
@@ -1340,8 +1416,8 @@ const chat = async ({ sessionId, message, action }) => {
       reply = reply.replace(pattern, fixed);
     });
     reply = stripContactAsks(reply);
-    const missing = ['purpose', 'location', 'budget', 'bedrooms'].find((f) => !q[f]);
-    if (propertyTurn && q.purpose && q.location && q.budget && !state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved) {
+    const missing = ['purpose', 'location', 'budget', 'bedrooms'].find((f) => (f === 'budget' ? !budgetKnown(q) : !q[f]));
+    if (propertyTurn && q.purpose && q.location && budgetKnown(q) && !state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved) {
       reply = withQuestion(reply, OFFER_TEXT);
       state.leadOfferShown = true;
     } else if ((criteriaChanged || propertyTurn) && missing) {
@@ -1374,7 +1450,7 @@ const chat = async ({ sessionId, message, action }) => {
     { upsert: true }
   );
 
-  return { reply, properties, propertyResult, propertyCounts, recommendations, uiActions };
+  return { reply, properties, propertyResult, propertyCounts, recommendations, uiActions, alternatives };
 };
 
 const getHistory = async (sessionId) => {

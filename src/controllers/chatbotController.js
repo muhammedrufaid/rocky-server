@@ -65,7 +65,7 @@ const sendChatMessage = async (req, res) => {
         ? { type: 'book_viewing', propertyRefNo: text(rawAction.propertyRefNo), location: text(rawAction.location) }
         : null;
 
-    const { reply, properties, propertyResult, propertyCounts, recommendations, uiActions } = await chat({ sessionId, message, action });
+    const { reply, properties, propertyResult, propertyCounts, recommendations, uiActions, alternatives } = await chat({ sessionId, message, action });
     return res.status(200).json({
       success: true,
       sessionId,
@@ -75,6 +75,7 @@ const sendChatMessage = async (req, res) => {
       ...(propertyCounts && { propertyCounts }),
       ...(recommendations?.length && { recommendations }),
       ...(uiActions?.length && { uiActions }),
+      ...(alternatives && { alternatives }),
     });
   } catch (error) {
     console.error('[Chatbot] Chat request failed:', error.message);

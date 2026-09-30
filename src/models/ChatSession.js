@@ -37,6 +37,7 @@ const chatSessionSchema = new mongoose.Schema(
       location: { type: String, trim: true },
       propertyType: { type: String, trim: true },
       budget: { type: String, trim: true },
+      budgetFlexible: { type: Boolean },
       bedrooms: { type: String, trim: true },
       furnishing: { type: String, trim: true },
       timeline: { type: String, trim: true },
