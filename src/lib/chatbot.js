@@ -6,6 +6,7 @@ const CompanyInfo = require('../models/CompanyInfo');
 const AreaGuide = require('../models/AreaGuide');
 const Service = require('../models/Service');
 const Blog = require('../models/Blog');
+const TeamMember = require('../models/TeamMember');
 const ChatbotChunk = require('../models/ChatbotChunk');
 const ChatSession = require('../models/ChatSession');
 const Property = require('../models/Property');
@@ -141,13 +142,15 @@ const blogUnits = (blog) => {
 };
 
 const buildChunks = async () => {
-  const [faqs, company, areas, knowledge, services, blogs] = await Promise.all([
+  const [faqs, company, areas, knowledge, services, blogs, team] = await Promise.all([
     Faq.find({ isActive: true }).lean(),
     CompanyInfo.find({ isActive: true }).lean(),
     AreaGuide.find({ isActive: true }).lean(),
     ChatbotKnowledge ? ChatbotKnowledge.find({}).lean() : [],
     Service.find({ isActive: true }).select('title description overview subservices').lean(),
     Blog.find({ isActive: true }).select('title category description content faqs').lean(),
+    // Contact details and admin flags are never indexed.
+    TeamMember.find({ isActive: true }).select('name designation department').sort({ order: 1 }).lean(),
   ]);
 
   const chunks = [];
@@ -191,6 +194,9 @@ const buildChunks = async () => {
     const head = `Blog: ${b.title}\n${b.category ? `Category: ${b.category}\n` : ''}\n`;
     add('blog', b, b.title, head, blogUnits(b), LONG_CHUNK_CHARS);
   });
+  team.forEach((m) =>
+    add('team', m, m.name, `${COMPANY} team member: ${m.name}\n`, `Designation: ${m.designation}\nDepartment: ${m.department}`)
+  );
 
   return chunks;
 };
@@ -243,8 +249,13 @@ const cosine = (a, b) => {
   return na && nb ? dot / (Math.sqrt(na) * Math.sqrt(nb)) : 0;
 };
 
-const retrieve = async (query, k = 4) => {
+const loadChunks = async () => {
   if (!chunkCache) chunkCache = await ChatbotChunk.find({}).lean();
+  return chunkCache;
+};
+
+const retrieve = async (query, k = 4) => {
+  await loadChunks();
   if (!chunkCache.length) return [];
 
   const [queryVector] = await embed(query);
@@ -263,6 +274,111 @@ const retrieve = async (query, k = 4) => {
     if (results.length === k) break;
   }
   return results;
+};
+
+// ---------- Team ----------
+
+const COMPANY = 'Rocky Real Estate';
+const chunkField = (text, label) => (String(text).match(new RegExp(`^${label}: (.*)$`, 'm')) || [])[1] || '';
+
+// Read from the indexed team chunks so answers refresh together with retrieval after a reindex.
+const teamRoster = async () =>
+  (await loadChunks())
+    .filter((c) => c.source === 'team')
+    .map((c) => ({
+      name: chunkField(c.text, `${COMPANY} team member`),
+      designation: chunkField(c.text, 'Designation'),
+      department: chunkField(c.text, 'Department'),
+    }))
+    .filter((m) => m.name && m.designation);
+
+// Each role only matches its own titles; roles are never inferred from one another.
+const TEAM_ROLES = [
+  { label: 'Managing Director', ask: /\bmanaging directors?\b/i, titles: ['managing director'] },
+  { label: 'General Manager', ask: /\bgeneral managers?\b/i, titles: ['general manager'] },
+  { label: 'CEO', ask: /\bceos?\b|\bchief executive\b/i, titles: ['ceo', 'chief executive officer'] },
+  { label: 'Founder', ask: /\bfound(er|ers|ed)\b/i, titles: ['founder'] },
+  { label: 'Owner', ask: /\bowners?\b|\bowns\b/i, titles: ['owner'] },
+  { label: 'Chairman', ask: /\bchair(man|woman|person)?\b/i, titles: ['chairman', 'chairwoman', 'chairperson'] },
+  { label: 'Partner', ask: /\bpartners?\b/i, titles: ['partner'] },
+  { label: 'Director', ask: /\bdirectors?\b/i, titles: ['director'] },
+  { label: 'Manager', ask: /\bmanagers?\b/i, test: (designation) => /\bmanager\b/i.test(designation) },
+];
+const TEAM_ASK_RE = /\b(who|whom|who's|name of|names of|tell me about)\b/i;
+const NOT_TEAM_RE = /\b(apartments?|villas?|propert(y|ies)|units?|buildings?|listings?|flats?|landlords?|towers?|townhouses?|penthouses?|developers?|plots?)\b/i;
+
+const titleParts = (designation) =>
+  designation.toLowerCase().split(/\s*(?:&|,|\/|\band\b)\s*/).map((p) => p.trim()).filter(Boolean);
+const withArticle = (label) => `${/^[aeiou]/i.test(label) ? 'an' : 'a'} ${label}`;
+const memberLines = (members) => members.map((m) => `- ${m.name} — ${m.designation}`).join('\n');
+const titleCase = (s) => s.trim().replace(/\b(?!of\b|and\b)\w/g, (c) => c.toUpperCase());
+const normDept = (s) => String(s).toLowerCase().replace(/\b(the|department|dept|team)\b/g, ' ').replace(/\s+/g, ' ').trim();
+
+const roleAnswer = (text, roster) => {
+  const headOf = text.match(/\bhead of (?:the )?([a-z&' ]+?)(?:\s+(?:department|dept|team))?\s*[?.!]*$/i);
+  const role = headOf
+    ? { label: `Head of ${titleCase(headOf[1])}`, titles: [`head of ${headOf[1].trim().toLowerCase()}`] }
+    : TEAM_ROLES.find((r) => r.ask.test(text));
+  if (!role) return null;
+
+  const matches = roster.filter((m) =>
+    role.test ? role.test(m.designation) : titleParts(m.designation).some((p) => role.titles.includes(p))
+  );
+  if (!matches.length) return `I don't have ${withArticle(role.label)} listed in the current ${COMPANY} team information.`;
+  if (matches.length === 1 && !role.test) return `The ${role.label} of ${COMPANY} is ${matches[0].name}.`;
+  return `${COMPANY} currently lists:\n${memberLines(matches)}`;
+};
+
+const departmentAnswer = (text, roster) => {
+  const asked = text.match(
+    /\b(?:who|whom|people|members|staff|everyone|anyone)\b[^?]*?\b(?:in|on|of|from)\s+(?:the\s+)?([a-z&' ]+?)\s*[?.!]*$/i
+  );
+  if (!asked) return null;
+  const term = normDept(asked[1]);
+  const explicit = /\b(department|dept|team)\b/i.test(asked[1]);
+  if (!term) return null;
+
+  const departments = [...new Set(roster.map((m) => m.department).filter(Boolean))];
+  const exact = departments.find((d) => normDept(d) === term);
+  const list = (dept) => memberLines(roster.filter((m) => m.department === dept));
+  if (exact) return `The ${exact} department currently includes:\n${list(exact)}`;
+
+  const related = term.length >= 4 ? departments.filter((d) => normDept(d).includes(term)) : [];
+  const label = titleCase(term);
+  if (related.length) {
+    return `I don't have a department called ${label} listed, but ${COMPANY} has:\n${related
+      .map((d) => `${d}:\n${list(d)}`)
+      .join('\n')}`;
+  }
+  return explicit ? `I don't have ${withArticle(label)} department listed in the current ${COMPANY} team information.` : null;
+};
+
+const personAnswer = (text, roster) => {
+  const asked = text.match(/^\s*(?:who is|who's|tell me about|do you know)\s+(.+?)\s*[?.!]*$/i);
+  if (!asked) return null;
+  const wanted = asked[1].toLowerCase().replace(/\s+/g, ' ').trim();
+  const single = !wanted.includes(' ') && wanted.length >= 3;
+  const matches = roster.filter((m) => {
+    const name = m.name.toLowerCase();
+    return name === wanted || (single && name.split(/\s+/).includes(wanted));
+  });
+  if (!matches.length) return null;
+  if (matches.length > 1) return `${COMPANY} currently lists:\n${memberLines(matches)}`;
+  const [m] = matches;
+  return `${m.name} is listed as ${m.designation}${m.department ? ` in the ${m.department} department` : ''}.`;
+};
+
+// Deterministic answers for company role / department / person questions; null when the message isn't one.
+const teamAnswer = async (text) => {
+  if (!TEAM_ASK_RE.test(text)) return null;
+  const roster = await teamRoster();
+  if (!roster.length) return null;
+  const teamTerms = [...new Set(roster.flatMap((m) => [m.department, m.designation]).filter(Boolean))].sort(
+    (a, b) => b.length - a.length
+  );
+  const rest = teamTerms.reduce((s, term) => s.replace(new RegExp(`\\b${escapeRegex(term)}\\b`, 'gi'), ' '), text);
+  if (NOT_TEAM_RE.test(rest)) return null;
+  return roleAnswer(text, roster) || departmentAnswer(text, roster) || personAnswer(text, roster);
 };
 
 // ---------- Chat ----------
@@ -1211,11 +1327,13 @@ const chat = async ({ sessionId, message, action }) => {
     state.locationSuggestion = '';
     const pastMessages = session?.messages || [];
     const lastAssistant = [...pastMessages].reverse().find((m) => m.role === 'assistant')?.content || '';
+    // Company team questions are answered from the team records only and never touch search or contact state.
+    const teamReply = isViewingClick ? null : await teamAnswer(message);
 
     // 1. Qualification (skipped for button clicks so a property title can't change the criteria)
     let extracted = {};
     let locationSuggestion = '';
-    if (!isViewingClick) {
+    if (!isViewingClick && !teamReply) {
       // No typo matching on replies to the contact prompt, so a name like "Arjun" is never read as an area.
       extracted = extractQualification(message, await getKnownLocations(), { fuzzy: !isContactPrompt(lastAssistant) });
       if (!extracted.location && pendingLocation && ACCEPT_RE.test(message)) extracted.location = pendingLocation;
@@ -1248,7 +1366,7 @@ const chat = async ({ sessionId, message, action }) => {
     // 3. Contact details: merged into the session's contact state; known fields are never cleared
     const contact = state.contact;
     let found = {};
-    if (!isViewingClick) {
+    if (!isViewingClick && !teamReply) {
       found = extractContact(message, {
         expectingName: awaitingContact && !contact.name,
         expectingPhone: awaitingContact && !contact.phone && !extracted.budget,
@@ -1269,7 +1387,7 @@ const chat = async ({ sessionId, message, action }) => {
     let contactReply = '';
     const volunteered = Boolean(details.name && (details.phone || phoneError));
     const wantsContact = acceptedOffer || volunteered || (awaitingContact && Object.keys(found).length > 0);
-    if (!state.leadSaved && !isViewingClick && wantsContact) {
+    if (!state.leadSaved && !isViewingClick && !teamReply && wantsContact) {
       if (phoneError && !contact.phone) {
         contactReply = phoneError;
       } else if (nextContactQuestion(contact)) {
@@ -1283,11 +1401,13 @@ const chat = async ({ sessionId, message, action }) => {
       }
     }
 
-    const wantsAreas = !isViewingClick && !extracted.location && RECOMMEND_RE.test(message);
+    const wantsAreas = !isViewingClick && !teamReply && !extracted.location && RECOMMEND_RE.test(message);
     if (wantsAreas) recommendations = await recommendAreas(message, q);
 
     if (isViewingClick || (typedViewing && state.leadSaved && !savedName)) {
       reply = await requestViewing(state, sessionId);
+    } else if (teamReply) {
+      reply = teamReply;
     } else if (contactReply) {
       reply = contactReply;
     } else if (savedName && !criteriaChanged) {
