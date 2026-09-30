@@ -35,6 +35,7 @@ const chatSessionSchema = new mongoose.Schema(
     qualification: {
       purpose: { type: String, trim: true },
       location: { type: String, trim: true },
+      locationFlexible: { type: Boolean },
       propertyType: { type: String, trim: true },
       budget: { type: String, trim: true },
       budgetFlexible: { type: Boolean },

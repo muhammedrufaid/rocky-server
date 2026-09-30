@@ -728,7 +728,16 @@ const fuzzyLocation = (text, locations) => {
   return possible ? { canonical: best.canonical, confident: false } : null;
 };
 
-const extractQualification = (text, locations, { fuzzy = true } = {}) => {
+// "any area", "anywhere in Dubai", "any community is fine": always means no area restriction.
+const ANY_LOCATION_RE = /\b(anywhere|any ?where|any (areas?|locations?|communit(y|ies)|neighbou?rhoods?)|no (location|area) preference)\b/i;
+// Generic answers that only mean "no area restriction" when we just asked for the area.
+const NO_PREFERENCE_RE = /^\s*(no preference|(it )?(doesn'?t|does not|don'?t) matter|i don'?t mind|anything is fine)\b/i;
+const AREA_QUESTION_RE = /\b(areas?|locations?|communit(y|ies))\b[^.!?]*\?/i;
+
+const noLocationPreference = (text, { areaAsked = false } = {}) =>
+  !text.includes('?') && (ANY_LOCATION_RE.test(text) || (areaAsked && NO_PREFERENCE_RE.test(text)));
+
+const extractQualification = (text, locations, { fuzzy = true, areaAsked = false } = {}) => {
   const t = text.toLowerCase();
   const found = {};
   const rent = /\b(rent|rents|renting|rentals?|lease|leasing|per (year|month|annum)|yearly|monthly)\b/.test(t);
@@ -737,8 +746,10 @@ const extractQualification = (text, locations, { fuzzy = true } = {}) => {
   if (/\boff[- ]?plan\b/.test(t)) found.purpose = 'off-plan';
   else if (rent + buy + sell === 1) found.purpose = rent ? 'rent' : buy ? 'buy' : 'sell';
 
+  // Checked before any area matching, so "any areas" is never read as an area name or typo.
   const location = locations.find(([, , re]) => re.test(text));
-  if (location) found.location = location[1];
+  if (noLocationPreference(text, { areaAsked })) found.locationFlexible = true;
+  else if (location) found.location = location[1];
   else if (fuzzy && !PHONE_ATTEMPT_RE.test(text) && !EMAIL_FIND_RE.test(text)) {
     const close = fuzzyLocation(text, locations);
     if (close?.confident) found.location = close.canonical;
@@ -796,7 +807,7 @@ const detectContact = (text) => {
 
 // Purpose, budget and bedrooms only come from the user's own words; model-chosen search args may be guesses.
 const rememberSearchCriteria = (qualification, args = {}) => {
-  if (!qualification.location && args.location) qualification.location = String(args.location);
+  if (!qualification.location && !qualification.locationFlexible && args.location) qualification.location = String(args.location);
 };
 
 const searchArgsFromState = (q) => {
@@ -871,7 +882,8 @@ const describeCriteria = (q, { location = q.location, bedrooms = q.bedrooms, max
   if (plural) noun = { property: 'properties', retail: 'retail units' }[noun] || `${noun}s`;
   const forWhat = q.purpose === 'rent' ? ' for rent' : q.purpose === 'buy' ? ' for sale' : '';
   const suffix = noun.startsWith('rental') ? '' : forWhat;
-  const where = location ? ` in ${location}` : '';
+  // location '' means the caller wants no area wording at all.
+  const where = location ? ` in ${location}` : q.locationFlexible && location !== '' ? ' across Dubai' : '';
   const price = Number(maxPrice) ? ` ${priceWord} ${priceText(maxPrice, q.purpose)}` : '';
   const offPlan = q.purpose === 'off-plan' ? 'off-plan' : '';
   const text = `${[bedsLabel(bedrooms, plural), q.furnishing, offPlan, noun].filter(Boolean).join(' ')}${suffix}${where}${price}`;
@@ -1221,7 +1233,11 @@ const buildStateContext = (state) => {
   const contactClosed = state.leadSaved || state.leadOfferDeclined;
   const nextContactField = state.leadSaved ? 'none' : !c.name ? 'name' : !c.phone ? 'phone' : 'none';
   const lines = [
-    ...QUALIFICATION_FIELDS.map((field) => `${field}: ${q[field] || (field === 'budget' && q.budgetFlexible ? 'any (no limit, never ask)' : 'unknown')}`),
+    ...QUALIFICATION_FIELDS.map((field) => {
+      if (field === 'budget' && !q.budget && q.budgetFlexible) return 'budget: any (no limit, never ask)';
+      if (field === 'location' && !q.location && q.locationFlexible) return 'location: anywhere in Dubai (no preference, never ask)';
+      return `${field}: ${q[field] || 'unknown'}`;
+    }),
     `propertyType: ${q.propertyType || 'any'}`,
     `furnishing: ${q.furnishing || 'any'}`,
     `leadOfferShown: ${state.leadOfferShown}`,
@@ -1262,9 +1278,11 @@ const stripContactAsks = (reply) => {
   return cleaned || 'Happy to keep helping. What would you like to see next?';
 };
 
-const SEARCH_FIELDS = ['purpose', 'location', 'propertyType', 'budget', 'budgetFlexible', 'bedrooms', 'furnishing'];
-// "any budget" counts as an answer, so the budget question is never asked again.
+const SEARCH_FIELDS = ['purpose', 'location', 'locationFlexible', 'propertyType', 'budget', 'budgetFlexible', 'bedrooms', 'furnishing'];
+// "any budget" / "any area" count as answers, so those questions are never asked again.
 const budgetKnown = (q) => Boolean(q.budget || q.budgetFlexible);
+const locationKnown = (q) => Boolean(q.location || q.locationFlexible);
+const fieldKnown = (q, field) => (field === 'budget' ? budgetKnown(q) : field === 'location' ? locationKnown(q) : Boolean(q[field]));
 
 const hasViewingInterest = (state) => Object.keys(state.viewingInterest).length > 0;
 
