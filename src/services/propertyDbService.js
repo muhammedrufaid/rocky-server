@@ -72,7 +72,8 @@ const numberExprFromStringField = (field) => {
 };
 
 const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
-  const q = normalizeToLower(search);
+  // One term or several (union), e.g. ['dubai marina', 'jumeirah lake towers'].
+  const terms = (Array.isArray(search) ? search : [search]).map(normalizeToLower).filter(Boolean);
 
   const nf = {
     propertyType: normalizeStringList(filters.propertyType),
@@ -86,6 +87,8 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
     propertyStatus: normalizeStringList(filters.propertyStatus),
     bedrooms: parseOptionalNumber(filters.bedrooms),
     bathrooms: parseOptionalNumber(filters.bathrooms),
+    beds: parseOptionalNumber(filters.beds),
+    baths: parseOptionalNumber(filters.baths),
     priceMin: parseOptionalNumber(filters.priceMin),
     priceMax: parseOptionalNumber(filters.priceMax),
     propertySizeMin: parseOptionalNumber(filters.propertySizeMin),
@@ -111,10 +114,12 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
     match.push({ [key]: value });
   });
 
-  if (q) {
-    const re = new RegExp(escapeRegex(q), 'i');
-    match.push({ $or: SEARCH_FIELDS.map((f) => ({ [f]: re })) });
+  if (terms.length) {
+    match.push({ $or: terms.flatMap((t) => SEARCH_FIELDS.map((f) => ({ [f]: new RegExp(escapeRegex(t), 'i') }))) });
   }
+
+  // Listing-page `beds`: studio (0) is apartments only.
+  if (nf.beds === 0) match.push({ propertyType: /apartment/i });
 
   const mongoMatch = match.length ? { $and: match } : {};
 
@@ -128,6 +133,9 @@ const buildListQuery = ({ search = '', filters = {}, forced = {} }) => {
   const numericMatch = {};
   if (nf.bedrooms !== null) numericMatch.__bedroomsNum = nf.bedrooms;
   if (nf.bathrooms !== null) numericMatch.__bathroomsNum = nf.bathrooms;
+  // Listing-page `beds` / `baths`: 6 means 6+.
+  if (nf.beds !== null) numericMatch.__bedroomsNum = nf.beds >= 6 ? { $gte: 6 } : nf.beds;
+  if (nf.baths !== null) numericMatch.__bathroomsNum = nf.baths >= 6 ? { $gte: 6 } : nf.baths;
 
   if (nf.priceMin !== null || nf.priceMax !== null) {
     numericMatch.__priceNum = {};
@@ -185,9 +193,10 @@ const paginateProperties = async ({
   page = 1,
   limit = 10,
   sort = { _id: -1 },
+  maxLimit = 100,
 }) => {
   const safePage = Math.max(parseInt(page, 10) || 1, 1);
-  const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 100);
+  const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 10, 1), maxLimit);
   const skip = (safePage - 1) * safeLimit;
   const { mongoMatch, addFields, numericMatch, hasNumericFilters } = buildListQuery({
     search,
@@ -259,14 +268,17 @@ const fetchReadyProperties = async (opts = {}) => {
   return paginateProperties({ page, limit, search, filters, forced: { offPlan: 'No' } });
 };
 
+// The buy/rent listing pages request a 500-item window when price/bed filters are active.
+const LISTING_WINDOW_LIMIT = 500;
+
 const fetchBuyProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {} } = opts;
-  return paginateProperties({ page, limit, search, filters, forced: { propertyPurpose: 'Buy' } });
+  return paginateProperties({ page, limit, search, filters, forced: { propertyPurpose: 'Buy' }, maxLimit: LISTING_WINDOW_LIMIT });
 };
 
 const fetchRentProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {} } = opts;
-  return paginateProperties({ page, limit, search, filters, forced: { propertyPurpose: 'Rent' } });
+  return paginateProperties({ page, limit, search, filters, forced: { propertyPurpose: 'Rent' }, maxLimit: LISTING_WINDOW_LIMIT });
 };
 
 const {
@@ -536,6 +548,8 @@ const fetchSearchByAreaSuggestions = async (opts = {}) => {
 };
 
 module.exports = {
+  buildCommonPipeline,
+  LISTING_WINDOW_LIMIT,
   fetchAllProperties,
   fetchOffPlanProperties,
   fetchReadyProperties,

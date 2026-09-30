@@ -12,6 +12,7 @@ const Property = require('../models/Property');
 const ChatbotLead = require('../models/ChatbotLead');
 const { CHATBOT_SUB_SOURCE } = ChatbotLead;
 const { sendToZapier } = require('../services/zapierService');
+const { buildCommonPipeline } = require('../services/propertyDbService');
 
 const RULES = fs.readFileSync(path.join(__dirname, '../constants/chatbotRules.md'), 'utf8');
 
@@ -292,26 +293,22 @@ const formatProperty = (p) => ({
   url: propertyUrl(p),
 });
 
-// Returns up to `limit` cheapest matches plus the total count and starting (minimum) price.
+// Same query as the buy/rent listing pages, so a View All URL built from these args shows the same total.
+// Area terms are what the listing page derives from the URL slug ("dubai-marina" -> "dubai marina").
 const findProperties = async ({ purpose, location, type, bedrooms, min_price, max_price } = {}, limit = 6) => {
-  const match = {};
-  if (purpose) match.propertyPurpose = String(purpose).toLowerCase() === 'rent' ? 'Rent' : 'Buy';
-  const terms = (Array.isArray(location) ? location : [location]).filter(Boolean);
-  if (terms.length) {
-    const re = new RegExp(terms.map(escapeRegex).join('|'), 'i');
-    match.$or = ['locality', 'subLocality', 'towerName', 'city', 'propertyTitle'].map((f) => ({ [f]: re }));
-  }
-  if (type) match.propertyType = new RegExp(escapeRegex(type), 'i');
-  if (bedrooms !== undefined && bedrooms !== null && bedrooms !== '') match.bedrooms = String(parseInt(bedrooms, 10) || 0);
-
-  const priceMatch = { $gt: 0 };
-  if (Number(min_price) > 0) priceMatch.$gte = Number(min_price);
-  if (Number(max_price) > 0) priceMatch.$lte = Number(max_price);
+  const search = (Array.isArray(location) ? location : [location]).filter(Boolean).map((l) => areaSlug([l]).replace(/-/g, ' '));
+  const hasBeds = bedrooms !== undefined && bedrooms !== null && bedrooms !== '';
+  const filters = {
+    propertyType: type || undefined,
+    priceMin: Number(min_price) > 0 ? Number(min_price) : undefined,
+    priceMax: Number(max_price) > 0 ? Number(max_price) : undefined,
+    beds: hasBeds ? parseInt(bedrooms, 10) || 0 : undefined,
+  };
+  const forced = purpose ? { propertyPurpose: String(purpose).toLowerCase() === 'rent' ? 'Rent' : 'Buy' } : {};
 
   const [result] = await Property.aggregate([
-    { $match: match },
+    ...buildCommonPipeline({ search, filters, forced }),
     { $addFields: { priceNum: toNumber('price') } },
-    { $match: { priceNum: priceMatch } },
     { $sort: { priceNum: 1 } },
     { $facet: { items: [{ $limit: limit }], meta: [{ $count: 'total' }] } },
   ]);
@@ -363,6 +360,7 @@ const saveLead = async (args = {}, sessionId) => {
   const name = String(args.name || '').trim();
   const phone = String(args.phone || '').trim();
   if (!name || !phone) return { ok: false, error: 'name and phone are required' };
+  if (!PHONE_RE.test(phone)) return { ok: false, error: 'phone must be a valid UAE mobile or +international number' };
 
   const existing = await ChatbotLead.findOne({ sessionId }).select('_id').lean();
   if (existing) {
@@ -465,12 +463,12 @@ const CONTACT_REQUEST_TEXT = "Sure. What's your name and best phone or WhatsApp 
 const OFFER_RE = /have an agent|arrange a viewing/i;
 const MISSING_NAME_TEXT = "What's your name?";
 const MISSING_PHONE_TEXT = "What's the best phone number to reach you?";
-const EMAIL_TEXT = "What's your email address?";
-const INVALID_EMAIL_TEXT = "That email doesn't look right. What's a valid email address?";
-const CONTACT_PROMPTS = [CONTACT_REQUEST_TEXT, MISSING_NAME_TEXT, MISSING_PHONE_TEXT, EMAIL_TEXT, INVALID_EMAIL_TEXT];
+const PHONE_HELP_TEXT = 'Please enter a valid UAE mobile number, for example 0501234567 or +971501234567.';
+const CONTACT_PROMPTS = [CONTACT_REQUEST_TEXT, MISSING_NAME_TEXT, MISSING_PHONE_TEXT];
+const isContactPrompt = (text) => CONTACT_PROMPTS.includes(text) || text.endsWith(PHONE_HELP_TEXT);
 const EMAIL_FIND_RE = /[^\s@,;:<>()]+@[^\s@,;:<>()]+\.[a-z]{2,}/i;
-const EMAIL_ATTEMPT_RE = /@|\.(com|net|org|ae)\b/i;
-const SKIP_EMAIL_RE = /^\s*(no|nope|nah|skip)\b|no email|don'?t have (one|an email)|rather not|prefer not/i;
+// Anything that looks like a typed number (6+ digit characters), checked only when a phone is expected.
+const PHONE_ATTEMPT_RE = /\+?\d[\d\s().-]{4,}\d/;
 const NEXT_QUESTION = {
   purpose: 'Are you looking to buy or rent?',
   location: 'Which area do you prefer?',
@@ -484,8 +482,8 @@ const ACCEPT_RE = /^\s*(yes|yeah|yep|sure|ok|okay|please|please do|go ahead|of c
 const AGENT_REQUEST_RE = /\b(call me|contact me|talk to an? agent|speak (to|with) an? agent|(arrange|book|schedule) a viewing)\b/i;
 const LOCATION_FIXES = [[/\bDubai Lake Towers\b/gi, 'Jumeirah Lake Towers'], [/\bDubai Village Circle\b/gi, 'Jumeirah Village Circle']];
 const CONTACT_ASK_RE = /\b(agent|viewing|your name|phone|whatsapp|e-?mail|contact (details|number))\b/i;
-// UAE mobile, any "+" international number, or a plain 9–13 digit number (not part of a price like 1,250,000).
-const PHONE_RE = /(?:\+?971[\s-]?|0)5\d(?:[\s-]?\d){7}|\+\d[\d\s-]{7,14}\d|(?<![\d.,])\d{9,13}(?![\d.,])/;
+// Valid phone: UAE mobile (05X / 9715X / +9715X / 009715X, spaces or dashes allowed) or an explicit "+" international number.
+const PHONE_RE = /(?<![\d+])(?:(?:\+971|00971|971|0)[\s-]?5[024568](?:[\s-]?\d){7}|\+(?!971)\d(?:[\s-]?\d){9,14})(?![\d])/;
 const NAME_STOPWORDS = new Set([
   'looking', 'interested', 'just', 'here', 'trying', 'planning', 'searching', 'not', 'from', 'in', 'a', 'an', 'the',
   'ok', 'fine', 'good', 'call', 'me', 'contact', 'reach', 'my', 'number', 'is', 'on', 'at', 'phone', 'mobile', 'whatsapp',
@@ -609,33 +607,49 @@ const looseName = (text) => {
   return NAME_STOPWORDS.has(cleaned.split(' ')[0].toLowerCase()) || ACCEPT_RE.test(cleaned) || DECLINE_RE.test(cleaned) ? '' : cleaned;
 };
 
-// Clearly provided contact details in one message. A bare name is only accepted when we just asked for it.
-const extractContact = (text, { expectingName = false } = {}) => {
+// Why a typed number is not a valid phone, e.g. "12344321" -> too short.
+const phoneProblem = (raw) => {
+  const digits = raw.replace(/\D/g, '').replace(/^00/, '');
+  const local = digits.startsWith('971') ? `0${digits.slice(3)}` : digits;
+  const problem =
+    local.length < 10
+      ? 'That number looks too short.'
+      : local.length > 10
+        ? 'That number looks too long.'
+        : "That doesn't look like a UAE mobile number (they start with 05 or +971 5).";
+  return `${problem} ${PHONE_HELP_TEXT}`;
+};
+
+// Contact details in one message. A bare name is only accepted when we just asked for it; a typed number that
+// isn't a valid phone returns `phoneError` when a phone is expected or the message is just "name, number".
+const extractContact = (text, { expectingName = false, expectingPhone = false } = {}) => {
   const found = {};
   const email = text.match(EMAIL_FIND_RE);
   if (email) found.email = email[0].toLowerCase();
   const rest = text.replace(EMAIL_FIND_RE, ' ');
 
   const phone = rest.match(PHONE_RE);
-  if (phone) found.phone = phone[0].trim();
+  if (phone) found.phone = phone[0].trim().replace(/\s+/g, ' ');
+  const nameThenNumber = /^\s*[a-z][a-z' -]{0,40}[\s,;:–-]+\+?[\d\s().-]+[\s,;.]*$/i.test(rest);
+  const typed = rest.match(PHONE_ATTEMPT_RE);
+  if (!phone && typed && (expectingPhone || nameThenNumber)) found.phoneError = phoneProblem(typed[0]);
 
   const withPhone = detectContact(rest);
   const introduced = rest.match(/\b(?:my name is|my name's|name is|name:)\s+([a-z][a-z'-]+(?:\s+[a-z][a-z'-]+)?)/i);
   const name = withPhone?.name || (introduced && !NAME_STOPWORDS.has(introduced[1].split(/\s+/)[0].toLowerCase()) ? introduced[1] : '');
   if (name) found.name = name;
-  else if (expectingName) {
+  else if (expectingName || (nameThenNumber && found.phoneError)) {
     const loose = looseName(rest);
     if (loose) found.name = loose;
   }
   return found;
 };
 
-// Name, then phone, then email; one question at a time. Null when everything is known.
+// Name, then phone; one question at a time. Email is optional and never asked. Null when the lead is complete.
 const nextContactQuestion = (contact) => {
   if (!contact.name && !contact.phone) return CONTACT_REQUEST_TEXT;
   if (!contact.name) return MISSING_NAME_TEXT;
   if (!contact.phone) return MISSING_PHONE_TEXT;
-  if (!contact.email) return EMAIL_TEXT;
   return null;
 };
 
@@ -769,8 +783,8 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
 };
 
 // Preview cards + View All metadata for the frontend.
-const buildPropertyResult = (q, groups, maxPrice) => {
-  const total = groups.reduce((sum, g) => sum + g.total, 0);
+const buildPropertyResult = async (q, groups, maxPrice) => {
+  let total = groups.reduce((sum, g) => sum + g.total, 0);
   if (!total) return { properties: [], propertyResult: null, uiActions: [] };
   const properties = groups
     .flatMap((g) => g.items)
@@ -778,6 +792,10 @@ const buildPropertyResult = (q, groups, maxPrice) => {
     .slice(0, PREVIEW_LIMIT);
   const locations = groups.map((g) => g.location).filter(Boolean);
   const bedrooms = groups[0].bedrooms;
+  // Several areas: count the union once (a listing can match two area terms), like the listing page does.
+  if (locations.length > 1) {
+    total = (await findProperties({ ...searchArgsFromState({ ...q, location: undefined, bedrooms, budget: maxPrice }), location: locations }, 1)).total;
+  }
   const filters = Object.fromEntries(
     Object.entries({ purpose: q.purpose, locations, propertyType: q.propertyType, bedrooms, maxPrice: Number(maxPrice) || undefined }).filter(
       ([, v]) => v !== undefined && v !== '' && !(Array.isArray(v) && !v.length)
@@ -826,7 +844,8 @@ const recommendAreas = async (message, q) => {
     recommendations.push({
       area: guide.title,
       reason: pickReason(guide, message),
-      total,
+      // The card count sits next to viewAllUrl, which lists one purpose.
+      total: primary.total,
       startingPrices: prices,
       areaGuideUrl: guide.path || `/area-guides/${guide.slug}`,
       viewAllUrl: listingUrl({ purpose: primary.purpose, locations: [].concat(location), propertyType: q.propertyType, bedrooms: q.bedrooms, maxPrice: q.budget }),
@@ -839,9 +858,9 @@ const recommendAreas = async (message, q) => {
 const describeRecommendations = (recommendations) => {
   const lines = recommendations.map((r) => {
     const prices = r.startingPrices
-      .map((p) => `${p.purpose === 'rent' ? 'rentals' : 'sales'} from ${priceText(p.startingPrice, p.purpose, p.rentFrequency)}`)
+      .map((p) => `${p.total} ${p.purpose === 'rent' ? 'for rent' : 'for sale'} from ${priceText(p.startingPrice, p.purpose, p.rentFrequency)}`)
       .join(', ');
-    return `- ${r.area}: ${r.reason}. ${r.total} listing${r.total === 1 ? '' : 's'}, ${prices}.`;
+    return `- ${r.area}: ${r.reason}. ${prices}.`;
   });
   return `These areas fit, and all have current listings:\n${lines.join('\n')}\n\nWould you like to see listings in one of them?`;
 };
@@ -874,7 +893,7 @@ const buildStateContext = (state) => {
   const q = state.qualification;
   const c = state.contact;
   const contactClosed = state.leadSaved || state.leadOfferDeclined;
-  const nextContactField = state.leadSaved ? 'none' : !c.name ? 'name' : !c.phone ? 'phone' : !c.email ? 'email' : 'none';
+  const nextContactField = state.leadSaved ? 'none' : !c.name ? 'name' : !c.phone ? 'phone' : 'none';
   const lines = [
     ...QUALIFICATION_FIELDS.map((field) => `${field}: ${q[field] || 'unknown'}`),
     `propertyType: ${q.propertyType || 'any'}`,
@@ -882,7 +901,7 @@ const buildStateContext = (state) => {
     `leadOfferDeclined: ${state.leadOfferDeclined}`,
     `leadSaved: ${state.leadSaved}`,
   ];
-  const contactLines = [`name: ${c.name || 'missing'}`, `phone: ${c.phone || 'missing'}`, `email: ${c.email || 'missing'}`];
+  const contactLines = [`name: ${c.name || 'missing'}`, `phone: ${c.phone || 'missing'}`, `email: ${c.email || 'not given (optional, never ask)'}`];
 
   const steps = [];
   if (q.purpose && q.purpose !== 'sell' && (q.location || q.budget || q.bedrooms)) {
@@ -982,7 +1001,7 @@ const chat = async ({ sessionId, message, action }) => {
     const pastMessages = session?.messages || [];
     const lastAssistant = [...pastMessages].reverse().find((m) => m.role === 'assistant')?.content || '';
     const offerPending = state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved && OFFER_RE.test(lastAssistant);
-    const awaitingContact = !state.leadSaved && CONTACT_PROMPTS.includes(lastAssistant);
+    const awaitingContact = !state.leadSaved && isContactPrompt(lastAssistant);
     const typedViewing = !isViewingClick && VIEWING_RE.test(message);
     if (!isViewingClick && !state.leadSaved && (/just (browsing|looking)/i.test(message) || (offerPending && DECLINE_RE.test(message)))) {
       state.leadOfferDeclined = true;
@@ -995,32 +1014,38 @@ const chat = async ({ sessionId, message, action }) => {
     // 3. Contact details: merged into the session's contact state; known fields are never cleared
     const contact = state.contact;
     let found = {};
-    if (!state.leadSaved && !isViewingClick) {
-      found = extractContact(message, { expectingName: awaitingContact && !contact.name });
-      Object.assign(contact, found);
+    if (!isViewingClick) {
+      found = extractContact(message, {
+        expectingName: awaitingContact && !contact.name,
+        expectingPhone: awaitingContact && !contact.phone && !extracted.budget,
+      });
+      if (state.leadSaved) {
+        // Once the lead exists, only a volunteered email is still added to it.
+        if (found.email && !contact.email) {
+          contact.email = found.email;
+          await updateLead(sessionId, { email: found.email });
+        }
+        found = {};
+      }
     }
+    const { phoneError, ...details } = found;
+    Object.assign(contact, details);
 
-    // 4. Lead capture: ask only for the next missing field (name, phone, email), then save once
+    // 4. Lead capture: name + one valid phone completes the lead; email is optional and never asked
     let contactReply = '';
-    let movedOn = false;
-    const askedEmail = lastAssistant === EMAIL_TEXT || lastAssistant === INVALID_EMAIL_TEXT;
-    const volunteered = Boolean(found.name && found.phone);
-    const wantsContact = acceptedOffer || volunteered || (awaitingContact && (Object.keys(found).length > 0 || askedEmail));
+    const volunteered = Boolean(details.name && (details.phone || phoneError));
+    const wantsContact = acceptedOffer || volunteered || (awaitingContact && Object.keys(found).length > 0);
     if (!state.leadSaved && !isViewingClick && wantsContact) {
-      const emailAttempt = !found.email && EMAIL_ATTEMPT_RE.test(message);
-      const skippedEmail = askedEmail && !found.email && !emailAttempt;
-      const gaveUpOnEmail = lastAssistant === INVALID_EMAIL_TEXT && emailAttempt;
-      if (contact.name && contact.phone && (contact.email || skippedEmail || gaveUpOnEmail)) {
+      if (phoneError && !contact.phone) {
+        contactReply = phoneError;
+      } else if (nextContactQuestion(contact)) {
+        contactReply = nextContactQuestion(contact);
+      } else {
         confirmation = (await completeLead(state, sessionId)) || '';
         if (confirmation) {
           savedName = contact.name;
           reply = confirmation;
-          movedOn = skippedEmail && !SKIP_EMAIL_RE.test(message);
         }
-      } else if (contact.name && contact.phone && emailAttempt) {
-        contactReply = INVALID_EMAIL_TEXT;
-      } else {
-        contactReply = nextContactQuestion(contact);
       }
     }
 
@@ -1031,7 +1056,7 @@ const chat = async ({ sessionId, message, action }) => {
       reply = await requestViewing(state, sessionId);
     } else if (contactReply) {
       reply = contactReply;
-    } else if (savedName && !criteriaChanged && !movedOn) {
+    } else if (savedName && !criteriaChanged) {
       // confirmation already set above
     } else if (recommendations.length) {
       reply = describeRecommendations(recommendations);
@@ -1054,7 +1079,7 @@ const chat = async ({ sessionId, message, action }) => {
           result = await searchWithFallback(q);
         }
         reply = await describeResults(q, result, maxPrice, { cheaper });
-        ({ properties, propertyResult, uiActions } = buildPropertyResult(q, result.groups, maxPrice));
+        ({ properties, propertyResult, uiActions } = await buildPropertyResult(q, result.groups, maxPrice));
         if (cheaper && result.groups.length) q.budget = maxPrice;
         enforce = true;
         propertyTurn = true;
