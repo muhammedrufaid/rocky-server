@@ -362,7 +362,7 @@ const updateLead = async (sessionId, { email, ...interest } = {}) => {
   if (interest.interest || interest.selectedPropertyRefNo || interest.selectedLocation) {
     const lines = fieldLines(INTEREST_FIELDS, { interest: 'Book a Viewing', ...interest });
     const key = interest.selectedPropertyRefNo ? `Property Ref: ${interest.selectedPropertyRefNo}` : lines.join('\n');
-    if (!lead.message.includes(key)) lead.message = `${lead.message}\n\n${lines.join('\n')}`;
+    if (!lead.message.includes(key)) lead.message = [lead.message, lines.join('\n')].filter(Boolean).join('\n\n');
   }
   if (lead.isModified()) await lead.save();
   return lead;
@@ -384,7 +384,7 @@ const saveLead = async (args = {}, sessionId) => {
   }
 
   const value = (key) => (args[key] === undefined || args[key] === null ? '' : String(args[key]).trim());
-  const message = [`Session ID: ${sessionId}`, ...fieldLines(LEAD_CONTEXT_FIELDS, args), ...fieldLines(INTEREST_FIELDS, args)].join('\n');
+  const message = [...fieldLines(LEAD_CONTEXT_FIELDS, args), ...fieldLines(INTEREST_FIELDS, args)].join('\n');
 
   const lead = await ChatbotLead.create({
     subSource: CHATBOT_SUB_SOURCE,
@@ -870,12 +870,19 @@ const recommendAreas = async (message, q) => {
     }
     if (!total) continue;
     const primary = [...prices].sort((a, b) => b.total - a.total)[0];
+    const categories = Object.fromEntries(
+      CATEGORIES.map((category) => {
+        const p = prices.find((x) => x.purpose === category);
+        return [COUNT_KEYS[category], { count: p ? p.total : 0, startingPrice: p ? p.startingPrice : null }];
+      })
+    );
     recommendations.push({
       area: guide.title,
       reason: pickReason(guide, message),
       // The card count sits next to viewAllUrl, which lists one purpose.
       total: primary.total,
       startingPrices: prices,
+      categories,
       areaGuideUrl: guide.path || `/area-guides/${guide.slug}`,
       viewAllUrl: listingUrl({ purpose: primary.purpose, locations: [].concat(location), propertyType: q.propertyType, bedrooms: q.bedrooms, maxPrice: q.budget }),
     });
