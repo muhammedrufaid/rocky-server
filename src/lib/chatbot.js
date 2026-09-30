@@ -632,7 +632,9 @@ const extractQualification = (text, locations, { fuzzy = true } = {}) => {
   const type = PROPERTY_TYPES.find(([re]) => re.test(t));
   if (type) found.propertyType = type[1];
 
-  if (/\b(unfurnished|not furnished)\b/.test(t)) found.furnishing = 'unfurnished';
+  // 'any' clears the furnishing requirement ("furnished doesn't matter", "any furnishing").
+  if (/\bany furnishing\b|\bfurnish\w* (doesn'?t|does not|won'?t) matter\b|\bfurnished or (not|unfurnished)\b|\beither furnished or\b/.test(t)) found.furnishing = 'any';
+  else if (/\b(unfurnished|not furnished)\b/.test(t)) found.furnishing = 'unfurnished';
   else if (/\b(semi|partly|partially)[- ]?furnished\b/.test(t)) found.furnishing = 'partly furnished';
   else if (/\bfurnished\b/.test(t)) found.furnishing = 'furnished';
 
@@ -831,7 +833,10 @@ const sameAreaAlternatives = async (q) => {
     const family = COMMERCIAL_TYPES.includes(q.propertyType) ? COMMERCIAL_TYPES : RESIDENTIAL_TYPES;
     family.filter((t) => t !== q.propertyType).forEach((propertyType) => options.push({ difference: 'propertyType', changes: { propertyType } }));
   }
-  if (q.furnishing) options.push({ difference: 'furnishing', changes: { furnishing: undefined } });
+  // Other furnishing levels are only reported separately; they never count as matches.
+  if (q.furnishing) {
+    Object.keys(FURNISHED_VALUES).filter((f) => f !== q.furnishing).forEach((furnishing) => options.push({ difference: 'furnishing', changes: { furnishing } }));
+  }
   CATEGORIES.filter((c) => c !== q.purpose).forEach((purpose) => options.push({ difference: 'purpose', changes: { purpose } }));
 
   const results = await Promise.all(options.map(({ changes }) => findProperties(searchArgsFromState({ ...base, ...changes }), 1)));
@@ -914,7 +919,7 @@ const alternativeLine = (q, a) => {
   const changed = {
     bedrooms: () => `same area and type, ${bedsText(a.bedrooms)} instead of ${bedsText(q.bedrooms)}`,
     propertyType: () => `same area, ${String(a.propertyType).toLowerCase()} instead of ${String(q.propertyType).toLowerCase()}`,
-    furnishing: () => 'same area and type, any furnishing',
+    furnishing: () => `same area and type, ${a.furnishing} instead of ${q.furnishing}`,
     purpose: () => `same area, ${a.purpose} instead of ${q.purpose}`,
   }[a.difference]();
   const price = priceText(a.startingPrice, a.purpose, a.priceFrequency);
@@ -942,12 +947,20 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
   }
   if (result.stage === 'alternatives') {
     const { sameArea, nearby } = result.alternatives;
+    const matching = sameArea.filter((a) => a.difference !== 'furnishing');
+    const otherFurnishing = sameArea.filter((a) => a.difference === 'furnishing');
+    const lines = (alts) => alts.map((a) => `• ${alternativeLine(q, a)}`).join('\n');
     const nearbyLines = nearby.map((a) => `• ${a.location}: ${listingCount(a.count)} from ${priceText(a.startingPrice, a.purpose, a.priceFrequency)}`);
+    const nearbyTitle = q.furnishing ? `Nearby ${q.furnishing} options:` : "If you'd rather keep the same requirements, nearby options include:";
+    const question = otherFurnishing.length
+      ? `Would you like to ${matching.length || nearbyLines.length ? `see the ${q.furnishing} options above, or ` : ''}consider ${otherFurnishing.map((a) => a.furnishing).join(' or ')} properties in ${q.location}?`
+      : 'Would you like to see one of these?';
     return [
       `${missed}.`,
-      `In ${q.location}, I found:\n${sameArea.map((a) => `• ${alternativeLine(q, a)}`).join('\n')}`,
-      nearbyLines.length ? `If you'd rather keep the same requirements, nearby options include:\n${nearbyLines.join('\n')}` : '',
-      'Would you like to see one of these?',
+      matching.length ? `In ${q.location}, I found:\n${lines(matching)}` : '',
+      nearbyLines.length ? `${nearbyTitle}\n${nearbyLines.join('\n')}` : '',
+      otherFurnishing.length ? `Not ${q.furnishing}, but available in ${q.location}:\n${lines(otherFurnishing)}` : '',
+      question,
     ].filter(Boolean).join('\n\n');
   }
   if (result.stage === 'nearby') {
@@ -1208,12 +1221,16 @@ const chat = async ({ sessionId, message, action }) => {
       if (!extracted.location && pendingLocation && ACCEPT_RE.test(message)) extracted.location = pendingLocation;
       ({ locationSuggestion = '' } = extracted);
       delete extracted.locationSuggestion;
+      if (!extracted.furnishing && /\beither\b/i.test(message) && /furnish/i.test(lastAssistant)) extracted.furnishing = 'any';
+      // Furnishing is a rental attribute: "furnished apartment" means rent unless a purpose is already known.
+      if (extracted.furnishing && extracted.furnishing !== 'any' && !extracted.purpose && !q.purpose) extracted.purpose = 'rent';
       criteriaChanged = SEARCH_FIELDS.some((f) => extracted[f] && extracted[f] !== q[f]);
       criteriaGiven = !message.includes('?') && SEARCH_FIELDS.some((f) => extracted[f]);
       if (extracted.budget) delete q.budgetFlexible;
       if (extracted.budgetFlexible) delete q.budget;
       Object.assign(q, extracted);
       if (!q.purpose) delete q.purpose;
+      if (q.furnishing === 'any') delete q.furnishing;
     }
 
     // 2. Offer acceptance / decline / viewing requests
@@ -1389,7 +1406,9 @@ const chat = async ({ sessionId, message, action }) => {
           for (const call of msg.tool_calls) {
             let result;
             try {
-              const args = JSON.parse(call.function.arguments || '{}');
+              let args = JSON.parse(call.function.arguments || '{}');
+              // Furnishing only changes when the user says so; model-chosen values are replaced by the stored one.
+              if (call.function.name === 'search_properties') args = { ...args, furnishing: state.qualification.furnishing };
               result = await runTool(call.function.name, args, sessionId);
               if (call.function.name === 'search_properties') {
                 properties = result.slice(0, PREVIEW_LIMIT);

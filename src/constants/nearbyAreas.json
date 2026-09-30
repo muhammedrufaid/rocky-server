@@ -22,5 +22,7 @@
   "Al Karama": ["Bur Dubai", "Al Jafiliya", "Al Jaddaf", "Culture Village"],
   "Jebel Ali": ["Dubai South", "Al Furjan", "Discovery Gardens", "Dubai Investment Park"],
   "Dubai South": ["Jebel Ali", "Dubai Investment Park", "Al Furjan", "Discovery Gardens"],
-  "Dubai Silicon Oasis": ["International City", "Mirdif", "Muhaisnah", "Dubai Land Residence Complex"]
+  "Dubai Silicon Oasis": ["International City", "Mirdif", "Muhaisnah", "Dubai Land Residence Complex"],
+  "Arabian Ranches": ["Motor City", "Dubai Sports City", "DAMAC Hills", "Arjan"],
+  "DAMAC Hills": ["Arabian Ranches", "Motor City", "Dubai Sports City", "Arjan"]
 }
