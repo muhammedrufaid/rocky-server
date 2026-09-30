@@ -1247,10 +1247,10 @@ const buildStateContext = (state) => {
   const contactLines = [`name: ${c.name || 'missing'}`, `phone: ${c.phone || 'missing'}`, `email: ${c.email || 'not given (optional, never ask)'}`];
 
   const steps = [];
-  if (q.purpose && q.purpose !== 'sell' && (q.location || q.budget || q.bedrooms)) {
+  if (q.purpose && q.purpose !== 'sell' && (locationKnown(q) || q.budget || q.bedrooms)) {
     steps.push('If search results are provided, summarize them briefly. Only call search_properties again if the user asked for something different.');
   }
-  const missing = QUALIFICATION_FIELDS.find((field) => (field === 'budget' ? !budgetKnown(q) : !q[field]));
+  const missing = QUALIFICATION_FIELDS.find((field) => !fieldKnown(q, field));
   steps.push(
     missing
       ? `Ask at most ONE question; if it is a qualifying question ask ONLY ${QUESTION_FOR[missing]}. Never ask about known fields.`
@@ -1353,7 +1353,10 @@ const chat = async ({ sessionId, message, action }) => {
     let locationSuggestion = '';
     if (!isViewingClick && !teamReply) {
       // No typo matching on replies to the contact prompt, so a name like "Arjun" is never read as an area.
-      extracted = extractQualification(message, await getKnownLocations(), { fuzzy: !isContactPrompt(lastAssistant) });
+      extracted = extractQualification(message, await getKnownLocations(), {
+        fuzzy: !isContactPrompt(lastAssistant),
+        areaAsked: AREA_QUESTION_RE.test(lastAssistant),
+      });
       if (!extracted.location && pendingLocation && ACCEPT_RE.test(message)) extracted.location = pendingLocation;
       ({ locationSuggestion = '' } = extracted);
       delete extracted.locationSuggestion;
@@ -1364,6 +1367,8 @@ const chat = async ({ sessionId, message, action }) => {
       criteriaGiven = !message.includes('?') && SEARCH_FIELDS.some((f) => extracted[f]);
       if (extracted.budget) delete q.budgetFlexible;
       if (extracted.budgetFlexible) delete q.budget;
+      if (extracted.location) delete q.locationFlexible;
+      if (extracted.locationFlexible) delete q.location;
       Object.assign(q, extracted);
       if (!q.purpose) delete q.purpose;
       if (q.furnishing === 'any') delete q.furnishing;
@@ -1448,14 +1453,14 @@ const chat = async ({ sessionId, message, action }) => {
     } else if (recommendations.length) {
       reply = describeRecommendations(recommendations);
     } else if (
-      criteriaChanged && !q.location && !q.budget && !q.bedrooms && q.purpose && !lastAssistant.endsWith(CATEGORY_QUESTION) &&
+      criteriaChanged && !locationKnown(q) && !q.budget && !q.bedrooms && q.purpose && !lastAssistant.endsWith(CATEGORY_QUESTION) &&
       message.split(/\s+/).length <= 6 && !message.includes('?')
     ) {
       const goal = { rent: 'a rental', buy: 'a property to buy', 'off-plan': 'an off-plan property' }[q.purpose] || 'the right buyer';
       reply = `Great, let's find you ${goal}. ${NEXT_QUESTION.location}`;
     } else {
       // 5. Property search: requested area first, then deterministic fallbacks
-      const hasCriteria = Boolean(q.location || q.budget || q.bedrooms || q.propertyType);
+      const hasCriteria = Boolean(locationKnown(q) || q.budget || q.bedrooms || q.propertyType);
       let broad = false;
       // Purpose is never inferred: an area without a category gets the category question and no search.
       if (!q.purpose && q.location && (criteriaChanged || criteriaGiven)) {
@@ -1573,8 +1578,8 @@ const chat = async ({ sessionId, message, action }) => {
       reply = reply.replace(pattern, fixed);
     });
     reply = stripContactAsks(reply);
-    const missing = ['purpose', 'location', 'budget', 'bedrooms'].find((f) => (f === 'budget' ? !budgetKnown(q) : !q[f]));
-    if (propertyTurn && q.purpose && q.location && budgetKnown(q) && !state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved) {
+    const missing = ['purpose', 'location', 'budget', 'bedrooms'].find((f) => !fieldKnown(q, f));
+    if (propertyTurn && q.purpose && locationKnown(q) && budgetKnown(q) && !state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved) {
       reply = withQuestion(reply, OFFER_TEXT);
       state.leadOfferShown = true;
     } else if ((criteriaChanged || propertyTurn) && missing) {
