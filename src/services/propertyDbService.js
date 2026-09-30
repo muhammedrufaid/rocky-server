@@ -258,9 +258,24 @@ const fetchAllProperties = async (opts = {}) => {
   return paginateProperties({ page, limit, search, filters });
 };
 
+// Website listing categories; each listing belongs to exactly one, so off-plan sales are never counted as buy.
+const CATEGORY_MATCH = {
+  rent: { propertyPurpose: 'Rent' },
+  buy: { propertyPurpose: 'Buy', offPlan: { $ne: 'Yes' } },
+  'off-plan': { propertyPurpose: 'Buy', offPlan: 'Yes' },
+};
+
+const propertyCategory = (property) => {
+  if (property.propertyPurpose === 'Rent') return 'rent';
+  return property.offPlan === 'Yes' ? 'off-plan' : 'buy';
+};
+
+// The buy/rent/off-plan listing pages request a 500-item window when price/bed filters are active.
+const LISTING_WINDOW_LIMIT = 500;
+
 const fetchOffPlanProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {} } = opts;
-  return paginateProperties({ page, limit, search, filters, forced: { offPlan: 'Yes' } });
+  return paginateProperties({ page, limit, search, filters, forced: CATEGORY_MATCH['off-plan'], maxLimit: LISTING_WINDOW_LIMIT });
 };
 
 const fetchReadyProperties = async (opts = {}) => {
@@ -268,17 +283,14 @@ const fetchReadyProperties = async (opts = {}) => {
   return paginateProperties({ page, limit, search, filters, forced: { offPlan: 'No' } });
 };
 
-// The buy/rent listing pages request a 500-item window when price/bed filters are active.
-const LISTING_WINDOW_LIMIT = 500;
-
 const fetchBuyProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {} } = opts;
-  return paginateProperties({ page, limit, search, filters, forced: { propertyPurpose: 'Buy' }, maxLimit: LISTING_WINDOW_LIMIT });
+  return paginateProperties({ page, limit, search, filters, forced: CATEGORY_MATCH.buy, maxLimit: LISTING_WINDOW_LIMIT });
 };
 
 const fetchRentProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {} } = opts;
-  return paginateProperties({ page, limit, search, filters, forced: { propertyPurpose: 'Rent' }, maxLimit: LISTING_WINDOW_LIMIT });
+  return paginateProperties({ page, limit, search, filters, forced: CATEGORY_MATCH.rent, maxLimit: LISTING_WINDOW_LIMIT });
 };
 
 const {
@@ -549,6 +561,8 @@ const fetchSearchByAreaSuggestions = async (opts = {}) => {
 
 module.exports = {
   buildCommonPipeline,
+  CATEGORY_MATCH,
+  propertyCategory,
   LISTING_WINDOW_LIMIT,
   fetchAllProperties,
   fetchOffPlanProperties,

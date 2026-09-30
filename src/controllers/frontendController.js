@@ -162,12 +162,12 @@ const getAllProperties = async (req, res) => {
 };
 
 /**
- * GET /properties/off-plan - Fetches and returns only off-plan properties (offPlan === "Yes")
+ * GET /properties/off-plan - Fetches and returns only off-plan sale properties (offPlan === "Yes", propertyPurpose === "Buy")
  * Query params: page (default: 1), limit (default: 10)
  */
 const getAllOffPlanProperties = async (req, res) => {
     try {
-        const { page, limit } = parsePaginationParams(req);
+        const { page, limit } = parsePaginationParams(req, { maxLimit: propertyService.LISTING_WINDOW_LIMIT });
         const search = (req.query.search || '').toString().trim();
 
         let filters = {};
@@ -209,7 +209,7 @@ const getAllOffPlanProperties = async (req, res) => {
             if (req.query[key] !== undefined) directFilters[key] = req.query[key];
         });
 
-        const mergedFilters = { ...directFilters, ...filters };
+        const mergedFilters = { ...listingPageFilters(req.query), ...directFilters, ...filters };
 
         const { properties, total, pagination } = await propertyService.fetchOffPlanProperties({
             page,
@@ -292,7 +292,7 @@ const getAllReadyProperties = async (req, res) => {
 };
 
 /**
- * GET /properties/buy - Fetches and returns only Buy properties (propertyPurpose === "Buy")
+ * GET /properties/buy - Fetches and returns only Buy properties (propertyPurpose === "Buy"), excluding off-plan
  * Query params: page (default: 1), limit (default: 10)
  */
 const getBuyProperties = async (req, res) => {

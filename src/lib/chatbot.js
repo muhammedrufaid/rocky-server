@@ -12,7 +12,7 @@ const Property = require('../models/Property');
 const ChatbotLead = require('../models/ChatbotLead');
 const { CHATBOT_SUB_SOURCE } = ChatbotLead;
 const { sendToZapier } = require('../services/zapierService');
-const { buildCommonPipeline } = require('../services/propertyDbService');
+const { buildCommonPipeline, CATEGORY_MATCH, propertyCategory } = require('../services/propertyDbService');
 
 const RULES = fs.readFileSync(path.join(__dirname, '../constants/chatbotRules.md'), 'utf8');
 
@@ -276,12 +276,24 @@ const toNumber = (field) => ({
   $convert: { input: { $replaceAll: { input: { $ifNull: [`$${field}`, ''] }, find: ',', replacement: '' } }, to: 'double', onError: null, onNull: null },
 });
 
-// Same detail-page format as the website's property cards: /properties/{rent|buy}/in-dubai/{ref}
+// Website routes per listing category (relative, so links stay on the current origin).
+const CATEGORY_PATHS = { rent: '/properties/rent/in-dubai', buy: '/properties/buy/in-dubai', 'off-plan': '/off-plan-properties/in-dubai' };
+const CATEGORIES = Object.keys(CATEGORY_PATHS);
+// "rent" | "buy" | "off-plan" from a purpose/category value; null when unknown.
+const toCategory = (value) => {
+  const v = String(value || '').toLowerCase().replace(/[\s_-]/g, '');
+  if (v === 'rent') return 'rent';
+  if (v === 'buy') return 'buy';
+  return v === 'offplan' ? 'off-plan' : null;
+};
+
 const propertyUrl = (p) =>
-  p.propertyRefNo ? `/properties/${p.propertyPurpose === 'Rent' ? 'rent' : 'buy'}/in-dubai/${encodeURIComponent(p.propertyRefNo)}` : null;
+  p.propertyRefNo ? `${CATEGORY_PATHS[propertyCategory(p)]}/${encodeURIComponent(p.propertyRefNo)}` : null;
 
 const formatProperty = (p) => ({
   propertyRefNo: p.propertyRefNo,
+  category: propertyCategory(p),
+  path: propertyUrl(p),
   title: p.propertyTitle,
   purpose: p.propertyPurpose,
   type: p.propertyType,
@@ -304,7 +316,7 @@ const findProperties = async ({ purpose, location, type, bedrooms, min_price, ma
     priceMax: Number(max_price) > 0 ? Number(max_price) : undefined,
     beds: hasBeds ? parseInt(bedrooms, 10) || 0 : undefined,
   };
-  const forced = purpose ? { propertyPurpose: String(purpose).toLowerCase() === 'rent' ? 'Rent' : 'Buy' } : {};
+  const forced = CATEGORY_MATCH[toCategory(purpose)] || {};
 
   const [result] = await Property.aggregate([
     ...buildCommonPipeline({ search, filters, forced }),
@@ -408,7 +420,7 @@ const TOOLS = [
       parameters: {
         type: 'object',
         properties: {
-          purpose: { type: 'string', enum: ['rent', 'buy'] },
+          purpose: { type: 'string', enum: ['rent', 'buy', 'off-plan'] },
           location: { type: 'string', description: 'Area, community or tower, e.g. "Dubai Marina"' },
           type: { type: 'string', description: 'Apartment, Villa, Townhouse, Office, etc.' },
           bedrooms: { type: 'integer', description: '0 for studio' },
@@ -511,9 +523,7 @@ const NEARBY_AREAS = require('../constants/nearbyAreas.json');
 const PREVIEW_LIMIT = 3;
 const MAX_NEARBY_AREAS = 2;
 const MAX_RECOMMENDATIONS = 3;
-// Residential rents top out well below the cheapest sale listing, so budget alone can tell rent from buy.
-const RENT_BUDGET_MAX = 400000;
-const BUY_BUDGET_MIN = 500000;
+const CATEGORY_QUESTION = 'Which category would you like to explore?';
 
 let locationCache = null;
 const getKnownLocations = async () => {
@@ -539,7 +549,8 @@ const extractQualification = (text, locations) => {
   const rent = /\b(rent|renting|rental|lease)\b/.test(t);
   const buy = /\b(buy|buying|purchase|purchasing|invest|investing)\b/.test(t);
   const sell = /\b(sell|selling)\b/.test(t);
-  if (rent + buy + sell === 1) found.purpose = rent ? 'rent' : buy ? 'buy' : 'sell';
+  if (/\boff[- ]?plan\b/.test(t)) found.purpose = 'off-plan';
+  else if (rent + buy + sell === 1) found.purpose = rent ? 'rent' : buy ? 'buy' : 'sell';
 
   const location = locations.find(([label]) => new RegExp(`\\b${escapeRegex(label)}\\b`, 'i').test(text));
   if (location) found.location = location[1];
@@ -675,8 +686,35 @@ const describeCriteria = (q, { location = q.location, bedrooms = q.bedrooms, max
   const suffix = noun.startsWith('rental') ? '' : forWhat;
   const where = location ? ` in ${location}` : '';
   const price = Number(maxPrice) ? ` ${priceWord} ${priceText(maxPrice, q.purpose)}` : '';
-  const text = `${[bedsLabel(bedrooms, plural), noun].filter(Boolean).join(' ')}${suffix}${where}${price}`;
+  const offPlan = q.purpose === 'off-plan' ? 'off-plan' : '';
+  const text = `${[bedsLabel(bedrooms, plural), offPlan, noun].filter(Boolean).join(' ')}${suffix}${where}${price}`;
   return plural ? text : `${/^[aeiou]/i.test(text) ? 'an' : 'a'} ${text}`;
+};
+
+// Same pluralization as the chat popup (utils/propertyLabels pluralizeNoun).
+const pluralize = (count, noun) => {
+  if (count === 1) return noun;
+  if (/[^aeiou]y$/.test(noun)) return `${noun.slice(0, -1)}ies`;
+  return /(s|x|z|ch|sh)$/.test(noun) ? `${noun}es` : `${noun}s`;
+};
+
+const COUNT_LINES = [
+  ['rent', (n, noun) => `${n} ${pluralize(n, noun)} available to rent`],
+  ['buy', (n, noun) => `${n} ${pluralize(n, noun)} available to buy`],
+  ['offPlan', (n, noun) => `${n} off-plan ${pluralize(n, noun)}`],
+];
+const COUNT_KEYS = { rent: 'rent', buy: 'buy', 'off-plan': 'offPlan' };
+
+// Rent / buy / off-plan totals for the same filters (each listing is in exactly one category).
+const countByCategory = async (q) => {
+  const totals = await Promise.all(CATEGORIES.map((category) => findProperties(searchArgsFromState({ ...q, purpose: category }), 1)));
+  return Object.fromEntries(CATEGORIES.map((category, i) => [COUNT_KEYS[category], totals[i].total]));
+};
+
+const describeCounts = (counts, propertyType) => {
+  const noun = propertyType ? propertyType.toLowerCase() : 'property';
+  const lines = COUNT_LINES.filter(([key]) => counts[key] > 0).map(([key, line]) => `• ${line(counts[key], noun)}`);
+  return `We have the following ${pluralize(2, noun)} matching your search:\n\n${lines.join('\n')}\n\n${CATEGORY_QUESTION}`;
 };
 
 const areaSlug = (locations) =>
@@ -691,7 +729,7 @@ const listingUrl = ({ purpose, locations = [], propertyType, bedrooms, maxPrice 
   if (Number(maxPrice)) params.set('max', String(Number(maxPrice)));
   if (bedrooms !== undefined && bedrooms !== null && bedrooms !== '') params.set('beds', String(bedrooms));
   const query = params.toString().replace(/\+/g, '%20');
-  return `/properties/${purpose === 'rent' ? 'rent' : 'buy'}/in-dubai${query ? `?${query}` : ''}`;
+  return `${CATEGORY_PATHS[toCategory(purpose)] || CATEGORY_PATHS.buy}${query ? `?${query}` : ''}`;
 };
 
 const bedroomAlternatives = (bedrooms) => {
@@ -776,7 +814,8 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
   if (q.location && !cheaper) {
     const inArea = await findProperties({ purpose: q.purpose, location: q.location }, 1);
     if (inArea.total) {
-      context = ` ${q.location} currently has ${inArea.total} ${q.purpose === 'rent' ? 'rental' : 'sale'} listing${inArea.total === 1 ? '' : 's'}, but none match all of these criteria.`;
+      const kind = { rent: 'rental', buy: 'sale', 'off-plan': 'off-plan' }[q.purpose];
+      context = ` ${q.location} currently has ${inArea.total} ${kind} listing${inArea.total === 1 ? '' : 's'}, but none match all of these criteria.`;
     }
   }
   return `${missed}.${context} Would you like to adjust the budget or try another area?`;
@@ -805,7 +844,7 @@ const buildPropertyResult = async (q, groups, maxPrice) => {
   const showViewAll = total > PREVIEW_LIMIT;
   return {
     properties,
-    propertyResult: { total, showViewAll, location: locations.join(', ') || 'Dubai', purpose: q.purpose, filters, viewAllUrl },
+    propertyResult: { total, showViewAll, location: locations.join(', ') || 'Dubai', purpose: q.purpose, category: q.purpose, filters, viewAllUrl },
     uiActions: showViewAll ? [{ type: 'view_all', label: 'View All Properties', url: viewAllUrl }] : [],
   };
 };
@@ -824,7 +863,7 @@ const recommendAreas = async (message, q) => {
   const titles = [...new Set(hits.filter((h) => h.source === 'area').map((h) => h.title))];
   if (!titles.length) return [];
   const guides = await AreaGuide.find({ isActive: true, title: { $in: titles } }).select('title slug path keyHighlights listingsSearch').lean();
-  const purposes = q.purpose === 'rent' || q.purpose === 'buy' ? [q.purpose] : ['rent', 'buy'];
+  const purposes = CATEGORIES.includes(q.purpose) ? [q.purpose] : CATEGORIES;
 
   const recommendations = [];
   for (const title of titles) {
@@ -858,7 +897,7 @@ const recommendAreas = async (message, q) => {
 const describeRecommendations = (recommendations) => {
   const lines = recommendations.map((r) => {
     const prices = r.startingPrices
-      .map((p) => `${p.total} ${p.purpose === 'rent' ? 'for rent' : 'for sale'} from ${priceText(p.startingPrice, p.purpose, p.rentFrequency)}`)
+      .map((p) => `${p.total} ${{ rent: 'for rent', buy: 'for sale', 'off-plan': 'off-plan' }[p.purpose]} from ${priceText(p.startingPrice, p.purpose, p.rentFrequency)}`)
       .join(', ');
     return `- ${r.area}: ${r.reason}. ${prices}.`;
   });
@@ -975,6 +1014,7 @@ const chat = async ({ sessionId, message, action }) => {
   let reply = FALLBACK_REPLY;
   let properties = [];
   let propertyResult = null;
+  let propertyCounts = null;
   let recommendations = [];
   let uiActions = [];
   let savedName = '';
@@ -992,8 +1032,6 @@ const chat = async ({ sessionId, message, action }) => {
       extracted = extractQualification(message, await getKnownLocations());
       criteriaChanged = SEARCH_FIELDS.some((f) => extracted[f] && extracted[f] !== q[f]);
       Object.assign(q, extracted);
-      const budget = Number(q.budget);
-      if (!q.purpose && budget) q.purpose = budget < RENT_BUDGET_MAX ? 'rent' : budget >= BUY_BUDGET_MIN ? 'buy' : undefined;
       if (!q.purpose) delete q.purpose;
     }
 
@@ -1060,14 +1098,44 @@ const chat = async ({ sessionId, message, action }) => {
       // confirmation already set above
     } else if (recommendations.length) {
       reply = describeRecommendations(recommendations);
-    } else if (criteriaChanged && !q.location && !q.budget && !q.bedrooms && q.purpose && message.split(/\s+/).length <= 6 && !message.includes('?')) {
-      reply = `Great, let's find you ${q.purpose === 'rent' ? 'a rental' : q.purpose === 'buy' ? 'a property to buy' : 'the right buyer'}. ${NEXT_QUESTION.location}`;
+    } else if (
+      criteriaChanged && !q.location && !q.budget && !q.bedrooms && q.purpose && !lastAssistant.endsWith(CATEGORY_QUESTION) &&
+      message.split(/\s+/).length <= 6 && !message.includes('?')
+    ) {
+      const goal = { rent: 'a rental', buy: 'a property to buy', 'off-plan': 'an off-plan property' }[q.purpose] || 'the right buyer';
+      reply = `Great, let's find you ${goal}. ${NEXT_QUESTION.location}`;
     } else {
       // 5. Property search: requested area first, then deterministic fallbacks
-      const canSearch = ['rent', 'buy'].includes(q.purpose) && Boolean(q.location || q.budget || q.bedrooms || q.propertyType);
+      const hasCriteria = Boolean(q.location || q.budget || q.bedrooms || q.propertyType);
+      let broad = false;
+      if (criteriaChanged && !q.purpose && hasCriteria) {
+        // No category chosen yet: real rent / buy / off-plan counts; a single matching category is searched directly.
+        const counts = await countByCategory(q);
+        const matching = CATEGORIES.filter((category) => counts[COUNT_KEYS[category]] > 0);
+        if (matching.length === 1) {
+          q.purpose = matching[0];
+        } else {
+          broad = true;
+          if (matching.length) {
+            propertyCounts = counts;
+            reply = describeCounts(counts, q.propertyType);
+            const filters = { locations: q.location ? [q.location] : undefined, propertyType: q.propertyType, bedrooms: q.bedrooms, maxPrice: Number(q.budget) || undefined };
+            propertyResult = {
+              showViewAll: false,
+              location: q.location || 'Dubai',
+              filters: Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined && v !== '')),
+            };
+          } else {
+            reply = `I couldn't find any ${describeCriteria(q, { plural: true, priceWord: 'within' })}. Would you like to adjust the budget or try another area?`;
+          }
+        }
+      }
+      const canSearch = !broad && CATEGORIES.includes(q.purpose) && hasCriteria;
       const cheaper = canSearch && CHEAPER_RE.test(message);
 
-      if (cheaper || (canSearch && criteriaChanged)) {
+      if (broad) {
+        // reply set above from the category counts
+      } else if (cheaper || (canSearch && criteriaChanged)) {
         let maxPrice = q.budget;
         let result;
         if (cheaper) {
@@ -1177,7 +1245,7 @@ const chat = async ({ sessionId, message, action }) => {
     { upsert: true }
   );
 
-  return { reply, properties, propertyResult, recommendations, uiActions };
+  return { reply, properties, propertyResult, propertyCounts, recommendations, uiActions };
 };
 
 const getHistory = async (sessionId) => {
