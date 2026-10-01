@@ -632,14 +632,19 @@ const PROPERTY_TYPES = [
   [/\boffice (space|unit)s?\b|\boffices\b|\b(rent|buy|lease)\w* an? office\b/, 'Office'],
   [/\b(shop|retail) (space|unit)s?\b|\b(rent|buy|lease)\w* an? shop\b/, 'Shop'],
 ];
+// Area recommendation requests ("best areas for families", "areas near metro", "where should a family live?"). Checked
+// before location matching, so these sentences are never typo-corrected into an area name.
 const RECOMMEND_RE = new RegExp(
   [
-    /\b(best|top|popular|recommend\w*|good|ideal|suitable|affordable|family[- ]friendly)\b[^?]*\b(areas?|communit(y|ies)|neighbou?rhoods?|locations?|places to live)\b/.source,
-    /\b(areas?|communit(y|ies)|neighbou?rhoods?)\b[^?]*\b(best|popular|recommend\w*|ideal)\b/.source,
-    /\bwhere should i (live|stay|buy|rent|invest)\b/.source,
+    /\b(best|top|popular|recommend\w*|good|ideal|suitable|affordable|cheap\w*|quiet|safe|luxury|waterfront|investment|family|family[- ]friendly)\b[^?]*\b(areas?|communit(y|ies)|neighbou?rhoods?|locations?|places to live)\b/.source,
+    /\b(areas?|communit(y|ies)|neighbou?rhoods?)\b[^?]*\b(best|popular|recommend\w*|ideal|good|famil(y|ies)|kids|children|schools?|metro|beach|waterfront|villas?)\b/.source,
+    /\bgood places? to live\b/.source,
+    /\bwhere should (i|we|a family|my family|families) (live|stay|buy|rent|invest)\b/.source,
   ].join('|'),
   'i'
 );
+// "Is Arjan good for families?" / "Tell me about JVC": a question about one known area, not a recommendation request.
+const AREA_INFO_RE = /^\s*(is|are|does|do|how('?s| is| about)|what('?s| is| about)|tell me about)\b/i;
 const VIEWING_RE = /\b(arrange|book|schedule)\b[^.?!]*\bviewing\b/i;
 const VIEWING_CONFIRM_TEXT = "Thanks — I'll pass your viewing request to the team.";
 const NEARBY_AREAS = require('../constants/nearbyAreas.json');
@@ -699,6 +704,10 @@ const NOT_PLACE_WORDS = new Set([
   'apartment', 'apartments', 'flat', 'flats', 'villa', 'villas', 'townhouse', 'townhouses', 'studio', 'bedroom', 'bedrooms',
   'property', 'properties', 'listing', 'listings', 'budget', 'under', 'below', 'furnished', 'unfurnished', 'yes', 'no', 'ok',
   'okay', 'sure', 'thanks', 'please', 'hello', 'hi', 'offplan', 'off', 'plan', 'next', 'month', 'year',
+  // Recommendation wording ("best areas for families") is never read as a misspelled area.
+  'best', 'top', 'good', 'popular', 'affordable', 'cheap', 'cheapest', 'investment', 'area', 'areas', 'community', 'communities',
+  'neighborhood', 'neighborhoods', 'neighbourhood', 'neighbourhoods', 'place', 'places', 'live', 'school', 'schools', 'metro',
+  'waterfront', 'kids', 'children',
 ]);
 
 // Typo-tolerant match against known location names, used only when no exact name matched. Candidates are the words right
@@ -1181,21 +1190,62 @@ const buildPropertyResult = async (q, groups, maxPrice) => {
   };
 };
 
-const pickReason = (guide, message) => {
+// Highlights for the card, skipping any already used in the reply's area summary.
+const pickReason = (guide, message, summary = '') => {
   const stems = (message.toLowerCase().match(/[a-z]{4,}/g) || []).map((w) => w.slice(0, 5));
-  const highlights = (guide.keyHighlights || []).map((h) => h.title);
+  const highlights = (guide.keyHighlights || []).map((h) => h.title).filter((h) => !summary.includes(h));
   const relevant = highlights.filter((h) => stems.some((s) => h.toLowerCase().includes(s)));
   return [...new Set([...relevant, ...highlights])].slice(0, 2).join('; ');
 };
 
+const FAMILY_QUERY_RE = /\b(famil(y|ies)|kids|children|schools?)\b/i;
+const FAMILY_TERMS = [
+  [/\b(famil\w*|child\w*|kids?|schools?|nurser\w*)\b/gi, 2],
+  [/\b(parks?|playgrounds?|green|gated|suburban|trails?|lakes?)\b/gi, 1],
+];
+const wordCount = (s) => String(s).split(/\s+/).filter(Boolean).length;
+// How relevant a sentence is to the request: family terms for family questions, otherwise the request's own words.
+const relevanceScorer = (message) => {
+  if (FAMILY_QUERY_RE.test(message)) return (text) => FAMILY_TERMS.reduce((n, [re, w]) => n + (String(text).match(re) || []).length * w, 0);
+  const stems = (message.toLowerCase().match(/[a-z]{4,}/g) || []).filter((w) => !NOT_PLACE_WORDS.has(w)).map((w) => w.slice(0, 5));
+  return (text) => stems.filter((s) => String(text).toLowerCase().includes(s)).length;
+};
+
+// One short line about an area, taken only from its guide: the most relevant short sentence of `about`, else the most
+// relevant highlights, else the opening sentence or first highlights as a neutral summary.
+const areaSummary = (guide, score) => {
+  const sentences = String(guide.about || '').split(/(?<=[.!?])\s+/).filter((s) => wordCount(s) <= 20);
+  const titles = (guide.keyHighlights || []).map((h) => h.title);
+  const ranked = (items) => items.map((text) => [text, score(text)]).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]).map(([text]) => text);
+  // Up to two highlights, kept within about 20 words.
+  const joinTitles = (list) =>
+    list.slice(0, 2).filter((t, i) => i === 0 || wordCount(`${list[0]} ${t}`) <= 20).map((t) => `${t.replace(/[.\s]+$/, '')}.`).join(' ');
+
+  const [bestSentence] = ranked(sentences);
+  if (bestSentence) return bestSentence;
+  const bestTitles = ranked(titles);
+  if (bestTitles.length) return joinTitles(bestTitles);
+  return sentences[0] || joinTitles(titles);
+};
+
+const AREA_CHOICE_QUESTION = 'Which of these areas would you like to explore?';
+const describeRecommendations = (message, recommendations) =>
+  [
+    `Here are a few ${FAMILY_QUERY_RE.test(message) ? 'family-friendly ' : ''}areas worth exploring:`,
+    recommendations.map((r) => `• ${r.area}${r.summary ? ` — ${r.summary}` : ''}`).join('\n'),
+    AREA_CHOICE_QUESTION,
+  ].join('\n\n');
+
 // Areas from the area-guide knowledge, kept only when they have matching listings right now.
-const recommendAreas = async (message, q) => {
+// `near` is an area named in the request ("best family areas near JVC"): its own guide, if any, is listed first.
+const recommendAreas = async (message, q, near = '') => {
   // Wide k so area guides aren't crowded out by blogs/FAQs; hits stay ordered by relevance.
   const hits = await retrieve(message, 40);
-  const titles = [...new Set(hits.filter((h) => h.source === 'area').map((h) => h.title))];
+  const titles = [...new Set([near, ...hits.filter((h) => h.source === 'area').map((h) => h.title)].filter(Boolean))];
   if (!titles.length) return [];
-  const guides = await AreaGuide.find({ isActive: true, title: { $in: titles } }).select('title slug path keyHighlights listingsSearch').lean();
+  const guides = await AreaGuide.find({ isActive: true, title: { $in: titles } }).select('title slug path about keyHighlights listingsSearch').lean();
   const purposes = CATEGORIES.includes(q.purpose) ? [q.purpose] : CATEGORIES;
+  const score = relevanceScorer(message);
 
   const recommendations = [];
   for (const title of titles) {
@@ -1218,9 +1268,11 @@ const recommendAreas = async (message, q) => {
         return [COUNT_KEYS[category], { count: p ? p.total : 0, startingPrice: p ? p.startingPrice : null }];
       })
     );
+    const summary = areaSummary(guide, score);
     recommendations.push({
       area: guide.title,
-      reason: pickReason(guide, message),
+      summary,
+      reason: pickReason(guide, message, summary),
       // The card count sits next to viewAllUrl, which lists one purpose.
       total: primary.total,
       startingPrices: prices,
@@ -1231,16 +1283,6 @@ const recommendAreas = async (message, q) => {
     if (recommendations.length === MAX_RECOMMENDATIONS) break;
   }
   return recommendations;
-};
-
-const describeRecommendations = (recommendations) => {
-  const lines = recommendations.map((r) => {
-    const prices = r.startingPrices
-      .map((p) => `${p.total} ${{ rent: 'for rent', buy: 'for sale', 'off-plan': 'off-plan' }[p.purpose]} from ${priceText(p.startingPrice, p.purpose, p.rentFrequency)}`)
-      .join(', ');
-    return `- ${r.area}: ${r.reason}. ${prices}.`;
-  });
-  return `These areas fit, and all have current listings:\n${lines.join('\n')}\n\nWould you like to see listings in one of them?`;
 };
 
 const resolveViewingInterest = async (action, q) => {
@@ -1407,15 +1449,25 @@ const chat = async ({ sessionId, message, action }) => {
     // Company team questions are answered from the team records only and never touch search or contact state.
     const teamReply = isViewingClick ? null : await teamAnswer(message);
 
+    // Intent before location matching: a recommendation request is never typo-corrected into an area name.
+    const recommendIntent = !isViewingClick && !teamReply && RECOMMEND_RE.test(message);
+    let areaQuestion = false; // "Is Arjan good for families?": answered from knowledge, no search or category question
+    let nearArea = ''; // "best family areas near JVC": the named area is context for the recommendations, not a search
+
     // 1. Qualification (skipped for button clicks so a property title can't change the criteria)
     let extracted = {};
     let locationSuggestion = '';
     if (!isViewingClick && !teamReply) {
       // No typo matching on replies to the contact prompt, so a name like "Arjun" is never read as an area.
       extracted = extractQualification(message, await getKnownLocations(), {
-        fuzzy: !isContactPrompt(lastAssistant),
+        fuzzy: !isContactPrompt(lastAssistant) && !recommendIntent,
         lastQuestion,
       });
+      areaQuestion = Boolean(extracted.location) && AREA_INFO_RE.test(message);
+      if (recommendIntent && !areaQuestion && extracted.location) {
+        nearArea = extracted.location;
+        delete extracted.location;
+      }
       if (!extracted.location && pendingLocation && ACCEPT_RE.test(message)) extracted.location = pendingLocation;
       ({ locationSuggestion = '' } = extracted);
       delete extracted.locationSuggestion;
@@ -1486,8 +1538,8 @@ const chat = async ({ sessionId, message, action }) => {
       }
     }
 
-    const wantsAreas = !isViewingClick && !teamReply && !extracted.location && RECOMMEND_RE.test(message);
-    if (wantsAreas) recommendations = await recommendAreas(message, q);
+    const wantsAreas = recommendIntent && !areaQuestion;
+    if (wantsAreas) recommendations = await recommendAreas(message, q, nearArea);
 
     // A leadership question opens that topic; it stays open for follow-ups ("yes I need to know") until the user
     // clearly returns to property (search criteria, area recommendations, viewing or contact).
@@ -1520,7 +1572,7 @@ const chat = async ({ sessionId, message, action }) => {
       enforce = true;
       propertyTurn = true;
     } else if (recommendations.length) {
-      reply = describeRecommendations(recommendations);
+      reply = describeRecommendations(message, recommendations);
     } else if (
       criteriaChanged && !locationKnown(q) && !q.budget && !q.bedrooms && q.purpose && !lastAssistant.endsWith(CATEGORY_QUESTION) &&
       message.split(/\s+/).length <= 6 && !message.includes('?')
@@ -1532,7 +1584,15 @@ const chat = async ({ sessionId, message, action }) => {
       const hasCriteria = Boolean(locationKnown(q) || q.budget || q.bedrooms || q.propertyType);
       let broad = false;
       // Purpose is never inferred: an area without a category gets the category question and no search.
-      if (!q.purpose && q.location && (criteriaChanged || criteriaGiven)) {
+      if (areaQuestion) {
+        // Only an area guide may describe an area (the model answers below); without one, real listing counts replace a guess.
+        if (!(await AreaGuide.exists({ isActive: true, title: q.location }))) {
+          broad = true;
+          const counts = await countByCategory({ location: q.location });
+          const available = COUNT_LINES.filter(([key]) => counts[key] > 0).map(([key, line]) => line(counts[key], 'property'));
+          reply = `I don't have detailed area information for ${q.location} yet${available.length ? `, but it currently has ${joinPhrases(available)}` : ''}. ${categoryQuestion(q.location)}`;
+        }
+      } else if (!q.purpose && q.location && (criteriaChanged || criteriaGiven)) {
         broad = true;
         reply = categoryQuestion(q.location);
       } else if (criteriaChanged && !q.purpose && hasCriteria) {
@@ -1556,7 +1616,8 @@ const chat = async ({ sessionId, message, action }) => {
       const cheaper = canSearch && CHEAPER_RE.test(message);
       // The backend, not the model, decides to search: whenever the state is searchable and this message set a criterion
       // or answered our last qualifying question.
-      const searchNow = cheaper || (canSearch && (criteriaChanged || criteriaGiven || answeredOurQuestion(message, lastQuestion, q)));
+      const searchNow =
+        !areaQuestion && (cheaper || (canSearch && (criteriaChanged || criteriaGiven || answeredOurQuestion(message, lastQuestion, q))));
 
       const runSearch = async () => {
         let maxPrice = q.budget;
