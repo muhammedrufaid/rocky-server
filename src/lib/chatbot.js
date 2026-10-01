@@ -1236,12 +1236,66 @@ const describeRecommendations = (message, recommendations) =>
     AREA_CHOICE_QUESTION,
   ].join('\n\n');
 
-// Areas from the area-guide knowledge, kept only when they have matching listings right now.
-// `near` is an area named in the request ("best family areas near JVC"): its own guide, if any, is listed first.
+// Request words that say "recommend some areas" rather than what the areas are for.
+const RECOMMEND_FILLER = new Set([
+  'best', 'good', 'great', 'nice', 'popular', 'ideal', 'suitable', 'recommend', 'recommended', 'recommendation', 'recommendations',
+  'area', 'areas', 'community', 'communities', 'neighborhood', 'neighborhoods', 'neighbourhood', 'neighbourhoods', 'location',
+  'locations', 'place', 'places', 'live', 'living', 'where', 'should', 'which', 'what', 'some', 'most', 'dubai', 'show', 'want',
+]);
+
+// The top-ranked blog is the dedicated source when its own title/keywords cover every topic word of the request
+// ("families" for "best areas for families"). Its sections headed by a known location decide the areas, in blog order.
+const blogAreaPicks = async (message, hits) => {
+  if (hits[0]?.source !== 'blog') return [];
+  const stems = (message.toLowerCase().match(/[a-z]{4,}/g) || []).filter((w) => !RECOMMEND_FILLER.has(w)).map((w) => w.slice(0, 5));
+  if (!stems.length) return [];
+  const blog = await Blog.findById(hits[0].refId).select('title keywords content').lean();
+  const topic = `${blog?.title || ''} ${(blog?.keywords || []).join(' ')}`.toLowerCase();
+  if (!stems.every((s) => topic.includes(s))) return [];
+
+  const locations = await getKnownLocations();
+  const picks = [];
+  let section = null;
+  (blog.content || []).forEach((block) => {
+    if (block.type === 'heading2') {
+      const match = locations.find(([, , re]) => re.test(stripHtml(block.text)));
+      section = match && !picks.some((p) => p.title === match[1]) ? { title: match[1], paragraphs: [] } : null;
+      if (section) picks.push(section);
+    } else if (block.type === 'heading3') {
+      section = null;
+    } else if (section && block.type === 'paragraph') {
+      section.paragraphs.push(stripHtml(block.text));
+    }
+  });
+  return picks.length >= 2 ? picks : [];
+};
+
+// For an area without a guide: the most relevant short sentence of its blog section intro. A long sentence is cut to its
+// leading clause when that clause stands alone; sentences opening with "It"/"They" need context and are skipped.
+const blogSectionSummary = (paragraphs, score) => {
+  const shorten = (s) => {
+    if (wordCount(s) <= 20) return s;
+    const lead = s.split(/,\s/)[0];
+    return wordCount(lead) >= 8 && wordCount(lead) <= 20 ? `${lead}.` : s;
+  };
+  const sentences = paragraphs
+    .flatMap((p) => p.split(/(?<=[.!?])\s+/))
+    .filter((s) => !/^(it|they)\b/i.test(s))
+    .map(shorten)
+    .filter((s) => wordCount(s) <= 20);
+  const [best] = sentences.map((s) => [s, score(s)]).sort((a, b) => b[1] - a[1]);
+  return best ? best[0] : '';
+};
+
+// Areas from a dedicated matching blog when there is one, otherwise from the area-guide knowledge; kept only when they
+// have matching listings right now. `near` is an area named in the request ("best family areas near JVC"): its own
+// guide, if any, is listed first.
 const recommendAreas = async (message, q, near = '') => {
   // Wide k so area guides aren't crowded out by blogs/FAQs; hits stay ordered by relevance.
   const hits = await retrieve(message, 40);
-  const titles = [...new Set([near, ...hits.filter((h) => h.source === 'area').map((h) => h.title)].filter(Boolean))];
+  const blogPicks = await blogAreaPicks(message, hits);
+  const picks = blogPicks.length ? blogPicks : hits.filter((h) => h.source === 'area').map((h) => ({ title: h.title }));
+  const titles = [...new Set([near, ...picks.map((p) => p.title)].filter(Boolean))];
   if (!titles.length) return [];
   const guides = await AreaGuide.find({ isActive: true, title: { $in: titles } }).select('title slug path about keyHighlights listingsSearch').lean();
   const purposes = CATEGORIES.includes(q.purpose) ? [q.purpose] : CATEGORIES;
@@ -1250,8 +1304,9 @@ const recommendAreas = async (message, q, near = '') => {
   const recommendations = [];
   for (const title of titles) {
     const guide = guides.find((g) => g.title === title);
-    if (!guide) continue;
-    const location = guide.listingsSearch?.length ? guide.listingsSearch : guide.title;
+    const blogSection = picks.find((p) => p.title === title)?.paragraphs;
+    if (!guide && !blogSection) continue;
+    const location = guide?.listingsSearch?.length ? guide.listingsSearch : title;
     const prices = [];
     let total = 0;
     for (const purpose of purposes) {
@@ -1268,16 +1323,16 @@ const recommendAreas = async (message, q, near = '') => {
         return [COUNT_KEYS[category], { count: p ? p.total : 0, startingPrice: p ? p.startingPrice : null }];
       })
     );
-    const summary = areaSummary(guide, score);
+    const summary = guide ? areaSummary(guide, score) : blogSectionSummary(blogSection, score);
     recommendations.push({
-      area: guide.title,
+      area: title,
       summary,
-      reason: pickReason(guide, message, summary),
+      reason: guide ? pickReason(guide, message, summary) : '',
       // The card count sits next to viewAllUrl, which lists one purpose.
       total: primary.total,
       startingPrices: prices,
       categories,
-      areaGuideUrl: guide.path || `/area-guides/${guide.slug}`,
+      areaGuideUrl: guide ? guide.path || `/area-guides/${guide.slug}` : undefined,
       viewAllUrl: listingUrl({ purpose: primary.purpose, locations: [].concat(location), propertyType: q.propertyType, bedrooms: q.bedrooms, maxPrice: q.budget }),
     });
     if (recommendations.length === MAX_RECOMMENDATIONS) break;
