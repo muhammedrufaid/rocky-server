@@ -1355,33 +1355,34 @@ const recommendAreas = async (message, q, near = '') => {
     const blogSection = picks.find((p) => p.title === title)?.paragraphs;
     if (!guide && !blogSection) continue;
     const location = guide?.listingsSearch?.length ? guide.listingsSearch : title;
-    const prices = [];
-    let total = 0;
+    // One live query per category: its count, lowest price and listing-page link all use the same filters.
+    // Categories with no listings are left out.
+    const availability = [];
     for (const purpose of purposes) {
       const found = await findProperties({ purpose, location, type: q.propertyType, bedrooms: q.bedrooms, max_price: Number(q.budget) || undefined }, 1);
       if (!found.total) continue;
-      total += found.total;
-      prices.push({ purpose, startingPrice: found.startingPrice, rentFrequency: found.items[0].rentFrequency, total: found.total });
+      availability.push({
+        purpose,
+        total: found.total,
+        startingPrice: found.startingPrice,
+        rentFrequency: found.items[0].rentFrequency,
+        url: listingUrl({ purpose, locations: [].concat(location), propertyType: q.propertyType, bedrooms: q.bedrooms, maxPrice: q.budget }),
+      });
     }
-    if (!total) continue;
-    const primary = [...prices].sort((a, b) => b.total - a.total)[0];
-    const categories = Object.fromEntries(
-      CATEGORIES.map((category) => {
-        const p = prices.find((x) => x.purpose === category);
-        return [COUNT_KEYS[category], { count: p ? p.total : 0, startingPrice: p ? p.startingPrice : null }];
-      })
-    );
+    if (!availability.length) continue;
+    // Rent, buy and off-plan are all Property listings and each listing is in exactly one category, so they add up.
+    const total = availability.reduce((sum, a) => sum + a.total, 0);
+    const largest = [...availability].sort((a, b) => b.total - a.total)[0];
     const summary = guide ? areaSummary(guide, score) : blogSectionSummary(blogSection, score);
     recommendations.push({
       area: title,
       summary,
       reason: guide ? pickReason(guide, message, summary) : '',
-      // The card count sits next to viewAllUrl, which lists one purpose.
-      total: primary.total,
-      startingPrices: prices,
-      categories,
+      total,
+      startingPrices: availability,
       areaGuideUrl: guide ? guide.path || `/area-guides/${guide.slug}` : undefined,
-      viewAllUrl: listingUrl({ purpose: primary.purpose, locations: [].concat(location), propertyType: q.propertyType, bedrooms: q.bedrooms, maxPrice: q.budget }),
+      // The card has a single "View properties" link: the category with the most listings.
+      viewAllUrl: largest.url,
     });
     if (recommendations.length === MAX_RECOMMENDATIONS) break;
   }
