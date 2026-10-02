@@ -24,5 +24,6 @@
   "Dubai South": ["Jebel Ali", "Dubai Investment Park", "Al Furjan", "Discovery Gardens"],
   "Dubai Silicon Oasis": ["International City", "Mirdif", "Muhaisnah", "Dubai Land Residence Complex"],
   "Arabian Ranches": ["Motor City", "Dubai Sports City", "DAMAC Hills", "Arjan"],
-  "DAMAC Hills": ["Arabian Ranches", "Motor City", "Dubai Sports City", "Arjan"]
+  "DAMAC Hills": ["Arabian Ranches", "Motor City", "Dubai Sports City", "Arjan"],
+  "Dubai Hills Estate": ["Al Barsha", "Arjan", "Motor City", "Jumeirah Village Circle", "Arabian Ranches"]
 }

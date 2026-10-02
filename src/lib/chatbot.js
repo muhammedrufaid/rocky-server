@@ -446,6 +446,7 @@ const formatProperty = (p) => ({
   priceAED: p.priceNum,
   rentFrequency: p.rentFrequency || null,
   location: [p.towerName, p.subLocality, p.locality].filter(Boolean).join(', '),
+  community: String(p.locality || '').replace(/\s*\([^)]*\)/, '').trim(),
   image: p.images?.[0] || null,
   url: propertyUrl(p),
 });
@@ -460,20 +461,23 @@ const FURNISHED_VALUES = { furnished: 'Yes', unfurnished: 'No', 'partly furnishe
 
 const findProperties = async ({ purpose, location, type, bedrooms, furnishing, min_price, max_price } = {}, limit = 6) => {
   const search = (Array.isArray(location) ? location : [location]).filter(Boolean).map((l) => areaSlug([l]).replace(/-/g, ' '));
-  const hasBeds = bedrooms !== undefined && bedrooms !== null && bedrooms !== '';
+  // One bedroom count uses the listing-page filter; a set ("1,2,3") matches any of its counts.
+  const beds = bedroomList(bedrooms);
   const filters = {
     propertyType: type || undefined,
     priceMin: Number(min_price) > 0 ? Number(min_price) : undefined,
     priceMax: Number(max_price) > 0 ? Number(max_price) : undefined,
-    beds: hasBeds ? parseInt(bedrooms, 10) || 0 : undefined,
+    beds: beds.length === 1 ? parseInt(beds[0], 10) || 0 : undefined,
     furnished: FURNISHED_VALUES[furnishing],
   };
   const forced = CATEGORY_MATCH[toCategory(purpose)] || {};
+  const bedroomSetMatch = beds.length > 1 ? [{ $match: { $expr: { $in: [toNumber('bedrooms'), beds.map(Number)] } } }] : [];
 
   let result;
   try {
     [result] = await Property.aggregate([
       ...buildCommonPipeline({ search, filters, forced }),
+      ...bedroomSetMatch,
       { $addFields: { priceNum: toNumber('price') } },
       // A listing without a real price is never shown or counted.
       { $match: { priceNum: { $gt: 0 } } },
@@ -711,9 +715,12 @@ const categoryQuestion = (location) => `Would you like to buy, rent, or explore 
 // `options` are the search fields the user can choose to change.
 const CHOICE_QUESTIONS = {
   budgetOrArea: { text: 'Would you like to adjust the budget or try another area?', options: ['budget', 'location'] },
-  areaTypeOrBedrooms: { text: 'Would you like to try a nearby area or adjust the property type or bedrooms?', options: ['location', 'propertyType', 'bedrooms'] },
+  areaTypeOrBedrooms: { text: 'Would you like to try another area or adjust the property type or bedrooms?', options: ['location', 'propertyType', 'bedrooms'] },
+  areaOrType: { text: 'Would you like to try another area or a different property type?', options: ['location', 'propertyType'] },
   alternatives: { text: ALTERNATIVES_QUESTION },
 };
+// Asked after listing other areas with matching listings; the reply is read as an area.
+const AREA_PICK_QUESTION = 'Which of these areas would you like to try?';
 const choiceQuestionIn = (reply) => Object.keys(CHOICE_QUESTIONS).find((key) => reply.endsWith(CHOICE_QUESTIONS[key].text)) || '';
 // How the user names each option, and the single question asked once they pick it.
 const REFINE_OPTIONS = {
@@ -785,6 +792,16 @@ const NOT_PLACE_WORDS = new Set([
   'best', 'top', 'good', 'popular', 'affordable', 'cheap', 'cheapest', 'investment', 'area', 'areas', 'community', 'communities',
   'neighborhood', 'neighborhoods', 'neighbourhood', 'neighbourhoods', 'place', 'places', 'live', 'school', 'schools', 'metro',
   'waterfront', 'kids', 'children',
+  // Refinement wording ("another area", "any nearest areas", "something else") is never read as an area either.
+  'any', 'anything', 'another', 'other', 'others', 'different', 'else', 'somewhere', 'something', 'nearby', 'nearest', 'near',
+  'close', 'closest', 'surrounding', 'option', 'options', 'not', 'maybe', 'none', 'same', 'more', 'try', 'change', 'adjust',
+]);
+// Common reply words: a reply made only of these is never taken as a place name.
+const REPLY_WORDS = new Set([
+  'i', 'im', 'it', 'its', 'is', 'are', 'the', 'you', 'we', 'what', 'which', 'where', 'how', 'why', 'can', 'could', 'would',
+  'show', 'tell', 'find', 'search', 'want', 'need', 'like', 'prefer', 'suggest', 'recommend', 'choose', 'pick', 'whatever',
+  'idk', 'dont', 'know', 'mind', 'matter', 'fine', 'great', 'cool', 'just', 'only', 'also', 'thank', 'there', 'here', 'one',
+  'cheaper', 'bigger', 'smaller', 'price', 'help', 'unsure', 'hmm',
 ]);
 
 // Typo-tolerant match against known location names, used only when no exact name matched. Candidates are the words right
@@ -837,9 +854,66 @@ const questionFields = (question) => Object.keys(FIELD_QUESTION_RES).filter((f) 
 const lastQuestionOf = (text) => String(text || '').split(/(?<=[.!?])\s+/).filter((s) => s.includes('?')).pop() || '';
 
 const isAllDubaiPhrase = (text, { areaAsked = false } = {}) =>
-  !text.includes('?') && (ANY_LOCATION_RE.test(text) || (areaAsked && NO_PREFERENCE_RE.test(text)));
+  !text.includes('?') && !NEARBY_RE.test(text) && (ANY_LOCATION_RE.test(text) || (areaAsked && NO_PREFERENCE_RE.test(text)));
+
+// "any nearest areas", "somewhere nearby", "nearby options": the user wants areas close to the current one.
+const NEARBY_RE =
+  /\b(near(by|est)|closest|close ?by|surrounding)\b[^?]*\b(areas?|locations?|communit(y|ies)|places?|options?|neighbou?rhoods?)\b|\b(somewhere|anything|anywhere|something|options?|areas?|communit(y|ies))\s+(near ?by|close ?by)\b|^\s*(any(thing)?\s+)?(near ?by|close ?by)\s*[?.!]?\s*$/i;
+
+// An area we have no listings for ("Al Quoz") is unknown to the location list. When it is the answer to our area
+// question, it still replaces the old area, so the search reports zero results there instead of keeping the old area.
+// Each comma-separated part is checked ("Al Quoz, any budget"); a part counts only if it is 1-4 plain words and none
+// is a search or reply word.
+const placeFromAreaAnswer = (text) => {
+  if (text.includes('?')) return '';
+  const parts = text.toLowerCase().split(/,|\band\b/).map((p) => p.trim()).filter(Boolean);
+  const place = parts.find((part) => {
+    const words = part.split(/\s+/);
+    return (
+      /^[a-z][a-z' -]*$/.test(part) && words.length <= 4 && part.length >= 3 &&
+      words.every((w) => !NOT_PLACE_WORDS.has(w) && !REPLY_WORDS.has(w.replace(/'/g, '')))
+    );
+  });
+  return place ? place.replace(/\b[a-z]/g, (c) => c.toUpperCase()) : '';
+};
 
 const bedroomValue = (word) => (word === 'studio' ? '0' : String(WORD_NUMBERS[word] || word));
+
+// "any bedroom(s)", "bedrooms don't matter", "no bedroom preference": clears the bedroom filter.
+const ANY_BEDROOMS_RE =
+  /\bany (number of )?(bed(room)?s?|bhk)\b|\bbed(room)?s? (doesn'?t|does not|don'?t|do not|won'?t) matter\b|\bno bed(room)?s? preference\b|\b(flexible|open) (on|with|about) bed(room)?s?\b/i;
+// Several bedroom counts: "1, 2 or 3 bedrooms", "studio or 1 bed", "2-3 bedrooms", or a bare "1 or 2 or 3".
+const BED_LIST_RE =
+  /\b(\d|one|two|three|four|five|six|studio)((?:\s*(?:,|\bor\b|\band\b|\/|\bto\b|-)\s*(?:\d|one|two|three|four|five|six|studio)\b)+)(?:\s*-?\s*([a-z]+))?/;
+// Words that make a number list something other than bedrooms ("1 or 2 million", "2 or 3 weeks").
+const NOT_BEDROOM_UNIT_RE = /^(k|m|mn|million|aed|dirhams?|days?|weeks?|months?|years?|am|pm|baths?|bathrooms?|kids|children|people|persons?)$/;
+// Returns the counts as "1,2,3", or '' when the message has no bedroom set.
+const bedroomSet = (text) => {
+  const match = text.match(BED_LIST_RE);
+  if (!match) return '';
+  const [whole, , joins, next = ''] = match;
+  const bedWord = /^(bed|beds|bedroom|bedrooms|br|bhk)$/.test(next);
+  const isRange = /\bto\b|-/.test(joins);
+  // Without the word "bedroom", only a plain "or"/comma list counts.
+  if (!bedWord && (NOT_BEDROOM_UNIT_RE.test(next) || isRange || /\band\b/.test(joins))) return '';
+  const values = whole.match(/\b(\d|one|two|three|four|five|six|studio)\b/g).map(bedroomValue).map(Number);
+  const counts = isRange && values.length === 2 ? Array.from({ length: values[1] - values[0] + 1 }, (_, i) => values[0] + i) : values;
+  return [...new Set(counts)].sort((a, b) => a - b).join(',');
+};
+// "1M to 2M", "between 800k and 1.2 million", "800,000 - 1,200,000": a budget range (min and max).
+const BUDGET_RANGE_RE = /(\d[\d,]*(?:\.\d+)?)\s*(k|m|mn|million)?\s*(?:-|to|and)\s*(?:aed\s*)?(\d[\d,]*(?:\.\d+)?)\s*(k|m|mn|million)?\b/;
+const budgetRange = (text) => {
+  const match = text.match(BUDGET_RANGE_RE);
+  if (!match) return null;
+  const [, lowDigits, lowUnit, highDigits, highUnit] = match;
+  const min = toAmount(lowDigits, lowUnit || highUnit);
+  const max = toAmount(highDigits, highUnit || lowUnit);
+  // Small unitless numbers ("2 to 3 bedrooms") are not prices.
+  if (!(lowUnit || highUnit) && min < 1000) return null;
+  return max > min ? { budgetMin: String(min), budget: String(max) } : null;
+};
+// A bare "any" / "doesn't matter" answers whichever field we just asked about.
+const isNoPreference = (t) => !t.includes('?') && (NO_PREFERENCE_RE.test(t) || /^\s*any(thing)?\s*[.!]?\s*$/.test(t));
 
 // Bare replies to the question just asked: "800,000" to a budget question, "1" to a bedrooms question, and
 // "it's fine" to "... or is 1 bedroom fine?".
@@ -859,8 +933,11 @@ const answerToQuestion = (text, question, noPhone) => {
   return found;
 };
 
+// Search updates in one message. A field the message doesn't mention is left out (no change); a value sets it; a
+// <field>Flexible flag ("any budget", "any bedroom", "anywhere") clears that filter. See applySearchUpdates.
 const extractQualification = (text, locations, { fuzzy = true, lastQuestion = '' } = {}) => {
-  const areaAsked = questionFields(lastQuestion).includes('location');
+  const asked = questionFields(lastQuestion);
+  const areaAsked = asked.includes('location');
   const t = text.toLowerCase();
   const found = {};
   const rent = /\b(rent|rents|renting|rentals?|lease|leasing|per (year|month|annum)|yearly|monthly)\b/.test(t);
@@ -878,6 +955,10 @@ const extractQualification = (text, locations, { fuzzy = true, lastQuestion = ''
     if (close?.confident) found.location = close.canonical;
     else if (close) found.locationSuggestion = close.canonical;
   }
+  if (areaAsked && !found.location && !found.locationFlexible && !found.locationSuggestion && !NEARBY_RE.test(text)) {
+    const place = placeFromAreaAnswer(text);
+    if (place) found.location = place;
+  }
 
   const type = PROPERTY_TYPES.find(([re]) => re.test(t));
   if (type) found.propertyType = type[1];
@@ -888,23 +969,37 @@ const extractQualification = (text, locations, { fuzzy = true, lastQuestion = ''
   else if (/\b(semi|partly|partially)[- ]?furnished\b/.test(t)) found.furnishing = 'partly furnished';
   else if (/\bfurnished\b/.test(t)) found.furnishing = 'furnished';
 
-  if (/\bstudio\b/.test(t)) found.bedrooms = '0';
-  const beds = t.match(/\b(\d|one|two|three|four|five|six)\s*-?\s*(bed|beds|bedroom|bedrooms|br|bhk)\b/);
-  if (beds) found.bedrooms = String(WORD_NUMBERS[beds[1]] || beds[1]);
-
   const noPhone = t.replace(new RegExp(PHONE_RE.source, 'g'), ' ');
+  const noPreference = isNoPreference(t);
+
+  // Bedrooms: "any bedroom" clears the filter, a set ("1 or 2 or 3") or a single count replaces the old value.
+  const bedrooms = bedroomSet(noPhone);
+  if (ANY_BEDROOMS_RE.test(t) || (asked.includes('bedrooms') && noPreference)) found.bedroomsFlexible = true;
+  else if (bedrooms) found.bedrooms = bedrooms;
+  else {
+    if (/\bstudio\b/.test(t)) found.bedrooms = '0';
+    const beds = t.match(/\b(\d|one|two|three|four|five|six)\s*-?\s*(bed|beds|bedroom|bedrooms|br|bhk)\b/);
+    if (beds) found.bedrooms = String(WORD_NUMBERS[beds[1]] || beds[1]);
+  }
+
+  // Budget: a range sets min and max, an amount sets the max, "any budget" clears both.
+  const range = budgetRange(noPhone);
   const short = noPhone.match(/(\d+(?:\.\d+)?)\s*(k|m|mn|million)\b/);
   const long =
     noPhone.match(/(?:aed|budget|under|below|around|up to|upto|max)\s*(?:of\s*|is\s*)?(?:aed\s*)?(\d[\d,]{3,})/) ||
     noPhone.match(/(\d[\d,]{4,})\s*(?:aed|dirhams?|per year|a year|yearly)/);
-  if (short) found.budget = String(Math.round(parseFloat(short[1]) * (short[2] === 'k' ? 1000 : 1000000)));
+  if (range) Object.assign(found, range);
+  else if (short) found.budget = String(Math.round(parseFloat(short[1]) * (short[2] === 'k' ? 1000 : 1000000)));
   else if (long) found.budget = long[1].replace(/,/g, '');
-  else if (/\b(any|no|flexible|open) (budget|price)\b|\bbudget (doesn'?t|does not|won'?t|isn'?t|is not) (matter|an issue|a problem)\b|\bno (price |budget )?limit\b|\bshow me anything\b/.test(t)) {
+  else if (
+    /\b(any|no|flexible|open) (budget|price)\b|\bbudget (doesn'?t|does not|won'?t|isn'?t|is not) (matter|an issue|a problem)\b|\bno (price |budget )?limit\b|\bshow me anything\b/.test(t) ||
+    (asked.includes('budget') && noPreference)
+  ) {
     found.budgetFlexible = true;
   }
   const answered = answerToQuestion(text, lastQuestion, noPhone);
   if (!found.budget && !found.budgetFlexible && answered.budget) found.budget = answered.budget;
-  if (found.bedrooms === undefined && answered.bedrooms !== undefined) found.bedrooms = answered.bedrooms;
+  if (found.bedrooms === undefined && !found.bedroomsFlexible && answered.bedrooms !== undefined) found.bedrooms = answered.bedrooms;
 
   const timeline = t.match(/\b(asap|immediately|right away|this (week|month|year)|next (week|month|year)|(in|within) \d+ (days?|weeks?|months?))\b/);
   if (timeline) found.timeline = timeline[0];
@@ -937,8 +1032,29 @@ const rememberSearchCriteria = (qualification, args = {}) => {
 };
 
 const searchArgsFromState = (q) => {
-  const args = { purpose: q.purpose, location: q.location, type: q.propertyType, bedrooms: q.bedrooms, furnishing: q.furnishing, max_price: Number(q.budget) || undefined };
+  const args = {
+    purpose: q.purpose,
+    location: q.location,
+    type: q.propertyType,
+    bedrooms: q.bedrooms,
+    furnishing: q.furnishing,
+    min_price: Number(q.budgetMin) || undefined,
+    max_price: Number(q.budget) || undefined,
+  };
   return Object.fromEntries(Object.entries(args).filter(([, v]) => v !== undefined && v !== ''));
+};
+
+// The model's search_properties args corrected by the session state: filters the state knows always win and cleared
+// ones ("any budget", "any bedroom", "anywhere") are removed, so a search never uses stale values from the history.
+const toolSearchArgs = (args, q) => {
+  const merged = { ...args, ...searchArgsFromState(q), furnishing: q.furnishing };
+  if (q.bedroomsFlexible) delete merged.bedrooms;
+  if (q.budgetFlexible) {
+    delete merged.min_price;
+    delete merged.max_price;
+  }
+  if (q.locationFlexible) delete merged.location;
+  return merged;
 };
 
 // Name from a reply to the contact prompt, e.g. "Ahmed" or "it's Ahmed Khan".
@@ -996,10 +1112,15 @@ const priceText = (amount, purpose, frequency) => {
 };
 
 const BED_WORDS = ['studio', 'one', 'two', 'three', 'four', 'five', 'six'];
+// Bedrooms are stored as one count ("2") or a set ("1,2,3"); '0' is a studio.
+const bedroomList = (bedrooms) => String(bedrooms ?? '').split(',').map((b) => b.trim()).filter(Boolean);
+// "2-bedroom", "studio", or for a set "1, 2 or 3-bedroom".
 const bedsLabel = (bedrooms, words = false) => {
-  if (bedrooms === undefined || bedrooms === null || bedrooms === '') return '';
-  if (String(bedrooms) === '0') return 'studio';
-  return `${words ? BED_WORDS[bedrooms] || bedrooms : bedrooms}-bedroom`;
+  const list = bedroomList(bedrooms);
+  if (!list.length) return '';
+  if (list.length === 1 && list[0] === '0') return 'studio';
+  const label = (b) => (b === '0' ? 'studio' : words && list.length === 1 ? BED_WORDS[b] || b : b);
+  return `${joinOr(list.map(label))}-bedroom`;
 };
 
 // "a 4-bedroom apartment for rent in Dubai Marina within AED 250,000/year" or, with a count, "two-bedroom apartments for rent ..."
@@ -1010,9 +1131,18 @@ const describeCriteria = (q, { location = q.location, bedrooms = q.bedrooms, max
   const suffix = noun.startsWith('rental') ? '' : forWhat;
   // location '' means the caller wants no area wording at all.
   const where = location ? ` in ${location}` : q.locationFlexible && location !== '' ? ' across Dubai' : '';
-  const price = Number(maxPrice) ? ` ${priceWord} ${priceText(maxPrice, q.purpose)}` : '';
+  const range = Number(q.budgetMin) && String(maxPrice) === String(q.budget);
+  const price = !Number(maxPrice)
+    ? ''
+    : range
+      ? ` between ${priceText(q.budgetMin, q.purpose)} and ${priceText(maxPrice, q.purpose)}`
+      : ` ${priceWord} ${priceText(maxPrice, q.purpose)}`;
   const offPlan = q.purpose === 'off-plan' ? 'off-plan' : '';
-  const text = `${[bedsLabel(bedrooms, plural), q.furnishing, offPlan, noun].filter(Boolean).join(' ')}${suffix}${where}${price}`;
+  // One count goes before the noun ("2-bedroom villas"); a set after it ("villas for sale with 1, 2 or 3 bedrooms").
+  const beds = bedroomList(bedrooms);
+  const bedsBefore = beds.length > 1 ? '' : bedsLabel(bedrooms, plural);
+  const bedsAfter = beds.length > 1 ? ` with ${joinOr(beds.map((b) => (b === '0' ? 'studio' : b)))} bedroom${beds[beds.length - 1] === '1' ? '' : 's'}` : '';
+  const text = `${[bedsBefore, q.furnishing, offPlan, noun].filter(Boolean).join(' ')}${suffix}${bedsAfter}${where}${price}`;
   return plural ? text : `${/^[aeiou]/i.test(text) ? 'an' : 'a'} ${text}`;
 };
 
@@ -1046,13 +1176,15 @@ const areaSlug = (locations) =>
   locations.map((l) => l.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')).filter(Boolean).join('-or-');
 
 // Same query format as the website's PropertySearchBar: ?search=<area-slug>&type=&max=&beds=
-const listingUrl = ({ purpose, locations = [], propertyType, bedrooms, maxPrice }) => {
+// The listing pages filter one bedroom count only, so a bedroom set is left out of the URL.
+const listingUrl = ({ purpose, locations = [], propertyType, bedrooms, minPrice, maxPrice }) => {
   const params = new URLSearchParams();
   const slug = areaSlug(locations);
   if (slug) params.set('search', slug);
   if (propertyType) params.set('type', propertyType);
+  if (Number(minPrice)) params.set('min', String(Number(minPrice)));
   if (Number(maxPrice)) params.set('max', String(Number(maxPrice)));
-  if (bedrooms !== undefined && bedrooms !== null && bedrooms !== '') params.set('beds', String(bedrooms));
+  if (bedroomList(bedrooms).length === 1) params.set('beds', String(bedrooms));
   const query = params.toString().replace(/\+/g, '%20');
   return `${CATEGORY_PATHS[toCategory(purpose)] || CATEGORY_PATHS.buy}${query ? `?${query}` : ''}`;
 };
@@ -1072,6 +1204,81 @@ const searchAreas = async (args, areas) => {
     if (groups.length === MAX_NEARBY_AREAS) break;
   }
   return groups;
+};
+
+// One area's live listings per category: count, lowest price and listing-page link, all from the same filters
+// (furnishing is left out because the listing pages can't filter it). Categories without listings are left out;
+// null when the area has none.
+const areaAvailability = async (q, location, purposes) => {
+  const availability = [];
+  for (const purpose of purposes) {
+    const args = { purpose, location, type: q.propertyType, bedrooms: q.bedrooms, min_price: Number(q.budgetMin) || undefined, max_price: Number(q.budget) || undefined };
+    const found = await findProperties(args, 1);
+    if (!found.total) continue;
+    availability.push({
+      purpose,
+      total: found.total,
+      startingPrice: found.startingPrice,
+      rentFrequency: found.items[0].rentFrequency,
+      url: listingUrl({ purpose, locations: [].concat(location), propertyType: q.propertyType, bedrooms: q.bedrooms, minPrice: q.budgetMin, maxPrice: q.budget }),
+    });
+  }
+  if (!availability.length) return null;
+  // Rent, buy and off-plan are all Property listings and each listing is in exactly one category, so they add up.
+  const total = availability.reduce((sum, a) => sum + a.total, 0);
+  // The card has a single "View properties" link: the category with the most listings.
+  const largest = [...availability].sort((a, b) => b.total - a.total)[0];
+  return { total, startingPrices: availability, viewAllUrl: largest.url };
+};
+
+// Other areas with the same request right now, as cards with live counts, prices and links. When the current area has
+// nearby-area data (constants/nearbyAreas.json) and `useNearbyData` is set, only those areas are checked. Otherwise any
+// community with matching listings, most listings first; those are never described as "nearby".
+const alternativeAreaCards = async (q, { useNearbyData = true } = {}) => {
+  const purposes = CATEGORIES.includes(q.purpose) ? [q.purpose] : CATEGORIES;
+  let candidates = useNearbyData ? NEARBY_AREAS[q.location] : null;
+  if (!candidates) {
+    const counts = new Map();
+    for (const purpose of purposes) {
+      const { items } = await findProperties(searchArgsFromState({ ...q, purpose, location: undefined, furnishing: undefined }), AREA_SCAN_LIMIT);
+      items.forEach((p) => counts.set(p.community, (counts.get(p.community) || 0) + 1));
+    }
+    counts.delete(q.location);
+    counts.delete('');
+    candidates = [...counts.keys()].sort((a, b) => counts.get(b) - counts.get(a));
+  }
+  const cards = [];
+  for (const area of candidates) {
+    const availability = await areaAvailability(q, area, purposes);
+    if (availability) cards.push({ area, summary: '', reason: '', ...availability });
+    if (cards.length === MAX_RECOMMENDATIONS) break;
+  }
+  return cards;
+};
+// "• Dubai South: 1 listing for sale from AED 1,200,000"
+const areaCardLine = (card) =>
+  `• ${card.area}: ${card.startingPrices.map((a) => `${listingCount(a.total)} ${CATEGORY_WORDS[a.purpose]} from ${priceText(a.startingPrice, a.purpose, a.rentFrequency)}`).join(', ')}`;
+
+// The next step after zero results, offering only changes that can widen the search.
+const refineQuestion = (q, { budgetMatters = false } = {}) => {
+  if (budgetMatters) return CHOICE_QUESTIONS.budgetOrArea.text;
+  return bedroomList(q.bedrooms).length ? CHOICE_QUESTIONS.areaTypeOrBedrooms.text : CHOICE_QUESTIONS.areaOrType.text;
+};
+
+// "Any nearest areas?": the current request in other areas, checked against live listings. Areas are only called
+// nearby when the current area has nearby-area data.
+const describeNearby = async (q) => {
+  const cards = await alternativeAreaCards(q);
+  const wanted = describeCriteria({ ...q, furnishing: undefined }, { plural: true, location: '' });
+  const hasNearbyData = Boolean(NEARBY_AREAS[q.location]);
+  if (!cards.length) {
+    const none = hasNearbyData
+      ? `I couldn't find any ${wanted} in the areas near ${q.location} right now.`
+      : `${noNearbyNote(q.location)} I also couldn't find any ${wanted} in other communities right now.`;
+    return { reply: `${none}\n\n${refineQuestion(q, { budgetMatters: Boolean(Number(q.budget)) })}`, cards };
+  }
+  const title = hasNearbyData ? `Areas near ${q.location} with ${wanted}:` : `${noNearbyNote(q.location)} These communities have ${wanted} right now:`;
+  return { reply: [title, cards.map(areaCardLine).join('\n'), AREA_PICK_QUESTION].join('\n\n'), cards };
 };
 
 const RESIDENTIAL_TYPES = ['Apartment', 'Villa', 'Townhouse'];
@@ -1214,7 +1421,7 @@ const nearbyMatches = async (q, purposes) => {
 const nearbyLine = (q, g) =>
   `• ${g.location}: ${describeCriteria({ ...q, purpose: g.purpose }, { plural: true, location: '', maxPrice: null })}, ${listingCount(g.total)} from ${priceText(g.startingPrice, g.purpose, g.items[0]?.rentFrequency)}`;
 const noNearbyNote = (location) =>
-  NEARBY_AREAS[location] ? '' : `I don't have nearby-community data for ${location} yet, so I can't suggest the closest alternatives.`;
+  NEARBY_AREAS[location] ? '' : `I don't have verified nearby-area data for ${location}, so I can't say which areas are closest.`;
 
 // "Do you have villas in Dubai Hills?" with no buy/rent/off-plan chosen yet: the exact request is checked in every
 // category first. Matches are confirmed with one real listing per category; without any, the real inventory of the same
@@ -1240,7 +1447,8 @@ const describeAvailability = async (q) => {
 };
 
 // Deterministic, precise wording: says exactly which criteria were not met and what changed.
-const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) => {
+// `otherAreas`: cards for other communities with the same request (zero-result replies only).
+const describeResults = async (q, result, maxPrice, { cheaper = false, otherAreas = [] } = {}) => {
   const wanted = describeCriteria(q, { maxPrice, priceWord: 'within' });
   const missed = `I couldn't find ${cheaper ? wanted.replace(/^an? /, 'a cheaper ') : wanted}`;
   const [first] = result.groups;
@@ -1283,13 +1491,20 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
   }
   // Nothing close matched: what the area really has in this category, so the user can see what is available there.
   const inArea = q.location && !cheaper ? await areaInventoryLines(q.location, [q.purpose]) : [];
-  // Nothing matches at any price, so there is no higher price to offer.
+  // With an area, nothing matches at any price (a higher price would have been offered), so the budget is not the problem.
   const noneAtAnyPrice = Number(maxPrice) && q.location && !cheaper;
+  const others = otherAreas.length
+    ? [noNearbyNote(q.location), `Other communities with ${describeCriteria({ ...q, furnishing: undefined }, { plural: true, location: '' })} right now:`]
+        .filter(Boolean)
+        .join(' ')
+    : '';
   return [
-    noneAtAnyPrice ? `I couldn't find any ${describeCriteria(q, { plural: true, maxPrice: null })} right now.` : `${missed}.`,
+    cheaper
+      ? `${missed}.`
+      : `I couldn't find any ${describeCriteria(q, { plural: true, maxPrice: noneAtAnyPrice ? null : maxPrice, priceWord: 'within' })}${q.budgetFlexible ? ' at any price' : ''} right now.`,
     inArea.length ? `Other ${describeCriteria({ purpose: q.purpose }, { plural: true, location: '', maxPrice: null })} in ${q.location}:\n${inArea.join('\n')}` : '',
-    q.location && !cheaper ? noNearbyNote(q.location) : '',
-    noneAtAnyPrice ? CHOICE_QUESTIONS.areaTypeOrBedrooms.text : CHOICE_QUESTIONS.budgetOrArea.text,
+    others ? `${others}\n${otherAreas.map(areaCardLine).join('\n')}` : q.location && !cheaper ? noNearbyNote(q.location) : '',
+    otherAreas.length ? AREA_PICK_QUESTION : refineQuestion(q, { budgetMatters: Boolean(Number(maxPrice)) && !noneAtAnyPrice }),
   ].filter(Boolean).join('\n\n');
 };
 
@@ -1312,9 +1527,9 @@ const buildPropertyResult = async (q, groups, maxPrice) => {
       ([, v]) => v !== undefined && v !== '' && !(Array.isArray(v) && !v.length)
     )
   );
-  const viewAllUrl = listingUrl({ purpose: q.purpose, locations, propertyType: q.propertyType, bedrooms, maxPrice });
-  // The listing pages have no furnishing filter, so their count would not match a furnishing-filtered total.
-  const showViewAll = total > PREVIEW_LIMIT && !q.furnishing;
+  const viewAllUrl = listingUrl({ purpose: q.purpose, locations, propertyType: q.propertyType, bedrooms, minPrice: q.budgetMin, maxPrice });
+  // The listing pages have no furnishing or bedroom-set filter, so their count would not match those totals.
+  const showViewAll = total > PREVIEW_LIMIT && !q.furnishing && bedroomList(bedrooms).length <= 1;
   return {
     properties,
     propertyResult: { total, showViewAll, location: locations.join(', ') || 'Dubai', purpose: q.purpose, category: q.purpose, filters, viewAllUrl },
@@ -1439,34 +1654,15 @@ const recommendAreas = async (message, q, near = '') => {
     const blogSection = picks.find((p) => p.title === title)?.paragraphs;
     if (!guide && !blogSection) continue;
     const location = guide?.listingsSearch?.length ? guide.listingsSearch : title;
-    // One live query per category: its count, lowest price and listing-page link all use the same filters.
-    // Categories with no listings are left out.
-    const availability = [];
-    for (const purpose of purposes) {
-      const found = await findProperties({ purpose, location, type: q.propertyType, bedrooms: q.bedrooms, max_price: Number(q.budget) || undefined }, 1);
-      if (!found.total) continue;
-      availability.push({
-        purpose,
-        total: found.total,
-        startingPrice: found.startingPrice,
-        rentFrequency: found.items[0].rentFrequency,
-        url: listingUrl({ purpose, locations: [].concat(location), propertyType: q.propertyType, bedrooms: q.bedrooms, maxPrice: q.budget }),
-      });
-    }
-    if (!availability.length) continue;
-    // Rent, buy and off-plan are all Property listings and each listing is in exactly one category, so they add up.
-    const total = availability.reduce((sum, a) => sum + a.total, 0);
-    const largest = [...availability].sort((a, b) => b.total - a.total)[0];
+    const availability = await areaAvailability(q, location, purposes);
+    if (!availability) continue;
     const summary = guide ? areaSummary(guide, score) : blogSectionSummary(blogSection, score);
     recommendations.push({
       area: title,
       summary,
       reason: guide ? pickReason(guide, message, summary) : '',
-      total,
-      startingPrices: availability,
+      ...availability,
       areaGuideUrl: guide ? guide.path || `/area-guides/${guide.slug}` : undefined,
-      // The card has a single "View properties" link: the category with the most listings.
-      viewAllUrl: largest.url,
     });
     if (recommendations.length === MAX_RECOMMENDATIONS) break;
   }
@@ -1506,6 +1702,7 @@ const buildStateContext = (state) => {
     ...QUALIFICATION_FIELDS.map((field) => {
       if (field === 'budget' && !q.budget && q.budgetFlexible) return 'budget: any (no limit, never ask)';
       if (field === 'location' && !q.location && q.locationFlexible) return 'location: anywhere in Dubai (no preference, never ask)';
+      if (field === 'bedrooms' && !q.bedrooms && q.bedroomsFlexible) return 'bedrooms: any (no preference, never ask)';
       return `${field}: ${q[field] || 'unknown'}`;
     }),
     `propertyType: ${q.propertyType || 'any'}`,
@@ -1553,11 +1750,29 @@ const stripContactAsks = (reply) => dropQuestions(reply, (s) => CONTACT_ASK_RE.t
 // Deterministic duplicate guard: a model question about any field already in the session state is removed.
 const dropKnownQuestions = (reply, q) => dropQuestions(reply, (s) => questionFields(s).some((f) => fieldKnown(q, f)));
 
-const SEARCH_FIELDS = ['purpose', 'location', 'locationFlexible', 'propertyType', 'budget', 'budgetFlexible', 'bedrooms', 'furnishing'];
-// "any budget" / "any area" count as answers, so those questions are never asked again.
+const SEARCH_FIELDS = [
+  'purpose', 'location', 'locationFlexible', 'propertyType', 'budget', 'budgetMin', 'budgetFlexible', 'bedrooms', 'bedroomsFlexible', 'furnishing',
+];
+// "any budget" / "any area" / "any bedroom" count as answers, so those questions are never asked again.
 const budgetKnown = (q) => Boolean(q.budget || q.budgetFlexible);
 const locationKnown = (q) => Boolean(q.location || q.locationFlexible);
-const fieldKnown = (q, field) => (field === 'budget' ? budgetKnown(q) : field === 'location' ? locationKnown(q) : Boolean(q[field]));
+const fieldKnown = (q, field) => Boolean(q[field] || q[`${field}Flexible`]);
+
+// The one place where a message's search updates change the session state:
+//   field not in `updates`      -> kept as it is
+//   new value ("Al Quoz", "1,2,3") -> replaces the old value
+//   <field>Flexible ("any budget")  -> clears that filter (and counts as answered)
+const applySearchUpdates = (q, updates) => {
+  ['location', 'budget', 'bedrooms'].forEach((field) => {
+    if (updates[`${field}Flexible`]) delete q[field];
+    if (updates[field] !== undefined) delete q[`${field}Flexible`];
+  });
+  // A new budget or "any budget" replaces the whole range, including an old minimum.
+  if (updates.budget || updates.budgetFlexible) delete q.budgetMin;
+  Object.assign(q, updates);
+  if (!q.purpose) delete q.purpose;
+  if (q.furnishing === 'any') delete q.furnishing;
+};
 // The user answered our qualifying question with something that sets no value ("it's fine", "ok"): search with what is known.
 const answeredOurQuestion = (message, lastQuestion, q) =>
   !message.includes('?') && message.trim().split(/\s+/).length <= 6 && questionFields(lastQuestion).some((f) => !fieldKnown(q, f));
@@ -1677,13 +1892,7 @@ const chat = async ({ sessionId, message, action }) => {
       criteriaChanged = SEARCH_FIELDS.some((f) => extracted[f] && extracted[f] !== q[f]);
       criteriaGiven = !message.includes('?') && SEARCH_FIELDS.some((f) => extracted[f]);
       if (detectNewPropertySearch(extracted, q)) resetSearchFilters(q);
-      if (extracted.budget) delete q.budgetFlexible;
-      if (extracted.budgetFlexible) delete q.budget;
-      if (extracted.location) delete q.locationFlexible;
-      if (extracted.locationFlexible) delete q.location;
-      Object.assign(q, extracted);
-      if (!q.purpose) delete q.purpose;
-      if (q.furnishing === 'any') delete q.furnishing;
+      applySearchUpdates(q, extracted);
     }
 
     // 2. Offer acceptance / decline / viewing requests
@@ -1781,8 +1990,14 @@ const chat = async ({ sessionId, message, action }) => {
       // 5. Property search: requested area first, then deterministic fallbacks
       const hasCriteria = Boolean(locationKnown(q) || q.budget || q.bedrooms || q.propertyType);
       let broad = false;
-      // Purpose is never inferred: an area without a category gets the category question and no search.
-      if (areaQuestion) {
+      // "Any nearest areas?" names no new area: the current request is checked in other areas.
+      const nearbyRequest = !extracted.location && NEARBY_RE.test(message);
+      if (nearbyRequest) {
+        broad = true;
+        if (q.location) ({ reply, cards: recommendations } = await describeNearby(q));
+        else reply = 'Which area would you like me to look near?';
+      } else if (areaQuestion) {
+        // Purpose is never inferred: an area without a category gets the category question and no search.
         // Only an area guide may describe an area (the model answers below); without one, real listing counts replace a guess.
         if (!(await AreaGuide.exists({ isActive: true, title: q.location }))) {
           broad = true;
@@ -1809,7 +2024,7 @@ const chat = async ({ sessionId, message, action }) => {
             filters: Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined && v !== '')),
           };
         } else {
-          reply = `I couldn't find any ${describeCriteria(q, { plural: true, priceWord: 'within' })}. ${CHOICE_QUESTIONS.budgetOrArea.text}`;
+          reply = `I couldn't find any ${describeCriteria(q, { plural: true, priceWord: 'within' })}. ${refineQuestion(q, { budgetMatters: Boolean(Number(q.budget)) })}`;
         }
       }
       // "Yes" to "Would you like to see one of these?": the offered alternatives are looked up again. A single one is
@@ -1819,7 +2034,7 @@ const chat = async ({ sessionId, message, action }) => {
       // A short reply to a refine question ("adjust the budget or try another area?") moves to the next step; the
       // unchanged search is not run again. A new criterion ("JVC") or a new question ("What is RERA?") skips this.
       const refineOptions = CHOICE_QUESTIONS[pendingQuestion]?.options;
-      if (refineOptions && !criteriaChanged && !message.includes('?') && !CHEAPER_RE.test(message)) {
+      if (refineOptions && !nearbyRequest && !criteriaChanged && !message.includes('?') && !CHEAPER_RE.test(message)) {
         const chosen = refineOptions.filter((field) => REFINE_OPTIONS[field].re.test(message));
         if (chosen.length === 1) {
           broad = true;
@@ -1868,7 +2083,10 @@ const chat = async ({ sessionId, message, action }) => {
         } else {
           result = await searchWithFallback(q);
         }
-        reply = await describeResults(q, result, maxPrice, { cheaper });
+        // Zero results in an area: other communities with the same request, verified against live listings.
+        const otherAreas = result.stage === 'none' && q.location && !cheaper ? await alternativeAreaCards(q, { useNearbyData: false }) : [];
+        recommendations = otherAreas;
+        reply = await describeResults(q, result, maxPrice, { cheaper, otherAreas });
         alternatives = result.alternatives || null;
         if (result.stage === 'overBudget') {
           // Only the price is offered; listings are shown after the user agrees.
@@ -1938,7 +2156,7 @@ const chat = async ({ sessionId, message, action }) => {
             try {
               let args = JSON.parse(call.function.arguments || '{}');
               // Furnishing only changes when the user says so; model-chosen values are replaced by the stored one.
-              if (call.function.name === 'search_properties') args = { ...args, furnishing: state.qualification.furnishing };
+              if (call.function.name === 'search_properties') args = toolSearchArgs(args, state.qualification);
               result = await runTool(call.function.name, args, sessionId);
               if (call.function.name === 'search_properties') {
                 properties = result.slice(0, PREVIEW_LIMIT);

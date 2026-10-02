@@ -38,8 +38,12 @@ const chatSessionSchema = new mongoose.Schema(
       locationFlexible: { type: Boolean },
       propertyType: { type: String, trim: true },
       budget: { type: String, trim: true },
+      // Lower end of a budget range ("1M to 2M"); `budget` is the upper end.
+      budgetMin: { type: String, trim: true },
       budgetFlexible: { type: Boolean },
+      // One count ("2") or a set ("1,2,3"); '0' is a studio.
       bedrooms: { type: String, trim: true },
+      bedroomsFlexible: { type: Boolean },
       furnishing: { type: String, trim: true },
       timeline: { type: String, trim: true },
     },
