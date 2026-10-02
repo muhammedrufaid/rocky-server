@@ -387,6 +387,35 @@ const MAX_TOOL_ROUNDS = 3;
 const HISTORY_LIMIT = 10;
 const FALLBACK_REPLY =
   "Sorry, I'm having trouble right now. Please try again in a moment, or contact our team and an agent will be happy to help.";
+const SEARCH_FAILED_TEXT = "I'm unable to load live property listings right now. Please try again shortly.";
+const UNVERIFIED_REPLY =
+  "I can only share listings and prices from our live inventory. Tell me the area and whether you'd like to buy or rent, and I'll search it for you.";
+
+// Model replies must not contain placeholder listings or AED amounts that appear nowhere in what the model was given
+// (knowledge, conversation, session state, tool results). Returns why a reply was rejected, or ''.
+const PLACEHOLDER_RE = /\b(sample|example|dummy|placeholder|mock)\s+(listing|property|properties|unit|home)s?\b|\bAED\s*X|\bX{1,3}(,X{3})+\b|\b(listing|property)\s+[A-C]\b/i;
+const UNIT_MULTIPLIER = { k: 1e3, thousand: 1e3, m: 1e6, mn: 1e6, million: 1e6, bn: 1e9, billion: 1e9 };
+const toAmount = (digits, unit) => Math.round(parseFloat(digits.replace(/,/g, '')) * (UNIT_MULTIPLIER[String(unit || '').toLowerCase()] || 1));
+const AMOUNT = String.raw`(\d[\d,]*(?:\.\d+)?)\s*(k|thousand|mn|m|million|bn|billion)?\b`;
+const amountsIn = (text) => [...String(text).matchAll(new RegExp(AMOUNT, 'gi'))].map(([, d, u]) => toAmount(d, u));
+// "AED 2–5M" gives 2,000,000 and 5,000,000: a unit after the range also applies to its first number.
+const aedAmountsIn = (text) =>
+  [...String(text).matchAll(new RegExp(String.raw`AED\s*${AMOUNT}(?:\s*(?:-|–|to)\s*(?:AED\s*)?${AMOUNT})?`, 'gi'))].flatMap(([, d1, u1, d2, u2]) =>
+    d2 ? [toAmount(d1, u1 || u2), toAmount(d2, u2)] : [toAmount(d1, u1)]
+  );
+const unverifiedReplyReason = (reply, sources) => {
+  if (PLACEHOLDER_RE.test(reply)) return 'placeholder listing text';
+  const known = sources.flatMap(amountsIn);
+  // 1% tolerance so a rounded real price ("AED 3.05 million" for 3,051,725) still counts as sourced.
+  const invented = aedAmountsIn(reply).filter((n) => !known.some((k) => Math.abs(k - n) <= n * 0.01));
+  return invented.length ? `AED amounts not in any source: ${invented.join(', ')}` : '';
+};
+
+const logSearch = (sessionId, args, { stage, total, properties }) =>
+  console.info(
+    '[Chatbot] search',
+    JSON.stringify({ sessionId, args, stage, total, fallback: stage !== 'exact', ids: properties.map((p) => p.propertyRefNo) })
+  );
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const toNumber = (field) => ({
   $convert: { input: { $replaceAll: { input: { $ifNull: [`$${field}`, ''] }, find: ',', replacement: '' } }, to: 'double', onError: null, onNull: null },
@@ -421,6 +450,10 @@ const formatProperty = (p) => ({
   url: propertyUrl(p),
 });
 
+// A card needs these real values; a listing missing any of them is dropped, never filled with defaults.
+const REQUIRED_LISTING_FIELDS = ['propertyRefNo', 'title', 'category', 'location', 'path'];
+const isCompleteListing = (p) => p.priceAED > 0 && REQUIRED_LISTING_FIELDS.every((f) => String(p[f] ?? '').trim());
+
 // Same query as the buy/rent listing pages, so a View All URL built from these args shows the same total.
 // Area terms are what the listing page derives from the URL slug ("dubai-marina" -> "dubai marina").
 const FURNISHED_VALUES = { furnished: 'Yes', unfurnished: 'No', 'partly furnished': 'Partly' };
@@ -437,15 +470,29 @@ const findProperties = async ({ purpose, location, type, bedrooms, furnishing, m
   };
   const forced = CATEGORY_MATCH[toCategory(purpose)] || {};
 
-  const [result] = await Property.aggregate([
-    ...buildCommonPipeline({ search, filters, forced }),
-    { $addFields: { priceNum: toNumber('price') } },
-    { $sort: { priceNum: 1 } },
-    { $facet: { items: [{ $limit: limit }], meta: [{ $count: 'total' }] } },
-  ]);
+  let result;
+  try {
+    [result] = await Property.aggregate([
+      ...buildCommonPipeline({ search, filters, forced }),
+      { $addFields: { priceNum: toNumber('price') } },
+      // A listing without a real price is never shown or counted.
+      { $match: { priceNum: { $gt: 0 } } },
+      { $sort: { priceNum: 1 } },
+      { $facet: { items: [{ $limit: limit }], meta: [{ $count: 'total' }] } },
+    ]);
+  } catch (err) {
+    err.propertySearchFailed = true;
+    throw err;
+  }
 
-  const items = result.items.map(formatProperty);
-  return { items, total: result.meta[0]?.total || 0, startingPrice: items[0]?.priceAED || null };
+  const formatted = result.items.map(formatProperty);
+  const items = formatted.filter(isCompleteListing);
+  const skipped = formatted.length - items.length;
+  if (skipped) {
+    console.warn('[Chatbot] Skipped malformed listings:', formatted.filter((p) => !isCompleteListing(p)).map((p) => p.propertyRefNo || '(no ref)'));
+  }
+  const total = items.length ? (result.meta[0]?.total || 0) - skipped : 0;
+  return { items, total, startingPrice: items[0]?.priceAED || null };
 };
 
 const searchProperties = async (args = {}) => (await findProperties(args)).items;
@@ -652,6 +699,7 @@ const PREVIEW_LIMIT = 3;
 const MAX_NEARBY_AREAS = 2;
 const MAX_RECOMMENDATIONS = 3;
 const CATEGORY_QUESTION = 'Which category would you like to explore?';
+const ALTERNATIVES_QUESTION = 'Would you like to see one of these?';
 const categoryQuestion = (location) => `Would you like to buy, rent, or explore off-plan properties in ${location}?`;
 
 let locationCache = null;
@@ -1131,7 +1179,7 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
     const nearbyTitle = q.furnishing ? `Nearby ${q.furnishing} options:` : "If you'd rather keep the same requirements, nearby options include:";
     const question = otherFurnishing.length
       ? `Would you like to ${matching.length || nearbyLines.length ? `see the ${q.furnishing} options above, or ` : ''}consider ${otherFurnishing.map((a) => a.furnishing).join(' or ')} properties in ${q.location}?`
-      : 'Would you like to see one of these?';
+      : ALTERNATIVES_QUESTION;
     return [
       `${missed}.`,
       matching.length ? `In ${q.location}, I found:\n${lines(matching)}` : '',
@@ -1385,7 +1433,9 @@ const buildStateContext = (state) => {
 
   const steps = [];
   if (q.purpose && q.purpose !== 'sell' && (locationKnown(q) || q.budget || q.bedrooms)) {
-    steps.push('If search results are provided, summarize them briefly. Only call search_properties again if the user asked for something different.');
+    steps.push(
+      'If search_properties results are provided in this turn, summarize only those. Without them, do not mention any listing or price. Only call search_properties again if the user asked for something different.'
+    );
   }
   const missing = QUALIFICATION_FIELDS.find((field) => !fieldKnown(q, field));
   steps.push(
@@ -1667,12 +1717,31 @@ const chat = async ({ sessionId, message, action }) => {
           reply = `I couldn't find any ${describeCriteria(q, { plural: true, priceWord: 'within' })}. Would you like to adjust the budget or try another area?`;
         }
       }
+      // "Yes" to "Would you like to see one of these?": the offered alternatives are looked up again. A single one is
+      // switched to and searched; with several, the user picks one.
+      const acceptedAlternatives =
+        !criteriaChanged && lastAssistant.endsWith(ALTERNATIVES_QUESTION) && (ACCEPT_RE.test(message) || SHOW_ME_RE.test(message));
+      if (acceptedAlternatives) {
+        const { alternatives: offered } = await searchWithFallback(q);
+        const options = [...(offered?.sameArea || []).filter((a) => a.difference !== 'furnishing'), ...(offered?.nearby || [])];
+        if (options.length === 1) {
+          const [a] = options;
+          q[a.difference] = String(a[a.difference]);
+        } else if (options.length > 1) {
+          const labels = options.map((a) =>
+            describeCriteria({ ...q, purpose: a.purpose, propertyType: a.propertyType || q.propertyType, bedrooms: a.bedrooms ?? q.bedrooms }, { plural: true, location: a.location, maxPrice: null })
+          );
+          broad = true;
+          reply = `Which would you like to see: ${labels.slice(0, -1).join(', ')} or ${labels[labels.length - 1]}?`;
+        }
+      }
       const canSearch = !broad && CATEGORIES.includes(q.purpose) && hasCriteria;
       const cheaper = canSearch && CHEAPER_RE.test(message);
       // The backend, not the model, decides to search: whenever the state is searchable and this message set a criterion
       // or answered our last qualifying question.
       const searchNow =
-        !areaQuestion && (cheaper || (canSearch && (criteriaChanged || criteriaGiven || answeredOurQuestion(message, lastQuestion, q))));
+        !areaQuestion &&
+        (cheaper || (canSearch && (criteriaChanged || criteriaGiven || acceptedAlternatives || answeredOurQuestion(message, lastQuestion, q))));
 
       const runSearch = async () => {
         let maxPrice = q.budget;
@@ -1697,6 +1766,8 @@ const chat = async ({ sessionId, message, action }) => {
           enforce = result.groups.length > 0;
           propertyTurn = enforce;
         }
+        const total = result.groups.reduce((sum, g) => sum + g.total, 0);
+        logSearch(sessionId, searchArgsFromState({ ...q, budget: maxPrice }), { stage: result.stage, total, properties });
       };
 
       if (broad) {
@@ -1716,12 +1787,15 @@ const chat = async ({ sessionId, message, action }) => {
           const leaders = (await teamRoster()).map((m) => `- ${m.name} — ${m.designation} (${m.department})`).join('\n');
           knowledge = `${COMPANY} leadership:\n${leaders}\n\n${knowledge}`;
         }
+        const stateContext = onLeadership ? LEADERSHIP_TOPIC_CONTEXT : buildStateContext(state);
         const messages = [
           { role: 'system', content: `${RULES}\n\nKNOWLEDGE (use only this for company/area facts):\n${knowledge}` },
           ...history,
           { role: 'user', content: message },
-          { role: 'system', content: onLeadership ? LEADERSHIP_TOPIC_CONTEXT : buildStateContext(state) },
+          { role: 'system', content: stateContext },
         ];
+        // Everything the model was given; prices in its reply must come from here.
+        const sources = [knowledge, message, stateContext, ...history.map((m) => m.content)];
 
         for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
           let toolChoice = onLeadership || round === MAX_TOOL_ROUNDS ? 'none' : 'auto';
@@ -1755,13 +1829,31 @@ const chat = async ({ sessionId, message, action }) => {
               if (call.function.name === 'search_properties') {
                 properties = result.slice(0, PREVIEW_LIMIT);
                 rememberSearchCriteria(state.qualification, args);
+                logSearch(sessionId, args, { stage: result.length ? 'exact' : 'none', total: result.length, properties });
               }
               if (call.function.name === 'save_lead' && result.ok) state.leadSaved = true;
             } catch (toolError) {
+              // A failed listing search is reported to the user as such, never left for the model to fill in.
+              if (toolError.propertySearchFailed) throw toolError;
               console.error(`[Chatbot] Tool ${call.function.name} failed:`, toolError.message);
               result = { error: 'Tool failed' };
             }
+            sources.push(JSON.stringify(result));
             messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result) });
+          }
+        }
+        // A reply with placeholder listings or prices that appear in no source is never sent: the real search runs
+        // instead, or an honest reply when there is nothing to search yet.
+        const unverified = modelReply ? unverifiedReplyReason(reply, sources) : '';
+        if (unverified) {
+          console.warn('[Chatbot] Model reply rejected:', JSON.stringify({ sessionId, reason: unverified }));
+          modelReply = false;
+          properties = [];
+          if (!onLeadership && canSearch) {
+            await runSearch();
+          } else {
+            reply = UNVERIFIED_REPLY;
+            enforce = false;
           }
         }
         // "I'll search across Dubai..." without results is never sent: the search runs now instead.
@@ -1773,6 +1865,15 @@ const chat = async ({ sessionId, message, action }) => {
     }
   } catch (error) {
     console.error('[Chatbot] Chat failed:', error.message);
+    // Nothing partial is sent: no cards or recommendations from before the failure.
+    reply = error.propertySearchFailed ? SEARCH_FAILED_TEXT : FALLBACK_REPLY;
+    properties = [];
+    propertyResult = null;
+    propertyCounts = null;
+    recommendations = [];
+    uiActions = [];
+    alternatives = null;
+    enforce = false;
   }
 
   // 7. Guardrails over wording: the offer and next question come from state, never from the model.
