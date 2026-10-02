@@ -704,7 +704,7 @@ const VIEWING_RE = /\b(arrange|book|schedule)\b[^.?!]*\bviewing\b/i;
 const VIEWING_CONFIRM_TEXT = "Thanks — I'll pass your viewing request to the team.";
 const NEARBY_AREAS = require('../constants/nearbyAreas.json');
 const PREVIEW_LIMIT = 3;
-const MAX_NEARBY_AREAS = 2;
+const MAX_NEARBY_AREAS = 3;
 const MAX_RECOMMENDATIONS = 3;
 const CATEGORY_QUESTION = 'Which category would you like to explore?';
 const ALTERNATIVES_QUESTION = 'Would you like to see one of these?';
@@ -1176,6 +1176,9 @@ const areaSlug = (locations) =>
   locations.map((l) => l.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')).filter(Boolean).join('-or-');
 
 // Same query format as the website's PropertySearchBar: ?search=<area-slug>&type=&max=&beds=
+// The listing pages have no furnishing filter and filter one bedroom count only.
+const listingPageCanFilter = (q) => !q.furnishing && bedroomList(q.bedrooms).length <= 1;
+
 // The listing pages filter one bedroom count only, so a bedroom set is left out of the URL.
 const listingUrl = ({ purpose, locations = [], propertyType, bedrooms, minPrice, maxPrice }) => {
   const params = new URLSearchParams();
@@ -1206,21 +1209,26 @@ const searchAreas = async (args, areas) => {
   return groups;
 };
 
-// One area's live listings per category: count, lowest price and listing-page link, all from the same filters
-// (furnishing is left out because the listing pages can't filter it). Categories without listings are left out;
-// null when the area has none.
+// The listing-page link for a request; undefined when the page can't apply the same filters (see listingPageCanFilter),
+// so a link never shows a different set of listings than the count next to it.
+const listingUrlFor = (q, location, purpose = q.purpose) =>
+  listingPageCanFilter(q)
+    ? listingUrl({ purpose, locations: [].concat(location), propertyType: q.propertyType, bedrooms: q.bedrooms, minPrice: q.budgetMin, maxPrice: q.budget })
+    : undefined;
+
+// One area's live listings per category: count, lowest price and listing-page link, all from the same filters.
+// Categories without listings are left out; null when the area has none.
 const areaAvailability = async (q, location, purposes) => {
   const availability = [];
   for (const purpose of purposes) {
-    const args = { purpose, location, type: q.propertyType, bedrooms: q.bedrooms, min_price: Number(q.budgetMin) || undefined, max_price: Number(q.budget) || undefined };
-    const found = await findProperties(args, 1);
+    const found = await findProperties({ ...searchArgsFromState({ ...q, purpose }), location }, 1);
     if (!found.total) continue;
     availability.push({
       purpose,
       total: found.total,
       startingPrice: found.startingPrice,
       rentFrequency: found.items[0].rentFrequency,
-      url: listingUrl({ purpose, locations: [].concat(location), propertyType: q.propertyType, bedrooms: q.bedrooms, minPrice: q.budgetMin, maxPrice: q.budget }),
+      url: listingUrlFor(q, location, purpose),
     });
   }
   if (!availability.length) return null;
@@ -1231,33 +1239,53 @@ const areaAvailability = async (q, location, purposes) => {
   return { total, startingPrices: availability, viewAllUrl: largest.url };
 };
 
-// Other areas with the same request right now, as cards with live counts, prices and links. When the current area has
-// nearby-area data (constants/nearbyAreas.json) and `useNearbyData` is set, only those areas are checked. Otherwise any
-// community with matching listings, most listings first; those are never described as "nearby".
-const alternativeAreaCards = async (q, { useNearbyData = true } = {}) => {
-  const purposes = CATEGORIES.includes(q.purpose) ? [q.purpose] : CATEGORIES;
-  let candidates = useNearbyData ? NEARBY_AREAS[q.location] : null;
-  if (!candidates) {
-    const counts = new Map();
-    for (const purpose of purposes) {
-      const { items } = await findProperties(searchArgsFromState({ ...q, purpose, location: undefined, furnishing: undefined }), AREA_SCAN_LIMIT);
-      items.forEach((p) => counts.set(p.community, (counts.get(p.community) || 0) + 1));
-    }
-    counts.delete(q.location);
-    counts.delete('');
-    candidates = [...counts.keys()].sort((a, b) => counts.get(b) - counts.get(a));
+// Fallback step 5: one other community with verified matching listings (every filter kept), used only when no nearby
+// area has any. The scan only ranks candidates; the chosen area is searched on its own, so its count, price and link use
+// exactly the same filters. The area with the most matches wins (ties by name), so "yes" later finds the same area.
+const otherMatchingArea = async (q, excluded) => {
+  const { items } = await findProperties(searchArgsFromState({ ...q, location: undefined }), AREA_SCAN_LIMIT);
+  const counts = new Map();
+  items.filter((p) => p.community && !excluded.includes(p.community)).forEach((p) => counts.set(p.community, (counts.get(p.community) || 0) + 1));
+  const ranked = [...counts.keys()].sort((a, b) => counts.get(b) - counts.get(a) || a.localeCompare(b));
+  for (const area of ranked) {
+    const [group] = await searchAreas(searchArgsFromState(q), [area]);
+    if (group) return group;
   }
-  const cards = [];
-  for (const area of candidates) {
-    const availability = await areaAvailability(q, area, purposes);
-    if (availability) cards.push({ area, summary: '', reason: '', ...availability });
-    if (cards.length === MAX_RECOMMENDATIONS) break;
-  }
-  return cards;
+  return null;
 };
-// "• Dubai South: 1 listing for sale from AED 1,200,000"
-const areaCardLine = (card) =>
-  `• ${card.area}: ${card.startingPrices.map((a) => `${listingCount(a.total)} ${CATEGORY_WORDS[a.purpose]} from ${priceText(a.startingPrice, a.purpose, a.rentFrequency)}`).join(', ')}`;
+
+// Fallback steps 4 and 5: the same request (purpose, type, bedrooms, budget, furnishing all kept) in the areas configured
+// as nearby (constants/nearbyAreas.json, closest first); only when none has a match, one other matching area.
+const alternativeAreas = async (q) => {
+  const nearbyNames = NEARBY_AREAS[q.location] || [];
+  const nearby = await searchAreas(searchArgsFromState(q), nearbyNames);
+  const other = nearby.length ? null : await otherMatchingArea(q, [q.location, ...nearbyNames]);
+  return { nearby, other };
+};
+
+// A card for an area found by alternativeAreas: its count and lowest price come from the same search as the link.
+const areaCard = (q, g) => {
+  const url = listingUrlFor(q, g.location);
+  return {
+    area: g.location,
+    summary: '',
+    reason: '',
+    total: g.total,
+    startingPrices: [{ purpose: q.purpose, total: g.total, startingPrice: g.startingPrice, rentFrequency: g.items[0]?.rentFrequency, url }],
+    viewAllUrl: url,
+  };
+};
+
+// Text for fallback steps 4 and 5: the nearby matches, otherwise the other matching area, otherwise a clear "none".
+// `wanted` keeps every filter ("two-bedroom villas for sale under AED 3,000,000"), so nothing looks silently relaxed.
+const alternativeAreasText = (q, { nearby, other }) => {
+  const wanted = describeCriteria(q, { plural: true, location: '' });
+  const line = (g) => `• ${g.location}: ${listingCount(g.total)} from ${priceText(g.startingPrice, q.purpose, g.items[0]?.rentFrequency)}`;
+  if (nearby.length) return `Nearby ${wanted} matching your requirements:\n${nearby.map(line).join('\n')}`;
+  const noNearby = NEARBY_AREAS[q.location] ? `I couldn't find nearby ${wanted} matching your current requirements.` : noNearbyNote(q.location);
+  if (other) return `${noNearby} Another community has matching ${wanted}:\n${line(other)}`;
+  return `${noNearby} I also couldn't find ${wanted} in any other community right now.`;
+};
 
 // The next step after zero results, offering only changes that can widen the search.
 const refineQuestion = (q, { budgetMatters = false } = {}) => {
@@ -1265,20 +1293,13 @@ const refineQuestion = (q, { budgetMatters = false } = {}) => {
   return bedroomList(q.bedrooms).length ? CHOICE_QUESTIONS.areaTypeOrBedrooms.text : CHOICE_QUESTIONS.areaOrType.text;
 };
 
-// "Any nearest areas?": the current request in other areas, checked against live listings. Areas are only called
-// nearby when the current area has nearby-area data.
+// "Any nearest areas?": fallback steps 4 and 5 on their own. Suggested areas are only candidates; the saved
+// location changes only when the user picks one.
 const describeNearby = async (q) => {
-  const cards = await alternativeAreaCards(q);
-  const wanted = describeCriteria({ ...q, furnishing: undefined }, { plural: true, location: '' });
-  const hasNearbyData = Boolean(NEARBY_AREAS[q.location]);
-  if (!cards.length) {
-    const none = hasNearbyData
-      ? `I couldn't find any ${wanted} in the areas near ${q.location} right now.`
-      : `${noNearbyNote(q.location)} I also couldn't find any ${wanted} in other communities right now.`;
-    return { reply: `${none}\n\n${refineQuestion(q, { budgetMatters: Boolean(Number(q.budget)) })}`, cards };
-  }
-  const title = hasNearbyData ? `Areas near ${q.location} with ${wanted}:` : `${noNearbyNote(q.location)} These communities have ${wanted} right now:`;
-  return { reply: [title, cards.map(areaCardLine).join('\n'), AREA_PICK_QUESTION].join('\n\n'), cards };
+  const areas = await alternativeAreas(q);
+  const groups = areas.nearby.length ? areas.nearby : [areas.other].filter(Boolean);
+  const question = groups.length ? AREA_PICK_QUESTION : refineQuestion(q, { budgetMatters: Boolean(Number(q.budget)) });
+  return { reply: `${alternativeAreasText(q, areas)}\n\n${question}`, cards: groups.map((g) => areaCard(q, g)) };
 };
 
 const RESIDENTIAL_TYPES = ['Apartment', 'Villa', 'Townhouse'];
@@ -1333,33 +1354,42 @@ const nearbyAlternative = (q, g) => ({
   difference: 'location',
 });
 
-// 1. exact match  2. same criteria without the budget (price only)  3. same-area alternatives (summary only)
-// 4. nearby areas with the original criteria. Without an area: exact match, then closest bedroom counts.
+// Fallback order with an area:
+//   1. exact match (every filter)
+//   2. same request above the budget: only the lowest price is offered
+//   3. same-area alternatives, one requirement changed at a time and labelled
+//   4. nearby areas with every filter kept, closest first
+//   5. one other area with verified matching listings, only when no nearby area has any
+// Steps 3-5 are all reported together ('alternatives'); 'none' means none of them found anything.
+// Without an area: exact match, then the closest bedroom counts.
+// Nothing here changes the saved search: suggested areas are candidates until the user picks one.
 const searchWithFallback = async (q, maxPrice = q.budget) => {
   const args = searchArgsFromState({ ...q, budget: maxPrice });
-  const nearby = (q.location && NEARBY_AREAS[q.location]) || [];
 
   const exact = await findProperties(args, PREVIEW_LIMIT);
-  if (exact.total) return { stage: 'exact', nearby, groups: [{ location: q.location, bedrooms: args.bedrooms, ...exact }] };
+  if (exact.total) return { stage: 'exact', groups: [{ location: q.location, bedrooms: args.bedrooms, ...exact }] };
 
   if (!q.location) {
     for (const bedrooms of bedroomAlternatives(q.bedrooms)) {
       const found = await findProperties({ ...args, bedrooms }, PREVIEW_LIMIT);
-      if (found.total) return { stage: 'bedroom', nearby, groups: [{ location: q.location, bedrooms, ...found }] };
+      if (found.total) return { stage: 'bedroom', groups: [{ location: q.location, bedrooms, ...found }] };
     }
-    return { stage: 'none', nearby, groups: [] };
+    return { stage: 'none', groups: [] };
   }
 
   if (Number(maxPrice)) {
     const lowest = await findProperties(searchArgsFromState({ ...q, budget: undefined }), 1);
-    if (lowest.total) return { stage: 'overBudget', nearby, groups: [], lowestPrice: lowest.startingPrice, rentFrequency: lowest.items[0].rentFrequency };
+    if (lowest.total) return { stage: 'overBudget', groups: [], lowestPrice: lowest.startingPrice, rentFrequency: lowest.items[0].rentFrequency };
   }
 
-  const [sameArea, nearbyGroups] = await Promise.all([sameAreaAlternatives(q), searchAreas(args, nearby)]);
-  const alternatives = { sameArea, nearby: nearbyGroups.map((g) => nearbyAlternative(q, g)) };
-  if (sameArea.length) return { stage: 'alternatives', nearby, groups: [], alternatives };
-  if (nearbyGroups.length) return { stage: 'nearby', nearby, groups: nearbyGroups, alternatives };
-  return { stage: 'none', nearby, groups: [] };
+  const [sameArea, areas] = await Promise.all([sameAreaAlternatives(q), alternativeAreas({ ...q, budget: maxPrice })]);
+  const alternatives = {
+    sameArea,
+    nearby: areas.nearby.map((g) => nearbyAlternative(q, g)),
+    other: areas.other ? nearbyAlternative(q, areas.other) : null,
+  };
+  const found = sameArea.length || areas.nearby.length || areas.other;
+  return { stage: found ? 'alternatives' : 'none', groups: [], areas, alternatives };
 };
 
 // "Jumeirah Lake Towers has 3-bedroom options starting from AED 180,000/year (2 listings)"
@@ -1447,8 +1477,7 @@ const describeAvailability = async (q) => {
 };
 
 // Deterministic, precise wording: says exactly which criteria were not met and what changed.
-// `otherAreas`: cards for other communities with the same request (zero-result replies only).
-const describeResults = async (q, result, maxPrice, { cheaper = false, otherAreas = [] } = {}) => {
+const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) => {
   const wanted = describeCriteria(q, { maxPrice, priceWord: 'within' });
   const missed = `I couldn't find ${cheaper ? wanted.replace(/^an? /, 'a cheaper ') : wanted}`;
   const [first] = result.groups;
@@ -1464,47 +1493,39 @@ const describeResults = async (q, result, maxPrice, { cheaper = false, otherArea
     const price = priceText(result.lowestPrice, q.purpose, result.rentFrequency);
     return `I couldn't find any ${describeCriteria(q, { maxPrice, plural: true, priceWord: 'within' })}. The lowest available option currently starts from ${price}. Would you like to see listings from ${price}?`;
   }
-  if (result.stage === 'alternatives') {
-    const { sameArea, nearby } = result.alternatives;
-    const matching = sameArea.filter((a) => a.difference !== 'furnishing');
-    const otherFurnishing = sameArea.filter((a) => a.difference === 'furnishing');
-    const lines = (alts) => alts.map((a) => `• ${alternativeLine(q, a)}`).join('\n');
-    const nearbyLines = nearby.map((a) => `• ${a.location}: ${listingCount(a.count)} from ${priceText(a.startingPrice, a.purpose, a.priceFrequency)}`);
-    const nearbyTitle = q.furnishing ? `Nearby ${q.furnishing} options:` : "If you'd rather keep the same requirements, nearby options include:";
-    const question = otherFurnishing.length
-      ? `Would you like to ${matching.length || nearbyLines.length ? `see the ${q.furnishing} options above, or ` : ''}consider ${otherFurnishing.map((a) => a.furnishing).join(' or ')} properties in ${q.location}?`
-      : ALTERNATIVES_QUESTION;
-    return [
-      `${missed}.`,
-      matching.length ? `In ${q.location}, I found:\n${lines(matching)}` : '',
-      nearbyLines.length ? `${nearbyTitle}\n${nearbyLines.join('\n')}` : '',
-      otherFurnishing.length ? `Not ${q.furnishing}, but available in ${q.location}:\n${lines(otherFurnishing)}` : '',
-      nearbyLines.length ? '' : noNearbyNote(q.location),
-      question,
-    ].filter(Boolean).join('\n\n');
-  }
-  if (result.stage === 'nearby') {
-    return `${missed}. Nearby, ${joinPhrases(result.groups.map((g) => groupPhrase(q, g, 'matching')))}.`;
-  }
   if (result.stage === 'bedroom') {
     return `${missed}, but ${groupPhrase(q, first)}.`;
   }
-  // Nothing close matched: what the area really has in this category, so the user can see what is available there.
-  const inArea = q.location && !cheaper ? await areaInventoryLines(q.location, [q.purpose]) : [];
-  // With an area, nothing matches at any price (a higher price would have been offered), so the budget is not the problem.
+
+  // No exact match ('alternatives' or 'none'). With an area, nothing matches at any price (a higher price would have
+  // been offered), so the budget is not the problem.
   const noneAtAnyPrice = Number(maxPrice) && q.location && !cheaper;
-  const others = otherAreas.length
-    ? [noNearbyNote(q.location), `Other communities with ${describeCriteria({ ...q, furnishing: undefined }, { plural: true, location: '' })} right now:`]
-        .filter(Boolean)
-        .join(' ')
-    : '';
+  const noMatch = cheaper
+    ? `${missed}.`
+    : `I couldn't find any ${describeCriteria(q, { plural: true, maxPrice: noneAtAnyPrice ? null : maxPrice, priceWord: 'within' })}${q.budgetFlexible ? ' at any price' : ''} right now.`;
+  if (!q.location || cheaper) return `${noMatch}\n\n${refineQuestion(q, { budgetMatters: Boolean(Number(maxPrice)) && !noneAtAnyPrice })}`;
+
+  // The reply follows the fallback order: what the area has instead (step 3), the same request nearby or in another
+  // verified area (steps 4-5), then one question, asked only after those results.
+  const sameArea = result.alternatives?.sameArea || [];
+  const areas = result.areas || { nearby: [], other: null };
+  const matching = sameArea.filter((a) => a.difference !== 'furnishing');
+  const otherFurnishing = sameArea.filter((a) => a.difference === 'furnishing');
+  const lines = (alts) => alts.map((a) => `• ${alternativeLine(q, a)}`).join('\n');
+  // Without a one-change alternative, the area's real inventory in this category is shown instead.
+  const inArea = matching.length ? [] : await areaInventoryLines(q.location, [q.purpose]);
+  const anyAlternative = matching.length || areas.nearby.length || areas.other;
+  let question = anyAlternative ? ALTERNATIVES_QUESTION : refineQuestion(q);
+  if (otherFurnishing.length) {
+    question = `Would you like to ${anyAlternative ? `see the ${q.furnishing} options above, or ` : ''}consider ${otherFurnishing.map((a) => a.furnishing).join(' or ')} properties in ${q.location}?`;
+  }
   return [
-    cheaper
-      ? `${missed}.`
-      : `I couldn't find any ${describeCriteria(q, { plural: true, maxPrice: noneAtAnyPrice ? null : maxPrice, priceWord: 'within' })}${q.budgetFlexible ? ' at any price' : ''} right now.`,
+    noMatch,
+    matching.length ? `In ${q.location}, I found:\n${lines(matching)}` : '',
     inArea.length ? `Other ${describeCriteria({ purpose: q.purpose }, { plural: true, location: '', maxPrice: null })} in ${q.location}:\n${inArea.join('\n')}` : '',
-    others ? `${others}\n${otherAreas.map(areaCardLine).join('\n')}` : q.location && !cheaper ? noNearbyNote(q.location) : '',
-    otherAreas.length ? AREA_PICK_QUESTION : refineQuestion(q, { budgetMatters: Boolean(Number(maxPrice)) && !noneAtAnyPrice }),
+    otherFurnishing.length ? `Not ${q.furnishing}, but available in ${q.location}:\n${lines(otherFurnishing)}` : '',
+    alternativeAreasText(q, areas),
+    question,
   ].filter(Boolean).join('\n\n');
 };
 
@@ -1529,7 +1550,7 @@ const buildPropertyResult = async (q, groups, maxPrice) => {
   );
   const viewAllUrl = listingUrl({ purpose: q.purpose, locations, propertyType: q.propertyType, bedrooms, minPrice: q.budgetMin, maxPrice });
   // The listing pages have no furnishing or bedroom-set filter, so their count would not match those totals.
-  const showViewAll = total > PREVIEW_LIMIT && !q.furnishing && bedroomList(bedrooms).length <= 1;
+  const showViewAll = total > PREVIEW_LIMIT && listingPageCanFilter({ ...q, bedrooms });
   return {
     properties,
     propertyResult: { total, showViewAll, location: locations.join(', ') || 'Dubai', purpose: q.purpose, category: q.purpose, filters, viewAllUrl },
@@ -1994,8 +2015,9 @@ const chat = async ({ sessionId, message, action }) => {
       const nearbyRequest = !extracted.location && NEARBY_RE.test(message);
       if (nearbyRequest) {
         broad = true;
-        if (q.location) ({ reply, cards: recommendations } = await describeNearby(q));
-        else reply = 'Which area would you like me to look near?';
+        if (!q.location) reply = 'Which area would you like me to look near?';
+        else if (!CATEGORIES.includes(q.purpose)) reply = categoryQuestion(q.location);
+        else ({ reply, cards: recommendations } = await describeNearby(q));
       } else if (areaQuestion) {
         // Purpose is never inferred: an area without a category gets the category question and no search.
         // Only an area guide may describe an area (the model answers below); without one, real listing counts replace a guess.
@@ -2052,7 +2074,11 @@ const chat = async ({ sessionId, message, action }) => {
       }
       if (acceptedAlternatives) {
         const { alternatives: offered } = await searchWithFallback(q);
-        const options = [...(offered?.sameArea || []).filter((a) => a.difference !== 'furnishing'), ...(offered?.nearby || [])];
+        const options = [
+          ...(offered?.sameArea || []).filter((a) => a.difference !== 'furnishing'),
+          ...(offered?.nearby || []),
+          ...(offered?.other ? [offered.other] : []),
+        ];
         if (options.length === 1) {
           const [a] = options;
           q[a.difference] = String(a[a.difference]);
@@ -2083,10 +2109,7 @@ const chat = async ({ sessionId, message, action }) => {
         } else {
           result = await searchWithFallback(q);
         }
-        // Zero results in an area: other communities with the same request, verified against live listings.
-        const otherAreas = result.stage === 'none' && q.location && !cheaper ? await alternativeAreaCards(q, { useNearbyData: false }) : [];
-        recommendations = otherAreas;
-        reply = await describeResults(q, result, maxPrice, { cheaper, otherAreas });
+        reply = await describeResults(q, result, maxPrice, { cheaper });
         alternatives = result.alternatives || null;
         if (result.stage === 'overBudget') {
           // Only the price is offered; listings are shown after the user agrees.
@@ -2097,6 +2120,12 @@ const chat = async ({ sessionId, message, action }) => {
           // A no-results reply already ends with its own next-step question.
           enforce = result.groups.length > 0;
           propertyTurn = enforce;
+        }
+        // Areas found by the fallback (nearby or another verified area): one card each, plus a few of their real listings.
+        const areaGroups = result.areas ? [...result.areas.nearby, result.areas.other].filter(Boolean) : [];
+        if (areaGroups.length) {
+          recommendations = areaGroups.map((g) => areaCard(q, g));
+          properties = areaGroups.flatMap((g) => g.items).sort((a, b) => a.priceAED - b.priceAED).slice(0, PREVIEW_LIMIT);
         }
         const total = result.groups.reduce((sum, g) => sum + g.total, 0);
         logSearch(sessionId, searchArgsFromState({ ...q, budget: maxPrice }), { stage: result.stage, total, properties });
