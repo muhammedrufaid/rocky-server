@@ -61,6 +61,8 @@ const chatSessionSchema = new mongoose.Schema(
     },
     // Close location match waiting for the user's "yes" ("Did you mean Jebel Ali?"); cleared on the next reply.
     locationSuggestion: { type: String, trim: true, default: '' },
+    // Choice question the assistant just asked (a CHOICE_QUESTIONS key in lib/chatbot.js); cleared on the next reply.
+    pendingQuestion: { type: String, trim: true, default: '' },
     // Non-property topic the conversation is on (e.g. 'leadership'); cleared when the user returns to a property search.
     currentTopic: { type: String, trim: true, default: '' },
     leadOfferShown: {

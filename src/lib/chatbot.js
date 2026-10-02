@@ -706,6 +706,31 @@ const CATEGORY_QUESTION = 'Which category would you like to explore?';
 const ALTERNATIVES_QUESTION = 'Would you like to see one of these?';
 const categoryQuestion = (location) => `Would you like to buy, rent, or explore off-plan properties in ${location}?`;
 
+// Choice questions the backend asks. When a reply ends with one, its key is stored as the session's pendingQuestion,
+// so the next short reply ("yes", "no", "another area") is read as an answer to it rather than as a new search.
+// `options` are the search fields the user can choose to change.
+const CHOICE_QUESTIONS = {
+  budgetOrArea: { text: 'Would you like to adjust the budget or try another area?', options: ['budget', 'location'] },
+  areaTypeOrBedrooms: { text: 'Would you like to try a nearby area or adjust the property type or bedrooms?', options: ['location', 'propertyType', 'bedrooms'] },
+  alternatives: { text: ALTERNATIVES_QUESTION },
+};
+const choiceQuestionIn = (reply) => Object.keys(CHOICE_QUESTIONS).find((key) => reply.endsWith(CHOICE_QUESTIONS[key].text)) || '';
+// How the user names each option, and the single question asked once they pick it.
+const REFINE_OPTIONS = {
+  budget: { words: 'adjust the budget', re: /\b(budget|price|afford|spend)\b/i },
+  location: { words: 'try another area', re: /\b(areas?|locations?|communit(y|ies)|neighbou?rhoods?|places?|somewhere|elsewhere)\b/i },
+  propertyType: { words: 'change the property type', re: /\b(type|kind)\b/i },
+  bedrooms: { words: 'change the number of bedrooms', re: /\b(bed(room)?s?|size)\b/i },
+};
+const refineFieldQuestion = (field, q) =>
+  ({
+    budget: q.purpose === 'rent' ? 'What yearly budget would you like to try, in AED?' : 'What budget would you like to try, in AED?',
+    location: 'Which area would you like to try?',
+    propertyType: 'Which property type would you like instead?',
+    bedrooms: 'How many bedrooms would you like instead?',
+  })[field];
+const joinOr = (phrases) => (phrases.length > 1 ? `${phrases.slice(0, -1).join(', ')} or ${phrases[phrases.length - 1]}` : phrases[0]);
+
 let locationCache = null;
 const getKnownLocations = async () => {
   if (locationCache) return locationCache;
@@ -1264,7 +1289,7 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
     noneAtAnyPrice ? `I couldn't find any ${describeCriteria(q, { plural: true, maxPrice: null })} right now.` : `${missed}.`,
     inArea.length ? `Other ${describeCriteria({ purpose: q.purpose }, { plural: true, location: '', maxPrice: null })} in ${q.location}:\n${inArea.join('\n')}` : '',
     q.location && !cheaper ? noNearbyNote(q.location) : '',
-    noneAtAnyPrice ? 'Would you like to try a nearby area or adjust the property type or bedrooms?' : 'Would you like to adjust the budget or try another area?',
+    noneAtAnyPrice ? CHOICE_QUESTIONS.areaTypeOrBedrooms.text : CHOICE_QUESTIONS.budgetOrArea.text,
   ].filter(Boolean).join('\n\n');
 };
 
@@ -1579,6 +1604,7 @@ const chat = async ({ sessionId, message, action }) => {
     contact: { ...(session?.contact || {}) },
     budgetFallback: { ...(session?.budgetFallback || {}) },
     locationSuggestion: session?.locationSuggestion || '',
+    pendingQuestion: session?.pendingQuestion || '',
     currentTopic: session?.currentTopic || '',
     leadOfferShown: Boolean(session?.leadOfferShown),
     leadOfferDeclined: Boolean(session?.leadOfferDeclined),
@@ -1608,6 +1634,9 @@ const chat = async ({ sessionId, message, action }) => {
     // "Did you mean Jebel Ali?" is answered on the very next reply.
     const pendingLocation = state.locationSuggestion;
     state.locationSuggestion = '';
+    // A choice question ("adjust the budget or try another area?") is also answered on the very next reply only.
+    const pendingQuestion = state.pendingQuestion;
+    state.pendingQuestion = '';
     const pastMessages = session?.messages || [];
     const lastAssistant = [...pastMessages].reverse().find((m) => m.role === 'assistant')?.content || '';
     const lastQuestion = lastQuestionOf(lastAssistant);
@@ -1780,13 +1809,32 @@ const chat = async ({ sessionId, message, action }) => {
             filters: Object.fromEntries(Object.entries(filters).filter(([, v]) => v !== undefined && v !== '')),
           };
         } else {
-          reply = `I couldn't find any ${describeCriteria(q, { plural: true, priceWord: 'within' })}. Would you like to adjust the budget or try another area?`;
+          reply = `I couldn't find any ${describeCriteria(q, { plural: true, priceWord: 'within' })}. ${CHOICE_QUESTIONS.budgetOrArea.text}`;
         }
       }
       // "Yes" to "Would you like to see one of these?": the offered alternatives are looked up again. A single one is
       // switched to and searched; with several, the user picks one.
       const acceptedAlternatives =
-        !criteriaChanged && lastAssistant.endsWith(ALTERNATIVES_QUESTION) && (ACCEPT_RE.test(message) || SHOW_ME_RE.test(message));
+        !criteriaChanged && pendingQuestion === 'alternatives' && (ACCEPT_RE.test(message) || SHOW_ME_RE.test(message));
+      // A short reply to a refine question ("adjust the budget or try another area?") moves to the next step; the
+      // unchanged search is not run again. A new criterion ("JVC") or a new question ("What is RERA?") skips this.
+      const refineOptions = CHOICE_QUESTIONS[pendingQuestion]?.options;
+      if (refineOptions && !criteriaChanged && !message.includes('?') && !CHEAPER_RE.test(message)) {
+        const chosen = refineOptions.filter((field) => REFINE_OPTIONS[field].re.test(message));
+        if (chosen.length === 1) {
+          broad = true;
+          reply = refineFieldQuestion(chosen[0], q);
+        } else if (DECLINE_RE.test(message)) {
+          broad = true;
+          const canOffer = !state.leadSaved && !state.leadOfferShown && !state.leadOfferDeclined;
+          reply = `No problem, I'll keep your current requirements. ${canOffer ? OFFER_TEXT : "Let me know whenever you'd like to change anything."}`;
+          if (canOffer) state.leadOfferShown = true;
+        } else if (chosen.length > 1 || ACCEPT_RE.test(message) || CONFIRM_RE.test(message)) {
+          broad = true;
+          reply = `Sure — would you like to ${joinOr(refineOptions.map((field) => REFINE_OPTIONS[field].words))}?`;
+          state.pendingQuestion = pendingQuestion;
+        }
+      }
       if (acceptedAlternatives) {
         const { alternatives: offered } = await searchWithFallback(q);
         const options = [...(offered?.sameArea || []).filter((a) => a.difference !== 'furnishing'), ...(offered?.nearby || [])];
@@ -1798,16 +1846,16 @@ const chat = async ({ sessionId, message, action }) => {
             describeCriteria({ ...q, purpose: a.purpose, propertyType: a.propertyType || q.propertyType, bedrooms: a.bedrooms ?? q.bedrooms }, { plural: true, location: a.location, maxPrice: null })
           );
           broad = true;
-          reply = `Which would you like to see: ${labels.slice(0, -1).join(', ')} or ${labels[labels.length - 1]}?`;
+          reply = `Which would you like to see: ${joinOr(labels)}?`;
         }
       }
       const canSearch = !broad && CATEGORIES.includes(q.purpose) && hasCriteria;
       const cheaper = canSearch && CHEAPER_RE.test(message);
       // The backend, not the model, decides to search: whenever the state is searchable and this message set a criterion
-      // or answered our last qualifying question.
+      // or answered our last qualifying question (a choice question is not one: it names fields but asks for a choice).
+      const answeredField = !pendingQuestion && answeredOurQuestion(message, lastQuestion, q);
       const searchNow =
-        !areaQuestion &&
-        (cheaper || (canSearch && (criteriaChanged || criteriaGiven || acceptedAlternatives || answeredOurQuestion(message, lastQuestion, q))));
+        !areaQuestion && (cheaper || (canSearch && (criteriaChanged || criteriaGiven || acceptedAlternatives || answeredField)));
 
       const runSearch = async () => {
         let maxPrice = q.budget;
@@ -1964,6 +2012,8 @@ const chat = async ({ sessionId, message, action }) => {
     }
   }
   if (confirmation && !/agent will contact|viewing request/i.test(reply)) reply = `${confirmation}\n\n${reply}`;
+  // A reply ending with one of our choice questions waits for the user's answer to it on the next turn.
+  if (!state.pendingQuestion) state.pendingQuestion = choiceQuestionIn(reply);
 
   const now = new Date();
   await ChatSession.findOneAndUpdate(
@@ -1975,6 +2025,7 @@ const chat = async ({ sessionId, message, action }) => {
         viewingInterest: state.viewingInterest,
         budgetFallback: state.budgetFallback,
         locationSuggestion: state.locationSuggestion,
+        pendingQuestion: state.pendingQuestion,
         currentTopic: state.currentTopic,
         leadOfferShown: state.leadOfferShown,
         leadOfferDeclined: state.leadOfferDeclined,
