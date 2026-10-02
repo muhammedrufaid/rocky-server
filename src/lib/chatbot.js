@@ -692,6 +692,10 @@ const RECOMMEND_RE = new RegExp(
 );
 // "Is Arjan good for families?" / "Tell me about JVC": a question about one known area, not a recommendation request.
 const AREA_INFO_RE = /^\s*(is|are|does|do|how('?s| is| about)|what('?s| is| about)|tell me about)\b/i;
+// "Do you have villas in Dubai Hills?" / "Any listings in JVC?": asks about inventory, so it is a property search.
+const AVAILABILITY_RE = /\b(do|does) (you|rocky( real estate)?) have\b|\bhave you got\b|\bavailab\w*|\blistings?\b|\bfor (sale|rent)\b/i;
+// "What about JVC?" during a search moves the search to JVC rather than asking about the area.
+const SWITCH_AREA_RE = /^\s*(what|how) about\b/i;
 const VIEWING_RE = /\b(arrange|book|schedule)\b[^.?!]*\bviewing\b/i;
 const VIEWING_CONFIRM_TEXT = "Thanks — I'll pass your viewing request to the team.";
 const NEARBY_AREAS = require('../constants/nearbyAreas.json');
@@ -1152,6 +1156,63 @@ const alternativeLine = (q, a) => {
 };
 
 const joinPhrases = (phrases) => (phrases.length > 1 ? `${phrases.slice(0, -1).join(', ')} and ${phrases[phrases.length - 1]}` : phrases[0]);
+const capitalize = (s) => `${s.charAt(0).toUpperCase()}${s.slice(1)}`;
+const CATEGORY_WORDS = { rent: 'for rent', buy: 'for sale', 'off-plan': 'off-plan' };
+const AREA_SCAN_LIMIT = 500;
+
+// What a location has right now in the given categories, grouped by property type with real counts and lowest prices:
+// "• Apartments for sale: 1 listing from AED 1,350,000".
+const areaInventoryLines = async (location, purposes) => {
+  const lines = [];
+  for (const purpose of purposes) {
+    const { items } = await findProperties({ purpose, location }, AREA_SCAN_LIMIT);
+    const byType = new Map();
+    items.forEach((p) => byType.set(p.type, [...(byType.get(p.type) || []), p]));
+    byType.forEach((listings, type) => {
+      const label = describeCriteria({ purpose, propertyType: type }, { plural: true, location: '', maxPrice: null });
+      lines.push(`• ${capitalize(label)}: ${listingCount(listings.length)} from ${priceText(listings[0].priceAED, purpose, listings[0].rentFrequency)}`);
+    });
+  }
+  return lines;
+};
+
+// The same request in the areas configured as nearby (constants/nearbyAreas.json), per category. Areas without an entry
+// get no nearby suggestions: closeness is never guessed.
+const nearbyMatches = async (q, purposes) => {
+  const nearby = NEARBY_AREAS[q.location] || [];
+  const groups = [];
+  for (const purpose of purposes) {
+    (await searchAreas(searchArgsFromState({ ...q, purpose }), nearby)).forEach((g) => groups.push({ ...g, purpose }));
+  }
+  return groups;
+};
+const nearbyLine = (q, g) =>
+  `• ${g.location}: ${describeCriteria({ ...q, purpose: g.purpose }, { plural: true, location: '', maxPrice: null })}, ${listingCount(g.total)} from ${priceText(g.startingPrice, g.purpose, g.items[0]?.rentFrequency)}`;
+const noNearbyNote = (location) =>
+  NEARBY_AREAS[location] ? '' : `I don't have nearby-community data for ${location} yet, so I can't suggest the closest alternatives.`;
+
+// "Do you have villas in Dubai Hills?" with no buy/rent/off-plan chosen yet: the exact request is checked in every
+// category first. Matches are confirmed with one real listing per category; without any, the real inventory of the same
+// area and the same request in nearby areas follow. Ends with the category question.
+const describeAvailability = async (q) => {
+  const wanted = describeCriteria(q, { plural: true });
+  const byCategory = await Promise.all(CATEGORIES.map(async (purpose) => ({ purpose, ...(await findProperties(searchArgsFromState({ ...q, purpose }), 1)) })));
+  const found = byCategory.filter((c) => c.total);
+  if (found.length) {
+    const lines = found.map((c) => `• ${listingCount(c.total)} ${CATEGORY_WORDS[c.purpose]}, from ${priceText(c.startingPrice, c.purpose, c.items[0].rentFrequency)}`);
+    return { reply: [`Yes, we have ${wanted}:`, lines.join('\n'), categoryQuestion(q.location)].join('\n\n'), properties: found.map((c) => c.items[0]) };
+  }
+  const [inArea, nearby] = await Promise.all([areaInventoryLines(q.location, CATEGORIES), nearbyMatches(q, CATEGORIES)]);
+  const reply = [
+    `I couldn't find any ${wanted} right now.`,
+    inArea.length ? `Other properties available in ${q.location}:\n${inArea.join('\n')}` : '',
+    nearby.length
+      ? `Nearby ${describeCriteria(q, { plural: true, location: '' })}:\n${nearby.map((g) => nearbyLine(q, g)).join('\n')}`
+      : noNearbyNote(q.location),
+    categoryQuestion(q.location),
+  ].filter(Boolean).join('\n\n');
+  return { reply, properties: nearby.flatMap((g) => g.items).slice(0, PREVIEW_LIMIT) };
+};
 
 // Deterministic, precise wording: says exactly which criteria were not met and what changed.
 const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) => {
@@ -1185,6 +1246,7 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
       matching.length ? `In ${q.location}, I found:\n${lines(matching)}` : '',
       nearbyLines.length ? `${nearbyTitle}\n${nearbyLines.join('\n')}` : '',
       otherFurnishing.length ? `Not ${q.furnishing}, but available in ${q.location}:\n${lines(otherFurnishing)}` : '',
+      nearbyLines.length ? '' : noNearbyNote(q.location),
       question,
     ].filter(Boolean).join('\n\n');
   }
@@ -1194,19 +1256,16 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
   if (result.stage === 'bedroom') {
     return `${missed}, but ${groupPhrase(q, first)}.`;
   }
-  let context = '';
-  if (q.location && !cheaper) {
-    const inArea = await findProperties({ purpose: q.purpose, location: q.location }, 1);
-    if (inArea.total) {
-      const kind = { rent: 'rental', buy: 'sale', 'off-plan': 'off-plan' }[q.purpose];
-      context = ` ${q.location} currently has ${inArea.total} ${kind} listing${inArea.total === 1 ? '' : 's'}, but none match all of these criteria.`;
-    }
-  }
-  if (Number(maxPrice) && q.location && !cheaper) {
-    // Nothing matches at any price, so there is no higher price to offer.
-    return `I couldn't find any ${describeCriteria(q, { plural: true, maxPrice: null })} right now.${context} Would you like to try a nearby area or adjust the property type or bedrooms?`;
-  }
-  return `${missed}.${context} Would you like to adjust the budget or try another area?`;
+  // Nothing close matched: what the area really has in this category, so the user can see what is available there.
+  const inArea = q.location && !cheaper ? await areaInventoryLines(q.location, [q.purpose]) : [];
+  // Nothing matches at any price, so there is no higher price to offer.
+  const noneAtAnyPrice = Number(maxPrice) && q.location && !cheaper;
+  return [
+    noneAtAnyPrice ? `I couldn't find any ${describeCriteria(q, { plural: true, maxPrice: null })} right now.` : `${missed}.`,
+    inArea.length ? `Other ${describeCriteria({ purpose: q.purpose }, { plural: true, location: '', maxPrice: null })} in ${q.location}:\n${inArea.join('\n')}` : '',
+    q.location && !cheaper ? noNearbyNote(q.location) : '',
+    noneAtAnyPrice ? 'Would you like to try a nearby area or adjust the property type or bedrooms?' : 'Would you like to adjust the budget or try another area?',
+  ].filter(Boolean).join('\n\n');
 };
 
 // Preview cards + View All metadata for the frontend.
@@ -1569,7 +1628,11 @@ const chat = async ({ sessionId, message, action }) => {
         fuzzy: !isContactPrompt(lastAssistant) && !recommendIntent,
         lastQuestion,
       });
-      areaQuestion = Boolean(extracted.location) && AREA_INFO_RE.test(message);
+      // An area question names only the area; any other search detail or an availability question makes it a search.
+      const searchDetail = SEARCH_FIELDS.some((f) => f !== 'location' && extracted[f]);
+      const switchesArea = SWITCH_AREA_RE.test(message) && Boolean(q.purpose || q.propertyType);
+      areaQuestion =
+        Boolean(extracted.location) && AREA_INFO_RE.test(message) && !searchDetail && !AVAILABILITY_RE.test(message) && !switchesArea;
       if (recommendIntent && !areaQuestion && extracted.location) {
         nearArea = extracted.location;
         delete extracted.location;
@@ -1683,7 +1746,7 @@ const chat = async ({ sessionId, message, action }) => {
       criteriaChanged && !locationKnown(q) && !q.budget && !q.bedrooms && q.purpose && !lastAssistant.endsWith(CATEGORY_QUESTION) &&
       message.split(/\s+/).length <= 6 && !message.includes('?')
     ) {
-      const goal = { rent: 'a rental', buy: 'a property to buy', 'off-plan': 'an off-plan property' }[q.purpose] || 'the right buyer';
+      const goal = q.purpose === 'sell' ? 'the right buyer' : describeCriteria(q);
       reply = `Great, let's find you ${goal}. ${NEXT_QUESTION.location}`;
     } else {
       // 5. Property search: requested area first, then deterministic fallbacks
@@ -1700,7 +1763,9 @@ const chat = async ({ sessionId, message, action }) => {
         }
       } else if (!q.purpose && q.location && (criteriaChanged || criteriaGiven)) {
         broad = true;
-        reply = categoryQuestion(q.location);
+        // A bare area gets the category question; with a type, bedrooms or budget the real availability is shown first.
+        if (q.propertyType || q.bedrooms || q.budget) ({ reply, properties } = await describeAvailability(q));
+        else reply = categoryQuestion(q.location);
       } else if (criteriaChanged && !q.purpose && hasCriteria) {
         // No area and no category yet: real rent / buy / off-plan counts, then the user picks a category.
         const counts = await countByCategory(q);
