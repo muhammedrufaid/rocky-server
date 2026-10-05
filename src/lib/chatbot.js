@@ -446,6 +446,8 @@ const formatProperty = (p) => ({
   priceAED: p.priceNum,
   rentFrequency: p.rentFrequency || null,
   location: [p.towerName, p.subLocality, p.locality].filter(Boolean).join(', '),
+  building: p.towerName || '',
+  district: p.subLocality || '',
   community: String(p.locality || '').replace(/\s*\([^)]*\)/, '').trim(),
   image: p.images?.[0] || null,
   url: propertyUrl(p),
@@ -459,7 +461,7 @@ const isCompleteListing = (p) => p.priceAED > 0 && REQUIRED_LISTING_FIELDS.every
 // Area terms are what the listing page derives from the URL slug ("dubai-marina" -> "dubai marina").
 const FURNISHED_VALUES = { furnished: 'Yes', unfurnished: 'No', 'partly furnished': 'Partly' };
 
-const findProperties = async ({ purpose, location, type, bedrooms, furnishing, min_price, max_price } = {}, limit = 6) => {
+const findProperties = async ({ purpose, location, type, bedrooms, furnishing, amenities, min_price, max_price } = {}, limit = 6) => {
   const search = (Array.isArray(location) ? location : [location]).filter(Boolean).map((l) => areaSlug([l]).replace(/-/g, ' '));
   // One bedroom count uses the listing-page filter; a set ("1,2,3") matches any of its counts.
   const beds = bedroomList(bedrooms);
@@ -472,12 +474,18 @@ const findProperties = async ({ purpose, location, type, bedrooms, furnishing, m
   };
   const forced = CATEGORY_MATCH[toCategory(purpose)] || {};
   const bedroomSetMatch = beds.length > 1 ? [{ $match: { $expr: { $in: [toNumber('bedrooms'), beds.map(Number)] } } }] : [];
+  // Every requested amenity must be in the listing's own feature list ("pool" matches "Shared Pool"); a listing without
+  // a feature list is never counted as having one.
+  const amenityMatch = amenities?.length
+    ? [{ $match: { $and: amenities.map((word) => ({ features: { $regex: `\\b${escapeRegex(word)}`, $options: 'i' } })) } }]
+    : [];
 
   let result;
   try {
     [result] = await Property.aggregate([
       ...buildCommonPipeline({ search, filters, forced }),
       ...bedroomSetMatch,
+      ...amenityMatch,
       { $addFields: { priceNum: toNumber('price') } },
       // A listing without a real price is never shown or counted.
       { $match: { priceNum: { $gt: 0 } } },
@@ -507,6 +515,7 @@ const LEAD_CONTEXT_FIELDS = [
   ['propertyType', 'Property Type'],
   ['budget', 'Budget'],
   ['bedrooms', 'Bedrooms'],
+  ['amenities', 'Amenities'],
   ['timeline', 'Timeline'],
   ['notes', 'Notes'],
 ];
@@ -744,15 +753,24 @@ const CHOICE_QUESTIONS = {
   bedroomOffer: { re: /Would you be open to (a studio|\d+ bedrooms?)( in one of these communities)?\?$/ },
   // Next steps after search results (see resultsNextStep) and after one property's details.
   showListings: { re: /Would you like to see (these \d+ listings|this listing)\?$/ },
-  pickProperty: { text: 'Which property would you like more details about?' },
+  // "Which would you like to explore: Bloom Towers or Luma21?" (see pickPropertyQuestion), or the generic wording.
+  pickProperty: { text: 'Which property would you like more details about?', re: /(which would you like to explore: [^?\n]+|Which property would you like more details about)\?$/i },
   propertyDetails: { text: 'Would you like more details or to arrange a viewing?' },
   viewing: { text: 'Would you like to arrange a viewing?' },
 };
-// The next step after a successful search, chosen from what the reply shows: the cards themselves when only a count was
-// given, a pick when several cards are shown, details or a viewing for a single card. Never a search field question.
-const resultsNextStep = (cardsShown, total) => {
-  if (!cardsShown) return total === 1 ? 'Would you like to see this listing?' : `Would you like to see these ${total} listings?`;
-  return cardsShown > 1 ? CHOICE_QUESTIONS.pickProperty.text : CHOICE_QUESTIONS.propertyDetails.text;
+// A card's name as the user sees it: the building, otherwise the district or community.
+const listingName = (card) => card.building || card.district || card.community;
+// Names the cards when each has its own name, so the user can answer with one ("Bloom Towers").
+const pickPropertyQuestion = (cards) => {
+  const names = cards.map(listingName);
+  const distinct = names.every(Boolean) && new Set(names.map((n) => n.toLowerCase())).size === names.length;
+  return distinct ? `Which would you like to explore: ${joinOr(names)}?` : CHOICE_QUESTIONS.pickProperty.text;
+};
+// The next step after a successful search, chosen from the cards the reply shows: the cards themselves when only a count
+// was given, a pick when several cards are shown, details or a viewing for a single card. Never a search field question.
+const resultsNextStep = (cards, total) => {
+  if (!cards.length) return total === 1 ? 'Would you like to see this listing?' : `Would you like to see these ${total} listings?`;
+  return cards.length > 1 ? pickPropertyQuestion(cards) : CHOICE_QUESTIONS.propertyDetails.text;
 };
 // Asked after listing other areas with matching listings; the reply is read as an area.
 const AREA_PICK_QUESTION = 'Which of these areas would you like to try?';
@@ -802,6 +820,65 @@ const getKnownLocations = async () => {
   });
   locationCache = entries.sort((a, b) => b[0].length - a[0].length);
   return locationCache;
+};
+
+// Words in feature names that describe an amenity rather than name it ("Shared Pool", "Maid's Room", "Pets Allowed").
+const DESCRIBING_FEATURE_WORDS = new Set(['shared', 'private', 'covered', 'built', 'children', 'central', 'area', 'room', 'service', 'allowed', 'building', 'view']);
+// "Maid's" -> "maid", "Wardrobes" -> "wardrobe", "A/C" -> "ac".
+const amenityWord = (word) => word.toLowerCase().replace(/'s$/, '').replace(/[^a-z]/g, '').replace(/(?<=[^s])s$/, '');
+let amenityCache = null;
+// Amenity words from the listings' real feature names: "Shared Pool" and "Children's Pool" -> "pool", "Balcony" ->
+// "balcony". Each word maps to its reply label: the feature name when only one feature has the word ("maid" ->
+// "maid's room"), otherwise the word itself ("pool"), so a reply never claims more than the listing data says.
+const getKnownAmenities = async () => {
+  if (amenityCache) return amenityCache;
+  const byWord = new Map();
+  (await Property.distinct('features')).filter(Boolean).forEach((feature) => {
+    feature.split(/\s+/).map(amenityWord).filter((w) => w.length >= 3 && !DESCRIBING_FEATURE_WORDS.has(w)).forEach((w) => {
+      byWord.set(w, [...new Set([...(byWord.get(w) || []), feature])]);
+    });
+  });
+  amenityCache = new Map([...byWord].map(([word, features]) => [word, features.length === 1 ? features[0].toLowerCase() : word]));
+  return amenityCache;
+};
+const amenityLabel = (word) => amenityCache?.get(word) || word;
+
+// A word up to three words before the amenity that makes it a requirement: "with a swimming pool", "must have a
+// balcony", "need parking".
+const AMENITY_WANTED_RE = /\b(with|has|have|having|need|needs|must|want|wants|include|includes|including|plus|access to)\b(?:\s+[^\s.!?]+){0,3}\s*$/;
+// Between two amenities of one list: "pool, gym and balcony".
+const AMENITY_LIST_GAP_RE = /^[\s,]*(?:and|or|&|plus)?\s*(?:an?\s+|a\s+swimming\s+)?$/;
+// "pool doesn't matter", "without a swimming pool", "no need for a balcony": the requirement is removed.
+const AMENITY_DROPPED_BEFORE_RE = /\b(no need for|(?:do not|don'?t) need|without|forget(?: about)?|skip)\s+(?:an?\s+|the\s+)?(?:[a-z]+\s+)?$/;
+const AMENITY_DROPPED_AFTER_RE = /^\s*(?:access\s+)?(?:is\s+)?(?:(?:doesn'?t|does not|don'?t|do not|isn'?t|is not|not)\s+(?:matter|needed|necessary|required|important|a must)|optional)\b/;
+// "security deposit", "water bills": a cost, not an amenity.
+const NOT_AMENITY_AFTER_RE = /^\s*(deposits?|fees?|charges?|costs?|bills?)\b/;
+
+// Amenities a message asks for or drops. A question only adds one when it asks about inventory ("Do you have studios
+// with a pool?"), so "Does it have parking?" about a shown listing never changes the search.
+const amenityUpdates = (text, amenities) => {
+  const t = text.toLowerCase();
+  const canAdd = !t.includes('?') || AVAILABILITY_RE.test(t);
+  const found = [...amenities.keys()]
+    .map((word) => ({ word, match: t.match(new RegExp(`\\b${word}(?:'?s|es)?\\b`)) }))
+    .filter(({ match }) => match)
+    .sort((a, b) => a.match.index - b.match.index);
+  const wanted = [];
+  const dropped = [];
+  let lastWantedEnd = -1;
+  found.forEach(({ word, match }) => {
+    const end = match.index + match[0].length;
+    const sentenceBefore = t.slice(0, match.index).split(/[.!?]/).pop();
+    const after = t.slice(end);
+    const listed = lastWantedEnd >= 0 && AMENITY_LIST_GAP_RE.test(t.slice(lastWantedEnd, match.index));
+    if (AMENITY_DROPPED_BEFORE_RE.test(sentenceBefore) || AMENITY_DROPPED_AFTER_RE.test(after)) {
+      dropped.push(word);
+    } else if (canAdd && !NOT_AMENITY_AFTER_RE.test(after) && (AMENITY_WANTED_RE.test(sentenceBefore) || listed || wordCount(t) <= 4)) {
+      wanted.push(word);
+      lastWantedEnd = end;
+    }
+  });
+  return { wanted, dropped };
 };
 
 // Edit distance where swapping two neighbouring letters counts as one edit ("buisness" -> "business").
@@ -978,7 +1055,7 @@ const answerToQuestion = (text, question, noPhone) => {
 
 // Search updates in one message. A field the message doesn't mention is left out (no change); a value sets it; a
 // <field>Flexible flag ("any budget", "any bedroom", "anywhere") clears that filter. See applySearchUpdates.
-const extractQualification = (text, locations, { fuzzy = true, lastQuestion = '' } = {}) => {
+const extractQualification = (text, locations, { fuzzy = true, lastQuestion = '', amenities = new Map() } = {}) => {
   const asked = questionFields(lastQuestion);
   const areaAsked = asked.includes('location');
   const t = text.toLowerCase();
@@ -1018,6 +1095,13 @@ const extractQualification = (text, locations, { fuzzy = true, lastQuestion = ''
   else if (/\b(unfurnished|not furnished)\b/.test(t)) found.furnishing = 'unfurnished';
   else if (/\b(semi|partly|partially)[- ]?furnished\b/.test(t)) found.furnishing = 'partly furnished';
   else if (/\bfurnished\b/.test(t)) found.furnishing = 'furnished';
+
+  // The area's name is left out, so "Discovery Gardens" is never read as a garden.
+  let amenityText = location ? text.replace(location[2], ' ') : text;
+  if (found.location) amenityText = amenityText.replace(new RegExp(escapeRegex(found.location), 'ig'), ' ');
+  const { wanted, dropped } = amenityUpdates(amenityText, amenities);
+  if (wanted.length) found.amenities = wanted;
+  if (dropped.length) found.amenitiesDropped = dropped;
 
   const noPhone = t.replace(new RegExp(PHONE_RE.source, 'g'), ' ');
   const noPreference = isNoPreference(t);
@@ -1088,6 +1172,7 @@ const searchArgsFromState = (q) => {
     type: q.propertyType,
     bedrooms: q.bedrooms,
     furnishing: q.furnishing,
+    amenities: q.amenities?.length ? q.amenities : undefined,
     min_price: Number(q.budgetMin) || undefined,
     max_price: Number(q.budget) || undefined,
   };
@@ -1096,8 +1181,12 @@ const searchArgsFromState = (q) => {
 
 // The model's search_properties args corrected by the session state: filters the state knows always win and cleared
 // ones ("any budget", "any bedroom", "anywhere") are removed, so a search never uses stale values from the history.
+// A type that isn't a stored property type (e.g. "Studio", which is a bedroom count) is dropped instead of matching nothing.
 const toolSearchArgs = (args, q) => {
   const merged = { ...args, ...searchArgsFromState(q), furnishing: q.furnishing };
+  const knownType = [...RESIDENTIAL_TYPES, ...COMMERCIAL_TYPES].find((t) => t.toLowerCase() === String(merged.type || '').toLowerCase());
+  if (knownType) merged.type = knownType;
+  else delete merged.type;
   if (q.bedroomsFlexible) delete merged.bedrooms;
   if (q.budgetFlexible) {
     delete merged.min_price;
@@ -1193,7 +1282,8 @@ const describeCriteria = (q, { location = q.location, bedrooms = q.bedrooms, max
   const beds = bedroomList(bedrooms);
   const bedsBefore = beds.length > 1 ? '' : bedsLabel(bedrooms, plural);
   const bedsAfter = beds.length > 1 ? ` with ${joinOr(beds.map((b) => (b === '0' ? 'studio' : b)))} bedroom${beds[beds.length - 1] === '1' ? '' : 's'}` : '';
-  const text = `${[bedsBefore, q.furnishing, offPlan, noun].filter(Boolean).join(' ')}${suffix}${bedsAfter}${where}${price}`;
+  const amenities = q.amenities?.length ? ` with ${joinPhrases(q.amenities.map(amenityLabel))}` : '';
+  const text = `${[bedsBefore, q.furnishing, offPlan, noun].filter(Boolean).join(' ')}${suffix}${bedsAfter}${where}${price}${amenities}`;
   return plural ? text : `${/^[aeiou]/i.test(text) ? 'an' : 'a'} ${text}`;
 };
 
@@ -1227,8 +1317,8 @@ const areaSlug = (locations) =>
   locations.map((l) => l.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')).filter(Boolean).join('-or-');
 
 // Same query format as the website's PropertySearchBar: ?search=<area-slug>&type=&max=&beds=
-// The listing pages have no furnishing filter and filter one bedroom count only.
-const listingPageCanFilter = (q) => !q.furnishing && bedroomList(q.bedrooms).length <= 1;
+// The listing pages have no furnishing or amenity filter and filter one bedroom count only.
+const listingPageCanFilter = (q) => !q.furnishing && !q.amenities?.length && bedroomList(q.bedrooms).length <= 1;
 
 // The listing pages filter one bedroom count only, so a bedroom set is left out of the URL.
 const listingUrl = ({ purpose, locations = [], propertyType, bedrooms, minPrice, maxPrice }) => {
@@ -1417,7 +1507,8 @@ const nearbyAlternative = (q, g) => ({
 });
 
 // Fallback order with an area:
-//   1. exact match (every filter)
+//   1. exact match (every filter, amenities verified in the listing's features)
+//   1b. with amenities: the same request with the amenities not verified, labelled as such ('amenityUnverified')
 //   2. same request above the budget: only the lowest price is offered
 //   3. closest bedroom count in the same area, every other filter kept ('bedroom')
 //   4. same-area alternatives, one requirement changed at a time and labelled
@@ -1432,7 +1523,16 @@ const searchWithFallback = async (q, maxPrice = q.budget, { relaxBedrooms = true
   const args = searchArgsFromState({ ...q, budget: maxPrice });
 
   const exact = await findProperties(args, PREVIEW_LIMIT);
-  if (exact.total) return { stage: 'exact', groups: [{ location: q.location, bedrooms: args.bedrooms, ...exact }] };
+  const withoutAmenities = { ...args, amenities: undefined };
+  if (exact.total) {
+    // Listings that meet everything else but don't list the amenities are reported as a count, never as matches.
+    const unverifiedCount = args.amenities ? (await findProperties(withoutAmenities, 1)).total - exact.total : 0;
+    return { stage: 'exact', groups: [{ location: q.location, bedrooms: args.bedrooms, ...exact }], unverifiedCount };
+  }
+  if (args.amenities) {
+    const unverified = await findProperties(withoutAmenities, PREVIEW_LIMIT);
+    if (unverified.total) return { stage: 'amenityUnverified', groups: [{ location: q.location, bedrooms: args.bedrooms, ...unverified }] };
+  }
 
   if (!q.location) {
     const closer = relaxBedrooms ? await closestBedroomMatch(args) : null;
@@ -1570,11 +1670,20 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
   const [first] = result.groups;
   const total = result.groups.reduce((sum, g) => sum + g.total, 0);
 
+  const amenities = joinPhrases((q.amenities || []).map(amenityLabel));
   if (result.stage === 'exact') {
     const price = priceText(first.startingPrice, q.purpose, first.items[0]?.rentFrequency);
-    return total === 1
+    const found = total === 1
       ? `I found ${describeCriteria(q, { maxPrice })}, priced at ${price}.`
       : `I found ${total} ${describeCriteria(q, { maxPrice, plural: true })}, starting from ${price}.`;
+    const n = result.unverifiedCount;
+    const unverified = n ? `${n} more ${n === 1 ? 'listing matches' : 'listings match'} your other requirements, but I couldn't verify ${amenities} for ${n === 1 ? 'it' : 'them'}.` : '';
+    return [found, unverified].filter(Boolean).join('\n\n');
+  }
+  if (result.stage === 'amenityUnverified') {
+    const others = describeCriteria({ ...q, amenities: undefined }, { maxPrice, plural: total !== 1 });
+    return `I couldn't find any ${describeCriteria(q, { maxPrice, plural: true, priceWord: 'within' })} right now. ` +
+      `I found ${total === 1 ? others : `${total} ${others}`}, but I couldn't verify ${amenities} for ${total === 1 ? 'it' : 'them'}.`;
   }
   if (result.stage === 'overBudget') {
     const price = priceText(result.lowestPrice, q.purpose, result.rentFrequency);
@@ -1621,6 +1730,18 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
   ].filter(Boolean).join('\n\n');
 };
 
+// "• Bloom Towers — JVC District 10: AED 620,000" for each card, in card order, placed after the reply's first paragraph.
+// Built from the cards themselves, so the names and prices in the text are always the ones on the cards.
+const withListingLines = (reply, cards) => {
+  if (!cards.length) return reply;
+  const lines = cards.map((p) => {
+    const district = p.building && p.district ? ` — ${p.district}` : '';
+    return `• ${listingName(p)}${district}: ${priceText(p.priceAED, p.category, p.rentFrequency)}`;
+  });
+  const [first, ...rest] = reply.split('\n\n');
+  return [first, lines.join('\n'), ...rest].join('\n\n');
+};
+
 // Preview cards + View All metadata for the frontend.
 const buildPropertyResult = async (q, groups, maxPrice) => {
   let total = groups.reduce((sum, g) => sum + g.total, 0);
@@ -1636,7 +1757,7 @@ const buildPropertyResult = async (q, groups, maxPrice) => {
     total = (await findProperties({ ...searchArgsFromState({ ...q, location: undefined, bedrooms, budget: maxPrice }), location: locations }, 1)).total;
   }
   const filters = Object.fromEntries(
-    Object.entries({ purpose: q.purpose, locations, propertyType: q.propertyType, bedrooms, furnishing: q.furnishing, maxPrice: Number(maxPrice) || undefined }).filter(
+    Object.entries({ purpose: q.purpose, locations, propertyType: q.propertyType, bedrooms, furnishing: q.furnishing, amenities: q.amenities, maxPrice: Number(maxPrice) || undefined }).filter(
       ([, v]) => v !== undefined && v !== '' && !(Array.isArray(v) && !v.length)
     )
   );
@@ -1798,12 +1919,29 @@ const CARD_NUMBER_RE = /\b(?:number|no\.?|option|property|listing|#)\s*([1-9])\b
 const DETAILS_RE = /\b(details?|more info(rmation)?|tell me more)\b/i;
 const VIEWING_WORD_RE = /\b(view(ing)?|visit|see it)\b/i;
 
-// The shown card the user means: a reference number from the cards, or "the second one", "2nd property", "option 3".
-// Returns that card's reference number, or '' when the message picks none of them.
-const pickShownProperty = (message, refs) => {
-  const byRef = refs.find((ref) => message.toUpperCase().includes(ref.toUpperCase()));
-  if (byRef || refs.length < 2) return byRef || '';
+// The cards last shown, in card order. A listing removed since then keeps its place (reference only), so "the second
+// one" still points at the card the user saw.
+const findShownCards = async (refs) => {
+  if (!refs.length) return [];
+  const docs = await Property.find({ propertyRefNo: { $in: refs } })
+    .select('propertyRefNo propertyPurpose offPlan propertyTitle towerName subLocality locality')
+    .lean();
+  return refs.map((ref) => {
+    const doc = docs.find((d) => d.propertyRefNo === ref);
+    return doc ? formatProperty(doc) : { propertyRefNo: ref };
+  });
+};
+
+// The shown card the user means: a reference number, a card's name ("Bloom Towers"), or "the second one", "2nd
+// property", "option 3". Returns that card's reference number, or '' when the message picks none of them.
+const pickShownProperty = (message, cards) => {
+  const refs = cards.map((c) => c.propertyRefNo);
   const t = message.toLowerCase();
+  const byRef = refs.find((ref) => t.includes(ref.toLowerCase()));
+  if (byRef) return byRef;
+  const byName = cards.filter((c) => listingName(c) && t.includes(listingName(c).toLowerCase()));
+  if (byName.length === 1) return byName[0].propertyRefNo;
+  if (refs.length < 2) return '';
   const word = t.match(ORDINAL_ONLY_RE) || t.match(ORDINAL_NOUN_RE);
   const number = t.match(CARD_NUMBER_RE);
   if (!word && !number) return '';
@@ -1864,6 +2002,7 @@ const buildStateContext = (state) => {
     }),
     `propertyType: ${q.propertyType || 'any'}${searchKind(q) === 'commercial' ? ' (commercial: bedrooms do not apply, never ask about them)' : ''}`,
     `furnishing: ${q.furnishing || 'any'}`,
+    `amenities: ${q.amenities?.length ? `${q.amenities.join(', ')} (search results already include only listings whose features list them; never claim an amenity a listing's features don't list)` : 'none required'}`,
     `leadOfferShown: ${state.leadOfferShown}`,
     `leadOfferDeclined: ${state.leadOfferDeclined}`,
     `leadSaved: ${state.leadSaved}`,
@@ -1908,7 +2047,7 @@ const stripContactAsks = (reply) => dropQuestions(reply, (s) => CONTACT_ASK_RE.t
 const dropKnownQuestions = (reply, q) => dropQuestions(reply, (s) => questionFields(s).some((f) => fieldKnown(q, f)));
 
 const SEARCH_FIELDS = [
-  'purpose', 'location', 'locationFlexible', 'propertyType', 'budget', 'budgetMin', 'budgetFlexible', 'bedrooms', 'bedroomsFlexible', 'furnishing',
+  'purpose', 'location', 'locationFlexible', 'propertyType', 'budget', 'budgetMin', 'budgetFlexible', 'bedrooms', 'bedroomsFlexible', 'furnishing', 'amenities',
 ];
 // "any budget" / "any area" / "any bedroom" count as answers, so those questions are never asked again.
 const budgetKnown = (q) => Boolean(q.budget || q.budgetFlexible);
@@ -1918,7 +2057,7 @@ const fieldKnown = (q, field) => Boolean(q[field] || q[`${field}Flexible`]);
 // Fields that belong to one kind of property search. Moving between residential and commercial drops them, while purpose
 // and area carry over: "2-bedroom villa for sale in Dubai Hills, AED 5M" + "office in Business Bay" -> office for sale in
 // Business Bay, budget asked again (a home budget is not assumed to be an office budget).
-const KIND_FIELDS = ['propertyType', 'bedrooms', 'bedroomsFlexible', 'furnishing', 'budget', 'budgetMin', 'budgetFlexible'];
+const KIND_FIELDS = ['propertyType', 'bedrooms', 'bedroomsFlexible', 'furnishing', 'amenities', 'budget', 'budgetMin', 'budgetFlexible'];
 // True when the message names the other kind of property: a commercial type during a home search, or a home type or a
 // bedroom count during a commercial search.
 const switchesSearchKind = (q, updates) => {
@@ -1933,9 +2072,13 @@ const switchesSearchKind = (q, updates) => {
 //   field not in `updates`      -> kept as it is
 //   new value ("Al Quoz", "1,2,3") -> replaces the old value
 //   <field>Flexible ("any budget")  -> clears that filter (and counts as answered)
+//   amenities / amenitiesDropped    -> added to / removed from the saved amenities; the others are kept
 //   other kind of property         -> see switchesSearchKind
-const applySearchUpdates = (q, updates) => {
+const applySearchUpdates = (q, { amenities = [], amenitiesDropped = [], ...updates }) => {
   if (switchesSearchKind(q, updates)) KIND_FIELDS.forEach((f) => delete q[f]);
+  const keptAmenities = (q.amenities || []).filter((a) => !amenitiesDropped.includes(a));
+  q.amenities = [...new Set([...keptAmenities, ...amenities])];
+  if (!q.amenities.length) delete q.amenities;
   ['location', 'budget', 'bedrooms'].forEach((field) => {
     if (updates[`${field}Flexible`]) delete q[field];
     if (updates[field] !== undefined) delete q[`${field}Flexible`];
@@ -1949,7 +2092,11 @@ const applySearchUpdates = (q, updates) => {
 // The user answered our qualifying question with something that sets no value ("it's fine", "ok"): search with what is known.
 const answeredOurQuestion = (message, lastQuestion, q) =>
   !message.includes('?') && message.trim().split(/\s+/).length <= 6 && questionFields(lastQuestion).some((f) => !fieldKnown(q, f));
-const SEARCH_PROMISE_RE = /\b(i'?ll|i will|let me|i can|i'?m going to)\s+(search|look|find|check|broaden)\b/i;
+const SEARCH_PROMISE_RE =
+  /\b(i'?ll|i will|let me|i can|i'?m going to)\s+(search|look|find|check|broaden|fetch|run|bring up|pull (?:\w+ )?up|show you (?:the |these |those |some |matching )?(?:options|listings|propert|results|units))/i;
+// "Would you like to see them?" / "Shall I pull up these listings?" / "Want me to run the search?": an offer to show
+// results, whoever worded it. "Yes" to it runs the search at once instead of promising it.
+const SEARCH_OFFER_RE = /\b(see|show|view|pull up|fetch|bring up|run the search|search)\b[^?]*\?$/i;
 
 // "I want to buy an apartment in Dubai Hills" during a furnished rental search in Arjan: the purpose is restated with an area
 // or type and conflicts with a stored value, so it starts a new search. A bare "buy" or "Dubai Marina" still refines the current one.
@@ -2046,6 +2193,7 @@ const chat = async ({ sessionId, message, action }) => {
       extracted = extractQualification(message, await getKnownLocations(), {
         fuzzy: !isContactPrompt(lastAssistant) && !recommendIntent,
         lastQuestion,
+        amenities: await getKnownAmenities(),
       });
       // An area question names only the area; any other search detail or an availability question makes it a search.
       const searchDetail = SEARCH_FIELDS.some((f) => f !== 'location' && extracted[f]);
@@ -2064,11 +2212,13 @@ const chat = async ({ sessionId, message, action }) => {
       if (!extracted.furnishing && /\beither\b/i.test(message) && /furnish/i.test(lastAssistant)) extracted.furnishing = 'any';
       // Furnishing is a rental attribute: "furnished apartment" means rent unless a purpose is already known.
       if (extracted.furnishing && extracted.furnishing !== 'any' && !extracted.purpose && !q.purpose) extracted.purpose = 'rent';
-      criteriaChanged = SEARCH_FIELDS.some((f) => extracted[f] && extracted[f] !== q[f]);
+      const amenitiesBefore = String(q.amenities || '');
+      criteriaChanged = SEARCH_FIELDS.some((f) => f !== 'amenities' && extracted[f] && extracted[f] !== q[f]);
       criteriaGiven = !message.includes('?') && SEARCH_FIELDS.some((f) => extracted[f]);
       startsNewSearch = detectNewPropertySearch(extracted, q) || switchesSearchKind(q, extracted);
       if (detectNewPropertySearch(extracted, q)) resetSearchFilters(q);
       applySearchUpdates(q, extracted);
+      if (String(q.amenities || '') !== amenitiesBefore) criteriaChanged = true;
     }
 
     // 2. Property picks, offer acceptance / decline / viewing requests
@@ -2080,9 +2230,13 @@ const chat = async ({ sessionId, message, action }) => {
       !isViewingClick && Boolean(singleShownRef) &&
       ((pendingQuestion === 'propertyDetails' && VIEWING_WORD_RE.test(message)) || (pendingQuestion === 'viewing' && ACCEPT_RE.test(message)));
     let pickedRef = '';
-    if (!isViewingClick && !teamReply && !criteriaChanged && !viewingAnswer) {
-      pickedRef = pickShownProperty(message, shownRefs);
-      if (!pickedRef && pendingQuestion === 'propertyDetails' && (ACCEPT_RE.test(message) || DETAILS_RE.test(message))) pickedRef = singleShownRef;
+    let pickAgain = ''; // "yes" to "Which would you like to explore: A or B?" names no card, so the choice is asked again
+    if (!isViewingClick && !teamReply && !criteriaChanged && !viewingAnswer && shownRefs.length) {
+      const shownCards = await findShownCards(shownRefs);
+      pickedRef = pickShownProperty(message, shownCards);
+      const saysYes = (ACCEPT_RE.test(message) || DETAILS_RE.test(message)) && !message.includes('?');
+      if (!pickedRef && pendingQuestion === 'propertyDetails' && saysYes) pickedRef = singleShownRef;
+      if (!pickedRef && pendingQuestion === 'pickProperty' && saysYes && shownCards.length > 1) pickAgain = pickPropertyQuestion(shownCards);
     }
     const offerPending =
       state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved && OFFER_RE.test(lastAssistant) && pendingQuestion !== 'propertyDetails';
@@ -2167,6 +2321,7 @@ const chat = async ({ sessionId, message, action }) => {
       const groups = found.total ? [{ location: q.location, bedrooms: q.bedrooms, ...found }] : [];
       reply = await describeResults(open, { stage: found.total ? 'exact' : 'none', nearby: [], groups });
       ({ properties, propertyResult, uiActions } = await buildPropertyResult(open, groups));
+      reply = withListingLines(reply, properties);
       enforce = true;
       propertyTurn = true;
     } else if (pickedRef) {
@@ -2178,6 +2333,8 @@ const chat = async ({ sessionId, message, action }) => {
       } else {
         reply = "That listing is no longer available. Would you like me to search again with your current requirements?";
       }
+    } else if (pickAgain) {
+      reply = pickAgain;
     } else if (recommendations.length) {
       reply = describeRecommendations(message, recommendations);
     } else if (
@@ -2294,8 +2451,10 @@ const chat = async ({ sessionId, message, action }) => {
       // The backend, not the model, decides to search: whenever the state is searchable and this message set a criterion
       // or answered our last qualifying question (a choice question is not one: it names fields but asks for a choice).
       const answeredField = !pendingQuestion && answeredOurQuestion(message, lastQuestion, q);
-      // "Yes" to "Would you like to see these 3 listings?": the same search runs again, now showing the cards.
-      const showListings = !criteriaChanged && pendingQuestion === 'showListings' && (ACCEPT_RE.test(message) || SHOW_ME_RE.test(message));
+      // "Yes" to "Would you like to see these 3 listings?" (or any offer to show results, see SEARCH_OFFER_RE): the saved
+      // search runs now and its cards are shown. The confirmation never changes the search state.
+      const resultsOffered = pendingQuestion === 'showListings' || (!pendingQuestion && SEARCH_OFFER_RE.test(lastQuestion));
+      const showListings = !criteriaChanged && resultsOffered && (ACCEPT_RE.test(message) || SHOW_ME_RE.test(message));
       const searchNow =
         !areaQuestion &&
         (cheaper || (canSearch && (criteriaChanged || criteriaGiven || acceptedAlternatives || bedroomAnswer || showListings || answeredField)));
@@ -2317,11 +2476,14 @@ const chat = async ({ sessionId, message, action }) => {
           // Only the price is offered; listings are shown after the user agrees.
           state.budgetFallback = { pending: true, originalMaxPrice: Number(maxPrice), suggestedMinPrice: result.lowestPrice };
         } else {
-          ({ properties, propertyResult, uiActions } = await buildPropertyResult(q, result.groups, maxPrice));
+          // Listings shown without their amenities verified are not filtered by them, so neither is their View All link.
+          const unverified = result.stage === 'amenityUnverified';
+          ({ properties, propertyResult, uiActions } = await buildPropertyResult(unverified ? { ...q, amenities: undefined } : q, result.groups, maxPrice));
           if (cheaper && result.groups.length) q.budget = maxPrice;
-          // Only exact results get the usual next question; fallback replies already end with their own question.
-          enforce = result.stage === 'exact';
+          // Only listing results get the usual next question; fallback replies already end with their own question.
+          enforce = result.stage === 'exact' || unverified;
           propertyTurn = enforce;
+          if (enforce) reply = withListingLines(reply, properties);
         }
         // Areas found by the fallback (nearby or another verified area): one card each, plus a few of their real listings.
         const areaGroups = result.areas ? [...result.areas.nearby, result.areas.other].filter(Boolean) : [];
@@ -2453,7 +2615,7 @@ const chat = async ({ sessionId, message, action }) => {
     // After results: a still-missing search field first; otherwise the next step for what was shown (see resultsNextStep).
     const resultTotal = propertyResult?.total || properties.length;
     if (propertyTurn && resultTotal && !missing) {
-      reply = withQuestion(reply, resultsNextStep(properties.length, resultTotal));
+      reply = withQuestion(reply, resultsNextStep(properties, resultTotal));
     } else if ((criteriaChanged || propertyTurn) && missing) {
       let question = NEXT_QUESTION[missing];
       if (missing === 'purpose' && q.location) question = categoryQuestion(q.location);

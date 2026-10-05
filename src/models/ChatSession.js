@@ -45,6 +45,8 @@ const chatSessionSchema = new mongoose.Schema(
       bedrooms: { type: String, trim: true },
       bedroomsFlexible: { type: Boolean },
       furnishing: { type: String, trim: true },
+      // Amenity words from the listings' feature names ("pool", "balcony"); a listing must list every one to match.
+      amenities: { type: [String], default: undefined },
       timeline: { type: String, trim: true },
     },
     contact: {
