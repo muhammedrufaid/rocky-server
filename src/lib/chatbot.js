@@ -742,6 +742,17 @@ const CHOICE_QUESTIONS = {
   alternatives: { text: ALTERNATIVES_QUESTION },
   // "Would you be open to 3 bedrooms?" after the closest bedroom count was offered (see bedroomQuestion).
   bedroomOffer: { re: /Would you be open to (a studio|\d+ bedrooms?)( in one of these communities)?\?$/ },
+  // Next steps after search results (see resultsNextStep) and after one property's details.
+  showListings: { re: /Would you like to see (these \d+ listings|this listing)\?$/ },
+  pickProperty: { text: 'Which property would you like more details about?' },
+  propertyDetails: { text: 'Would you like more details or to arrange a viewing?' },
+  viewing: { text: 'Would you like to arrange a viewing?' },
+};
+// The next step after a successful search, chosen from what the reply shows: the cards themselves when only a count was
+// given, a pick when several cards are shown, details or a viewing for a single card. Never a search field question.
+const resultsNextStep = (cardsShown, total) => {
+  if (!cardsShown) return total === 1 ? 'Would you like to see this listing?' : `Would you like to see these ${total} listings?`;
+  return cardsShown > 1 ? CHOICE_QUESTIONS.pickProperty.text : CHOICE_QUESTIONS.propertyDetails.text;
 };
 // Asked after listing other areas with matching listings; the reply is read as an area.
 const AREA_PICK_QUESTION = 'Which of these areas would you like to try?';
@@ -1780,6 +1791,49 @@ const resolveViewingInterest = async (action, q) => {
   );
 };
 
+const ORDINAL_INDEX = { first: 0, '1st': 0, second: 1, '2nd': 1, third: 2, '3rd': 2, last: -1 };
+const ORDINAL_ONLY_RE = /^\s*(?:the\s+)?(first|second|third|last|1st|2nd|3rd)(?:\s+(?:one|property|listing|option))?\s*[.!]?\s*$/;
+const ORDINAL_NOUN_RE = /\b(first|second|third|last|1st|2nd|3rd)\s+(?:one|property|listing|option)\b/;
+const CARD_NUMBER_RE = /\b(?:number|no\.?|option|property|listing|#)\s*([1-9])\b/;
+const DETAILS_RE = /\b(details?|more info(rmation)?|tell me more)\b/i;
+const VIEWING_WORD_RE = /\b(view(ing)?|visit|see it)\b/i;
+
+// The shown card the user means: a reference number from the cards, or "the second one", "2nd property", "option 3".
+// Returns that card's reference number, or '' when the message picks none of them.
+const pickShownProperty = (message, refs) => {
+  const byRef = refs.find((ref) => message.toUpperCase().includes(ref.toUpperCase()));
+  if (byRef || refs.length < 2) return byRef || '';
+  const t = message.toLowerCase();
+  const word = t.match(ORDINAL_ONLY_RE) || t.match(ORDINAL_NOUN_RE);
+  const number = t.match(CARD_NUMBER_RE);
+  if (!word && !number) return '';
+  const index = word ? ORDINAL_INDEX[word[1]] : Number(number[1]) - 1;
+  return refs[index < 0 ? refs.length - 1 : index] || '';
+};
+
+// One listing by reference number with its real details, or null when it is gone or incomplete.
+const findListing = async (ref) => {
+  const doc = await Property.findOne({ propertyRefNo: ref }).lean();
+  if (!doc) return null;
+  const card = formatProperty({ ...doc, priceNum: Number(String(doc.price).replace(/,/g, '')) || 0 });
+  if (!isCompleteListing(card)) return null;
+  return { card, size: [doc.propertySize, doc.propertySizeUnit].filter(Boolean).join(' ') };
+};
+
+const listingDetailsText = ({ card, size }) => {
+  const beds = card.bedrooms && !isCommercial(card.type) ? `, ${card.bedrooms === 'Studio' ? 'studio' : bedsText(card.bedrooms)}` : '';
+  return [
+    `Here are the details for ${card.title}:`,
+    [
+      `• Type: ${card.type}${beds}`,
+      `• Price: ${priceText(card.priceAED, card.category, card.rentFrequency)}`,
+      `• Location: ${card.location}`,
+      size ? `• Size: ${size}` : '',
+      `• Reference: ${card.propertyRefNo}`,
+    ].filter(Boolean).join('\n'),
+  ].join('\n\n');
+};
+
 const mapSentences = (reply, keep) =>
   reply
     .split('\n')
@@ -1939,6 +1993,7 @@ const chat = async ({ sessionId, message, action }) => {
     budgetFallback: { ...(session?.budgetFallback || {}) },
     locationSuggestion: session?.locationSuggestion || '',
     pendingQuestion: session?.pendingQuestion || '',
+    shownPropertyRefs: session?.shownPropertyRefs || [],
     currentTopic: session?.currentTopic || '',
     leadOfferShown: Boolean(session?.leadOfferShown),
     leadOfferDeclined: Boolean(session?.leadOfferDeclined),
@@ -2016,17 +2071,32 @@ const chat = async ({ sessionId, message, action }) => {
       applySearchUpdates(q, extracted);
     }
 
-    // 2. Offer acceptance / decline / viewing requests
-    const offerPending = state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved && OFFER_RE.test(lastAssistant);
+    // 2. Property picks, offer acceptance / decline / viewing requests
+    // "the second one" after cards, or "yes"/"details" after "more details or to arrange a viewing?" for a single card.
+    // "viewing" to that question, or "yes" to "Would you like to arrange a viewing?", is a viewing request.
+    const shownRefs = state.shownPropertyRefs;
+    const singleShownRef = shownRefs.length === 1 ? shownRefs[0] : '';
+    const viewingAnswer =
+      !isViewingClick && Boolean(singleShownRef) &&
+      ((pendingQuestion === 'propertyDetails' && VIEWING_WORD_RE.test(message)) || (pendingQuestion === 'viewing' && ACCEPT_RE.test(message)));
+    let pickedRef = '';
+    if (!isViewingClick && !teamReply && !criteriaChanged && !viewingAnswer) {
+      pickedRef = pickShownProperty(message, shownRefs);
+      if (!pickedRef && pendingQuestion === 'propertyDetails' && (ACCEPT_RE.test(message) || DETAILS_RE.test(message))) pickedRef = singleShownRef;
+    }
+    const offerPending =
+      state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved && OFFER_RE.test(lastAssistant) && pendingQuestion !== 'propertyDetails';
     const awaitingContact = !state.leadSaved && isContactPrompt(lastAssistant);
-    const typedViewing = !isViewingClick && VIEWING_RE.test(message);
+    const typedViewing = !isViewingClick && (VIEWING_RE.test(message) || viewingAnswer);
     if (!isViewingClick && !state.leadSaved && (/just (browsing|looking)/i.test(message) || (offerPending && DECLINE_RE.test(message) && !extracted.budgetFlexible))) {
       state.leadOfferDeclined = true;
     }
     const acceptedOffer =
-      !isViewingClick && !state.leadSaved && !awaitingContact && ((offerPending && ACCEPT_RE.test(message)) || AGENT_REQUEST_RE.test(message));
+      !isViewingClick && !state.leadSaved && !awaitingContact &&
+      ((offerPending && ACCEPT_RE.test(message)) || AGENT_REQUEST_RE.test(message) || viewingAnswer);
+    // A viewing request while one property is shown (e.g. after its details) is for that property.
     if (isViewingClick) state.viewingInterest = await resolveViewingInterest(action, q);
-    else if (typedViewing) state.viewingInterest = await resolveViewingInterest({}, q);
+    else if (typedViewing) state.viewingInterest = await resolveViewingInterest({ propertyRefNo: singleShownRef }, q);
 
     // 3. Contact details: merged into the session's contact state; known fields are never cleared
     const contact = state.contact;
@@ -2099,6 +2169,15 @@ const chat = async ({ sessionId, message, action }) => {
       ({ properties, propertyResult, uiActions } = await buildPropertyResult(open, groups));
       enforce = true;
       propertyTurn = true;
+    } else if (pickedRef) {
+      // The chosen card's real details, then the next step towards a viewing.
+      const listing = await findListing(pickedRef);
+      if (listing) {
+        reply = `${listingDetailsText(listing)}\n\n${CHOICE_QUESTIONS.viewing.text}`;
+        properties = [listing.card];
+      } else {
+        reply = "That listing is no longer available. Would you like me to search again with your current requirements?";
+      }
     } else if (recommendations.length) {
       reply = describeRecommendations(message, recommendations);
     } else if (
@@ -2215,8 +2294,11 @@ const chat = async ({ sessionId, message, action }) => {
       // The backend, not the model, decides to search: whenever the state is searchable and this message set a criterion
       // or answered our last qualifying question (a choice question is not one: it names fields but asks for a choice).
       const answeredField = !pendingQuestion && answeredOurQuestion(message, lastQuestion, q);
+      // "Yes" to "Would you like to see these 3 listings?": the same search runs again, now showing the cards.
+      const showListings = !criteriaChanged && pendingQuestion === 'showListings' && (ACCEPT_RE.test(message) || SHOW_ME_RE.test(message));
       const searchNow =
-        !areaQuestion && (cheaper || (canSearch && (criteriaChanged || criteriaGiven || acceptedAlternatives || bedroomAnswer || answeredField)));
+        !areaQuestion &&
+        (cheaper || (canSearch && (criteriaChanged || criteriaGiven || acceptedAlternatives || bedroomAnswer || showListings || answeredField)));
 
       const runSearch = async ({ relaxBedrooms = true } = {}) => {
         let maxPrice = q.budget;
@@ -2310,6 +2392,7 @@ const chat = async ({ sessionId, message, action }) => {
               result = await runTool(call.function.name, args, sessionId);
               if (call.function.name === 'search_properties') {
                 properties = result.slice(0, PREVIEW_LIMIT);
+                propertyTurn = properties.length > 0;
                 rememberSearchCriteria(state.qualification, args);
                 logSearch(sessionId, args, { stage: result.length ? 'exact' : 'none', total: result.length, properties });
               }
@@ -2367,9 +2450,10 @@ const chat = async ({ sessionId, message, action }) => {
     reply = stripContactAsks(reply);
     if (modelReply) reply = dropKnownQuestions(reply, q);
     const missing = ['purpose', 'location', 'budget', 'bedrooms'].find((f) => fieldApplies(q, f) && !fieldKnown(q, f));
-    if (propertyTurn && q.purpose && locationKnown(q) && budgetKnown(q) && !state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved) {
-      reply = withQuestion(reply, OFFER_TEXT);
-      state.leadOfferShown = true;
+    // After results: a still-missing search field first; otherwise the next step for what was shown (see resultsNextStep).
+    const resultTotal = propertyResult?.total || properties.length;
+    if (propertyTurn && resultTotal && !missing) {
+      reply = withQuestion(reply, resultsNextStep(properties.length, resultTotal));
     } else if ((criteriaChanged || propertyTurn) && missing) {
       let question = NEXT_QUESTION[missing];
       if (missing === 'purpose' && q.location) question = categoryQuestion(q.location);
@@ -2382,6 +2466,8 @@ const chat = async ({ sessionId, message, action }) => {
   if (confirmation && !/agent will contact|viewing request/i.test(reply)) reply = `${confirmation}\n\n${reply}`;
   // A reply ending with one of our choice questions waits for the user's answer to it on the next turn.
   if (!state.pendingQuestion) state.pendingQuestion = choiceQuestionIn(reply);
+  // Cards shown in this reply replace the remembered ones; a reply without cards keeps them for "the second one".
+  if (properties.length) state.shownPropertyRefs = properties.map((p) => p.propertyRefNo);
 
   const now = new Date();
   await ChatSession.findOneAndUpdate(
@@ -2394,6 +2480,7 @@ const chat = async ({ sessionId, message, action }) => {
         budgetFallback: state.budgetFallback,
         locationSuggestion: state.locationSuggestion,
         pendingQuestion: state.pendingQuestion,
+        shownPropertyRefs: state.shownPropertyRefs,
         currentTopic: state.currentTopic,
         leadOfferShown: state.leadOfferShown,
         leadOfferDeclined: state.leadOfferDeclined,

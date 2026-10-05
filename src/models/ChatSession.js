@@ -67,6 +67,8 @@ const chatSessionSchema = new mongoose.Schema(
     locationSuggestion: { type: String, trim: true, default: '' },
     // Choice question the assistant just asked (a CHOICE_QUESTIONS key in lib/chatbot.js); cleared on the next reply.
     pendingQuestion: { type: String, trim: true, default: '' },
+    // Reference numbers of the property cards last shown, in card order, so "the second one" can be resolved.
+    shownPropertyRefs: { type: [String], default: [] },
     // Non-property topic the conversation is on (e.g. 'leadership'); cleared when the user returns to a property search.
     currentTopic: { type: String, trim: true, default: '' },
     leadOfferShown: {
