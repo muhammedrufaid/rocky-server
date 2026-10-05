@@ -390,6 +390,7 @@ const FALLBACK_REPLY =
 const SEARCH_FAILED_TEXT = "I'm unable to load live property listings right now. Please try again shortly.";
 const UNVERIFIED_REPLY =
   "I can only share listings and prices from our live inventory. Tell me the area and whether you'd like to buy or rent, and I'll search it for you.";
+const UNVERIFIED_FIGURES_REPLY = "I don't have verified figures for that right now. An agent can confirm the current details for you.";
 
 // Model replies must not contain placeholder listings or AED amounts that appear nowhere in what the model was given
 // (knowledge, conversation, session state, tool results). Returns why a reply was rejected, or ''.
@@ -2107,6 +2108,45 @@ const detectNewPropertySearch = (extracted, q) =>
 // A new search keeps only what the new message states (merged afterwards); old furnishing, bedrooms, budget etc. are dropped.
 const resetSearchFilters = (q) => SEARCH_FIELDS.forEach((f) => delete q[f]);
 
+// Openers that don't change what is asked: "Okay, can a foreigner buy?", "Thanks. What is DLD?"
+const LEADING_ACK_RE = /^\s*(?:(?:ok|okay|yes|yeah|sure|thanks|thank you|great|cool|alright|and|also|but|so|actually|btw|by the way|one more thing|quick question)\b[\s,.!-]*)+/i;
+// A question in its own words: "Can a foreigner ...", "What is DLD?", "I'd like to know if ...".
+const QUESTION_START_RE =
+  /^(can|could|may|might|is|are|am|was|were|do|does|did|will|would|should|shall|must|what|what's|whats|how|why|when|who|which|where|tell me|explain|i'?d like to know|i would like to know|i want to know|i'?m (curious|wondering)|i am (curious|wondering))\b/i;
+// Asks to see or compare listings: "show me", "find", "cheapest", "listings".
+const LISTING_REQUEST_RE = /\b(show|find|search|list|see|view|display|pull up|bring up|looking for|look for|cheapest|most affordable|lowest priced|listings?|units)\b/i;
+// "Show me the listings" / "Okay, show me those again": the saved search runs again.
+const SHOW_SAVED_SEARCH_RE = /^(?:please\s+|can you\s+|could you\s+|let me\s+)?(show|see|display|pull up|bring up|list)\b/i;
+// Details only a property search has. Purpose or type alone ("when buying", "off-plan") is how general questions are phrased.
+const SEARCH_DETAIL_FIELDS = ['location', 'locationFlexible', 'locationSuggestion', 'bedrooms', 'bedroomsFlexible', 'budget', 'budgetMin', 'budgetFlexible', 'amenities', 'amenitiesDropped'];
+
+// The latest message decides the turn. True for a general question ("Can a foreigner buy property in Dubai?", "What fees
+// do I pay when buying?", "What is DLD?"): a question with no listing request and no area, bedrooms, budget or amenity.
+// A follow-up without its own opener ("what about fees?", "and for off-plan?") counts when it names no purpose or type,
+// or right after another general question; never while a refine question waits for its answer, and "what about
+// renting?" during a search refines the search. A general question is answered from the knowledge base; the saved
+// search is kept but nothing runs or changes it this turn.
+const isGeneralQuestion = (message, extracted, { afterGeneralQuestion = false, answeringChoice = false } = {}) => {
+  const text = message.replace(LEADING_ACK_RE, '');
+  const ownOpener = QUESTION_START_RE.test(text) && !SWITCH_AREA_RE.test(text);
+  if (!ownOpener && !message.includes('?')) return false;
+  const asksForListings = [LISTING_REQUEST_RE, AVAILABILITY_RE, NEARBY_RE, CHEAPER_RE, REFINE_RE].some((re) => re.test(message));
+  if (asksForListings || SEARCH_DETAIL_FIELDS.some((f) => extracted[f])) return false;
+  if (ownOpener) return true;
+  if (answeringChoice) return false;
+  return afterGeneralQuestion || !['purpose', 'propertyType', 'furnishing'].some((f) => extracted[f]);
+};
+
+// Model instructions for a general-question turn: answer it, keep the saved search out of the way.
+const generalQuestionContext = (q) =>
+  [
+    'CURRENT TURN: a general question, not a property search. Answer it directly and concisely from KNOWLEDGE; if KNOWLEDGE does not cover it, say an agent can confirm.',
+    '- Do NOT list or describe listings and do NOT ask for buy/rent, area, budget, bedrooms or property type.',
+    q.purpose && locationKnown(q)
+      ? `- The user's saved search (${describeCriteria(q)}) is unchanged. At most one short follow-up offer, e.g. to explain more or to show that search again.`
+      : '- At most one short follow-up offer, e.g. to explain more.',
+  ].join('\n');
+
 const hasViewingInterest = (state) => Object.keys(state.viewingInterest).length > 0;
 
 // Saves (or updates) the session's single lead from the collected contact state; returns the confirmation.
@@ -2184,6 +2224,8 @@ const chat = async ({ sessionId, message, action }) => {
     const recommendIntent = !isViewingClick && !teamReply && RECOMMEND_RE.test(message);
     let areaQuestion = false; // "Is Arjan good for families?": answered from knowledge, no search or category question
     let nearArea = ''; // "best family areas near JVC": the named area is context for the recommendations, not a search
+    let generalQuestion = false; // "Can a foreigner buy property in Dubai?": answered from knowledge, the saved search is untouched
+    let askedArea = ''; // the area an area question is about
 
     // 1. Qualification (skipped for button clicks so a property title can't change the criteria)
     let extracted = {};
@@ -2200,6 +2242,11 @@ const chat = async ({ sessionId, message, action }) => {
       const switchesArea = SWITCH_AREA_RE.test(message) && Boolean(q.purpose || q.propertyType);
       areaQuestion =
         Boolean(extracted.location) && AREA_INFO_RE.test(message) && !searchDetail && !AVAILABILITY_RE.test(message) && !switchesArea;
+      if (areaQuestion) {
+        askedArea = extracted.location;
+        // Asking about an area doesn't move a search that already has one ("What about Dubai Marina?" does).
+        if (q.purpose && q.location) delete extracted.location;
+      }
       if (recommendIntent && !areaQuestion && extracted.location) {
         nearArea = extracted.location;
         delete extracted.location;
@@ -2212,6 +2259,12 @@ const chat = async ({ sessionId, message, action }) => {
       if (!extracted.furnishing && /\beither\b/i.test(message) && /furnish/i.test(lastAssistant)) extracted.furnishing = 'any';
       // Furnishing is a rental attribute: "furnished apartment" means rent unless a purpose is already known.
       if (extracted.furnishing && extracted.furnishing !== 'any' && !extracted.purpose && !q.purpose) extracted.purpose = 'rent';
+      generalQuestion = !recommendIntent && isGeneralQuestion(message, { ...extracted, locationSuggestion }, {
+        afterGeneralQuestion: state.currentTopic === 'general',
+        answeringChoice: Boolean(CHOICE_QUESTIONS[pendingQuestion]?.options) || pendingQuestion === 'alternatives',
+      });
+      // "buy" in "Can a foreigner buy property?" is not a search update: the saved search stays exactly as it was.
+      if (generalQuestion) extracted = {};
       const amenitiesBefore = String(q.amenities || '');
       criteriaChanged = SEARCH_FIELDS.some((f) => f !== 'amenities' && extracted[f] && extracted[f] !== q[f]);
       criteriaGiven = !message.includes('?') && SEARCH_FIELDS.some((f) => extracted[f]);
@@ -2296,6 +2349,7 @@ const chat = async ({ sessionId, message, action }) => {
     // A leadership question opens that topic; it stays open for follow-ups ("yes I need to know") until the user
     // clearly returns to property (search criteria, area recommendations, viewing or contact).
     if (teamReply) state.currentTopic = 'leadership';
+    else if (generalQuestion) state.currentTopic = 'general';
     else if (criteriaGiven || criteriaChanged || locationSuggestion || isViewingClick || typedViewing || wantsAreas || wantsContact) {
       state.currentTopic = '';
     }
@@ -2312,9 +2366,9 @@ const chat = async ({ sessionId, message, action }) => {
       // Close to a known area but not certain: confirm before storing it; other details from the message are kept.
       state.locationSuggestion = locationSuggestion;
       reply = `Did you mean ${locationSuggestion}?`;
-    } else if (fallbackPending && !criteriaChanged && (DECLINE_RE.test(message) || TOO_EXPENSIVE_RE.test(message))) {
+    } else if (fallbackPending && !criteriaChanged && !generalQuestion && (DECLINE_RE.test(message) || TOO_EXPENSIVE_RE.test(message))) {
       reply = FALLBACK_DECLINE_TEXT;
-    } else if (fallbackPending && !criteriaChanged && (ACCEPT_RE.test(message) || SHOW_ME_RE.test(message))) {
+    } else if (fallbackPending && !criteriaChanged && !generalQuestion && (ACCEPT_RE.test(message) || SHOW_ME_RE.test(message))) {
       // Same criteria without the old ceiling, starting from the lowest real price that was offered.
       const open = { ...q, budget: undefined };
       const found = await findProperties({ ...searchArgsFromState(open), min_price: state.budgetFallback.suggestedMinPrice }, PREVIEW_LIMIT);
@@ -2364,11 +2418,11 @@ const chat = async ({ sessionId, message, action }) => {
       } else if (areaQuestion) {
         // Purpose is never inferred: an area without a category gets the category question and no search.
         // Only an area guide may describe an area (the model answers below); without one, real listing counts replace a guess.
-        if (!(await AreaGuide.exists({ isActive: true, title: q.location }))) {
+        if (!(await AreaGuide.exists({ isActive: true, title: askedArea }))) {
           broad = true;
-          const counts = await countByCategory({ location: q.location });
+          const counts = await countByCategory({ location: askedArea });
           const available = COUNT_LINES.filter(([key]) => counts[key] > 0).map(([key, line]) => line(counts[key], 'property'));
-          reply = `I don't have detailed area information for ${q.location} yet${available.length ? `, but it currently has ${joinPhrases(available)}` : ''}. ${categoryQuestion(q.location)}`;
+          reply = `I don't have detailed area information for ${askedArea} yet${available.length ? `, but it currently has ${joinPhrases(available)}` : ''}. ${categoryQuestion(askedArea)}`;
         }
       } else if (!q.purpose && q.location && (criteriaChanged || criteriaGiven)) {
         broad = true;
@@ -2395,11 +2449,11 @@ const chat = async ({ sessionId, message, action }) => {
       // "Yes" to "Would you like to see one of these?": the offered alternatives are looked up again. A single one is
       // switched to and searched; with several, the user picks one.
       const acceptedAlternatives =
-        !criteriaChanged && pendingQuestion === 'alternatives' && (ACCEPT_RE.test(message) || SHOW_ME_RE.test(message));
+        !criteriaChanged && !generalQuestion && pendingQuestion === 'alternatives' && (ACCEPT_RE.test(message) || SHOW_ME_RE.test(message));
       // A short reply to a refine question ("adjust the budget or try another area?") moves to the next step; the
       // unchanged search is not run again. A new criterion ("JVC") or a new question ("What is RERA?") skips this.
       const refineOptions = CHOICE_QUESTIONS[pendingQuestion]?.options;
-      if (refineOptions && !nearbyRequest && !criteriaChanged && !message.includes('?') && !CHEAPER_RE.test(message)) {
+      if (refineOptions && !nearbyRequest && !criteriaChanged && !generalQuestion && !message.includes('?') && !CHEAPER_RE.test(message)) {
         const chosen = refineOptions.filter((field) => REFINE_OPTIONS[field].re.test(message));
         if (chosen.length === 1) {
           broad = true;
@@ -2437,7 +2491,7 @@ const chat = async ({ sessionId, message, action }) => {
       // "any area" when it came from other communities). No: the requested count stays and the fallback continues without
       // other bedroom counts. "3 bedrooms is fine" or "I need 2 bedrooms" set the count through extraction as usual.
       let bedroomAnswer = '';
-      if (!criteriaChanged && pendingQuestion === 'bedroomOffer' && !message.includes('?')) {
+      if (!criteriaChanged && !generalQuestion && pendingQuestion === 'bedroomOffer' && !message.includes('?')) {
         if (ACCEPT_RE.test(message) || SHOW_ME_RE.test(message)) bedroomAnswer = 'accept';
         else if (DECLINE_RE.test(message)) bedroomAnswer = 'decline';
       }
@@ -2446,7 +2500,8 @@ const chat = async ({ sessionId, message, action }) => {
         const offered = offer.stage === 'bedroom' ? offer.groups[0] : offer.bedroomsElsewhere;
         if (offered) applySearchUpdates(q, { bedrooms: offered.bedrooms, ...(q.location && !offered.location ? { locationFlexible: true } : {}) });
       }
-      const canSearch = !broad && CATEGORIES.includes(q.purpose) && hasCriteria;
+      // A general question never searches, even with a complete saved search; that search waits for the user.
+      const canSearch = !broad && !generalQuestion && CATEGORIES.includes(q.purpose) && hasCriteria;
       const cheaper = canSearch && CHEAPER_RE.test(message);
       // The backend, not the model, decides to search: whenever the state is searchable and this message set a criterion
       // or answered our last qualifying question (a choice question is not one: it names fields but asks for a choice).
@@ -2455,11 +2510,14 @@ const chat = async ({ sessionId, message, action }) => {
       // search runs now and its cards are shown. The confirmation never changes the search state.
       const resultsOffered = pendingQuestion === 'showListings' || (!pendingQuestion && SEARCH_OFFER_RE.test(lastQuestion));
       const showListings = !criteriaChanged && resultsOffered && (ACCEPT_RE.test(message) || SHOW_ME_RE.test(message));
+      // "Okay, show me the listings" after another topic: the saved search runs again with every saved filter.
+      const showSavedSearch = SHOW_SAVED_SEARCH_RE.test(message.replace(LEADING_ACK_RE, ''));
       const searchNow =
         !areaQuestion &&
-        (cheaper || (canSearch && (criteriaChanged || criteriaGiven || acceptedAlternatives || bedroomAnswer || showListings || answeredField)));
+        (cheaper || (canSearch && (criteriaChanged || criteriaGiven || acceptedAlternatives || bedroomAnswer || showListings || showSavedSearch || answeredField)));
 
       const runSearch = async ({ relaxBedrooms = true } = {}) => {
+        state.currentTopic = '';
         let maxPrice = q.budget;
         let result;
         if (cheaper) {
@@ -2513,7 +2571,9 @@ const chat = async ({ sessionId, message, action }) => {
           const leaders = (await teamRoster()).map((m) => `- ${m.name} — ${m.designation} (${m.department})`).join('\n');
           knowledge = `${COMPANY} leadership:\n${leaders}\n\n${knowledge}`;
         }
-        const stateContext = onLeadership ? LEADERSHIP_TOPIC_CONTEXT : buildStateContext(state);
+        let stateContext = buildStateContext(state);
+        if (onLeadership) stateContext = LEADERSHIP_TOPIC_CONTEXT;
+        else if (generalQuestion) stateContext = generalQuestionContext(state.qualification);
         const messages = [
           { role: 'system', content: `${RULES}\n\nKNOWLEDGE (use only this for company/area facts):\n${knowledge}` },
           ...history,
@@ -2524,7 +2584,8 @@ const chat = async ({ sessionId, message, action }) => {
         const sources = [knowledge, message, stateContext, ...history.map((m) => m.content)];
 
         for (let round = 0; round <= MAX_TOOL_ROUNDS; round += 1) {
-          let toolChoice = onLeadership || round === MAX_TOOL_ROUNDS ? 'none' : 'auto';
+          // Leadership follow-ups and general questions are answered from knowledge only, never with a listing search.
+          let toolChoice = onLeadership || generalQuestion || round === MAX_TOOL_ROUNDS ? 'none' : 'auto';
           if (round === 0 && forceRefineSearch) toolChoice = { type: 'function', function: { name: 'search_properties' } };
 
           const completion = await getOpenAI().chat.completions.create({
@@ -2579,7 +2640,7 @@ const chat = async ({ sessionId, message, action }) => {
           if (!onLeadership && canSearch) {
             await runSearch();
           } else {
-            reply = UNVERIFIED_REPLY;
+            reply = generalQuestion ? UNVERIFIED_FIGURES_REPLY : UNVERIFIED_REPLY;
             enforce = false;
           }
         }
