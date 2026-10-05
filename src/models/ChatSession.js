@@ -67,7 +67,8 @@ const chatSessionSchema = new mongoose.Schema(
     },
     // Close location match waiting for the user's "yes" ("Did you mean Jebel Ali?"); cleared on the next reply.
     locationSuggestion: { type: String, trim: true, default: '' },
-    // Choice question the assistant just asked (a CHOICE_QUESTIONS key in lib/chatbot.js); cleared on the next reply.
+    // Question the assistant just asked (a CHOICE_QUESTIONS key in lib/chatbot.js, or KNOWLEDGE_FOLLOW_UP for the offer
+    // that ends a knowledge answer); cleared on the next reply.
     pendingQuestion: { type: String, trim: true, default: '' },
     // Reference numbers of the property cards last shown, in card order, so "the second one" can be resolved.
     shownPropertyRefs: { type: [String], default: [] },

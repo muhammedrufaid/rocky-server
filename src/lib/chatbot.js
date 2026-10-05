@@ -2166,6 +2166,8 @@ const LISTING_REQUEST_RE = /\b(show|find|search|list|see|view|display|pull up|br
 const SHOW_SAVED_SEARCH_RE = /^(?:please\s+|can you\s+|could you\s+|let me\s+)?(show|see|display|pull up|bring up|list)\b/i;
 // Details only a property search has. Purpose or type alone ("when buying", "off-plan") is how general questions are phrased.
 const SEARCH_DETAIL_FIELDS = ['location', 'locationFlexible', 'locationSuggestion', 'bedrooms', 'bedroomsFlexible', 'budget', 'budgetMin', 'budgetFlexible', 'amenities', 'amenitiesDropped'];
+// Asks for listings in any wording: "show me", "is anything available", "nearby areas", "cheaper", "adjust the budget".
+const asksForListings = (message) => [LISTING_REQUEST_RE, AVAILABILITY_RE, NEARBY_RE, CHEAPER_RE, REFINE_RE].some((re) => re.test(message));
 
 // The latest message decides the turn. True for a general question ("Can a foreigner buy property in Dubai?", "What fees
 // do I pay when buying?", "What is DLD?"): a question with no listing request and no area, bedrooms, budget or amenity.
@@ -2177,22 +2179,38 @@ const isGeneralQuestion = (message, extracted, { afterGeneralQuestion = false, a
   const text = message.replace(LEADING_ACK_RE, '');
   const ownOpener = QUESTION_START_RE.test(text) && !SWITCH_AREA_RE.test(text);
   if (!ownOpener && !message.includes('?')) return false;
-  const asksForListings = [LISTING_REQUEST_RE, AVAILABILITY_RE, NEARBY_RE, CHEAPER_RE, REFINE_RE].some((re) => re.test(message));
-  if (asksForListings || SEARCH_DETAIL_FIELDS.some((f) => extracted[f])) return false;
+  if (asksForListings(message) || SEARCH_DETAIL_FIELDS.some((f) => extracted[f])) return false;
   if (ownOpener) return true;
   if (answeringChoice) return false;
   return afterGeneralQuestion || !['purpose', 'propertyType', 'furnishing'].some((f) => extracted[f]);
 };
 
-// Model instructions for a general-question turn: answer it, keep the saved search out of the way.
-const generalQuestionContext = (q) =>
+// pendingQuestion value for the offer that ends a knowledge answer ("Would you like a brief of how DLD fees work?").
+// That offer owns the next short reply, whatever property search is saved.
+const KNOWLEDGE_FOLLOW_UP = 'knowledgeFollowUp';
+const FOLLOW_UP_DECLINE_TEXT = "No problem. Let me know if there's anything else I can help with.";
+// The answer to a knowledge offer: 'accept' ("yes", "sure", "go ahead"), 'decline' ("no", "not now") or '' when the
+// message is a request of its own (a question, a listing request or any search detail), which replaces the offer.
+const followUpAnswer = (message, extracted) => {
+  if (message.includes('?') || asksForListings(message) || SEARCH_FIELDS.some((f) => extracted[f]) || extracted.locationSuggestion) return '';
+  if (ACCEPT_RE.test(message)) return 'accept';
+  if (DECLINE_RE.test(message)) return 'decline';
+  return '';
+};
+
+// Model instructions for a general-question turn: answer it, keep the saved search out of the way. `acceptedOffer` is
+// the knowledge offer the user just said yes to.
+const generalQuestionContext = (q, acceptedOffer = '') =>
   [
     'CURRENT TURN: a general question, not a property search. Answer it directly and concisely from KNOWLEDGE; if KNOWLEDGE does not cover it, say an agent can confirm.',
+    acceptedOffer &&
+      `- The user said yes to your offer "${acceptedOffer}": give that explanation now without repeating your previous answer. If KNOWLEDGE covers only part of it, explain that part and say the rest isn't available here.`,
     '- Do NOT list or describe listings and do NOT ask for buy/rent, area, budget, bedrooms or property type.',
-    q.purpose && locationKnown(q)
-      ? `- The user's saved search (${describeCriteria(q)}) is unchanged. At most one short follow-up offer, e.g. to explain more or to show that search again.`
-      : '- At most one short follow-up offer, e.g. to explain more.',
-  ].join('\n');
+    q.purpose && locationKnown(q) && '- The saved property search stays paused until the user asks for listings: do not mention or offer it.',
+    '- At most one short follow-up offer to explain a related point from KNOWLEDGE.',
+  ]
+    .filter(Boolean)
+    .join('\n');
 
 const hasViewingInterest = (state) => Object.keys(state.viewingInterest).length > 0;
 
@@ -2250,6 +2268,7 @@ const chat = async ({ sessionId, message, action }) => {
   let enforce = false; // true when the reply still needs lead/question guardrails
   let propertyTurn = false; // the soft agent offer only follows a property search
   let modelReply = false; // the reply was worded by the model, so repeated qualification questions are removed
+  let knowledgeAnswer = false; // the model answered a general question from knowledge (its closing offer becomes pending)
   try {
     const q = state.qualification;
     const isViewingClick = action?.type === 'book_viewing';
@@ -2274,6 +2293,7 @@ const chat = async ({ sessionId, message, action }) => {
     let nearArea = ''; // "best family areas near JVC": the named area is context for the recommendations, not a search
     let generalQuestion = false; // "Can a foreigner buy property in Dubai?": answered from knowledge, the saved search is untouched
     let askedArea = ''; // the area an area question is about
+    let followUp = ''; // 'accept' / 'decline' when the message answers the knowledge offer that ended the last reply
 
     // 1. Qualification (skipped for button clicks so a property title can't change the criteria)
     let extracted = {};
@@ -2307,10 +2327,14 @@ const chat = async ({ sessionId, message, action }) => {
       if (!extracted.furnishing && /\beither\b/i.test(message) && /furnish/i.test(lastAssistant)) extracted.furnishing = 'any';
       // Furnishing is a rental attribute: "furnished apartment" means rent unless a purpose is already known.
       if (extracted.furnishing && extracted.furnishing !== 'any' && !extracted.purpose && !q.purpose) extracted.purpose = 'rent';
-      generalQuestion = !recommendIntent && isGeneralQuestion(message, { ...extracted, locationSuggestion }, {
+      // The latest question decides what a short reply means: "yes" after a knowledge offer continues that topic, even
+      // with a complete saved search. Right after a knowledge answer without an offer, "yes" / "no" stay on that topic too.
+      const afterKnowledgeAnswer = pendingQuestion === KNOWLEDGE_FOLLOW_UP || (!pendingQuestion && state.currentTopic === 'general');
+      if (afterKnowledgeAnswer && !recommendIntent) followUp = followUpAnswer(message, { ...extracted, locationSuggestion });
+      generalQuestion = followUp === 'accept' || (!recommendIntent && isGeneralQuestion(message, { ...extracted, locationSuggestion }, {
         afterGeneralQuestion: state.currentTopic === 'general',
         answeringChoice: Boolean(CHOICE_QUESTIONS[pendingQuestion]?.options) || pendingQuestion === 'alternatives',
-      });
+      }));
       // "buy" in "Can a foreigner buy property?" is not a search update: the saved search stays exactly as it was.
       if (generalQuestion) extracted = {};
       const amenitiesBefore = String(q.amenities || '');
@@ -2410,6 +2434,9 @@ const chat = async ({ sessionId, message, action }) => {
       reply = contactReply;
     } else if (savedName && !criteriaChanged) {
       // confirmation already set above
+    } else if (followUp === 'decline') {
+      // "No" to a knowledge offer only closes that offer; the saved search stays paused.
+      reply = FOLLOW_UP_DECLINE_TEXT;
     } else if (locationSuggestion) {
       // Close to a known area but not certain: confirm before storing it; other details from the message are kept.
       state.locationSuggestion = locationSuggestion;
@@ -2611,7 +2638,13 @@ const chat = async ({ sessionId, message, action }) => {
         // A leadership follow-up is answered on that topic; the stored property state must not steer it back to a search.
         const onLeadership = state.currentTopic === 'leadership';
         const forceRefineSearch = !onLeadership && canSearch && REFINE_RE.test(message);
-        const hits = await retrieve(message, 4);
+        // "Yes" after a knowledge answer: knowledge is looked up for the user's last own question plus the offer, if the
+        // answer made one ("What is DLD?" + "Would you like a brief of how DLD fees work?").
+        const acceptedOffer = followUp === 'accept' && pendingQuestion === KNOWLEDGE_FOLLOW_UP ? lastQuestion.split('\n').pop().trim() : '';
+        const lastOwnQuestion = followUp === 'accept'
+          ? [...pastMessages].reverse().find((m) => m.role === 'user' && !(ACCEPT_RE.test(m.content) && !m.content.includes('?')))?.content || ''
+          : '';
+        const hits = await retrieve(followUp === 'accept' ? `${lastOwnQuestion}\n${acceptedOffer}`.trim() : message, 4);
         let knowledge = hits.length
           ? hits.map((h, i) => `[${i + 1}] (${h.source}) ${h.title}\n${h.text}`).join('\n\n')
           : 'No relevant knowledge found.';
@@ -2621,7 +2654,7 @@ const chat = async ({ sessionId, message, action }) => {
         }
         let stateContext = buildStateContext(state);
         if (onLeadership) stateContext = LEADERSHIP_TOPIC_CONTEXT;
-        else if (generalQuestion) stateContext = generalQuestionContext(state.qualification);
+        else if (generalQuestion) stateContext = generalQuestionContext(state.qualification, acceptedOffer);
         const messages = [
           { role: 'system', content: `${RULES}\n\nKNOWLEDGE (use only this for company/area facts):\n${knowledge}` },
           ...history,
@@ -2698,6 +2731,7 @@ const chat = async ({ sessionId, message, action }) => {
           await runSearch();
         }
         if (modelReply && !onLeadership && !properties.length) links = await relatedLinks(hits, askedArea);
+        knowledgeAnswer = modelReply && generalQuestion;
       }
     }
   } catch (error) {
@@ -2712,6 +2746,7 @@ const chat = async ({ sessionId, message, action }) => {
     links = [];
     alternatives = null;
     enforce = false;
+    knowledgeAnswer = false;
   }
 
   // 7. Guardrails over wording: the offer and next question come from state, never from the model.
@@ -2722,6 +2757,8 @@ const chat = async ({ sessionId, message, action }) => {
     });
     reply = stripContactAsks(reply);
     if (modelReply) reply = dropKnownQuestions(reply, q);
+    // A knowledge answer never turns into qualification: "buy, rent or off-plan?" is removed from it.
+    if (knowledgeAnswer) reply = dropQuestions(reply, (s) => questionFields(s).includes('purpose'));
     const missing = ['purpose', 'location', 'budget', 'bedrooms'].find((f) => fieldApplies(q, f) && !fieldKnown(q, f));
     // After results: a still-missing search field first; otherwise the next step for what was shown (see resultsNextStep).
     const resultTotal = propertyResult?.total || properties.length;
@@ -2744,6 +2781,8 @@ const chat = async ({ sessionId, message, action }) => {
   }
   // A reply ending with one of our choice questions waits for the user's answer to it on the next turn.
   if (!state.pendingQuestion) state.pendingQuestion = choiceQuestionIn(reply);
+  // A knowledge answer ending with an offer waits for "yes" / "no" to that offer (see followUpAnswer).
+  if (!state.pendingQuestion && knowledgeAnswer && reply.endsWith('?')) state.pendingQuestion = KNOWLEDGE_FOLLOW_UP;
   // Cards shown in this reply replace the remembered ones; a reply without cards keeps them for "the second one".
   if (properties.length) state.shownPropertyRefs = properties.map((p) => p.propertyRefNo);
 
