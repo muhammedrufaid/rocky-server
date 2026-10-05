@@ -275,6 +275,53 @@ const retrieve = async (query, k = 4) => {
   return results;
 };
 
+// ---------- Related links ----------
+
+// Knowledge sources with their own website page; FAQs and team entries have none.
+const LINKED_SOURCES = {
+  blog: { model: Blog, route: '/blogs', contentType: 'blog', label: (title) => title },
+  area: { model: AreaGuide, route: '/area-guides', contentType: 'area_guide', label: (title) => `${title} area guide` },
+  service: { model: Service, route: '/services', contentType: 'service', label: (title) => `${title} service` },
+};
+// Pages a question is about score 0.55+; pages that only share a word or two with it score lower.
+const MIN_LINK_SCORE = 0.55;
+// A page far below the best knowledge match is a side topic, not what the answer is about.
+const LINK_SCORE_MARGIN = 0.1;
+const MAX_RELATED_LINKS = 2;
+
+// A page's stored path, else its route from the slug; relative, so links stay on the current origin.
+const pagePath = (doc, route) => (doc.path?.startsWith('/') ? doc.path : `${route}/${doc.slug}`);
+
+// Website pages behind the knowledge an answer was given, most relevant first. `askedArea` is the area an area
+// question named: its own guide counts even when the wording scores low ("Tell me about JVC").
+const relatedLinks = async (hits, askedArea = '') => {
+  const best = hits[0]?.score || 0;
+  const picked = [];
+  hits.forEach((h) => {
+    const relevant = (h.score >= MIN_LINK_SCORE && best - h.score <= LINK_SCORE_MARGIN) || (h.source === 'area' && h.title === askedArea);
+    if (relevant && LINKED_SOURCES[h.source] && h.refId && !picked.some((p) => String(p.refId) === String(h.refId))) picked.push(h);
+  });
+
+  const links = [];
+  for (const h of picked) {
+    const { model, route, contentType, label } = LINKED_SOURCES[h.source];
+    // Only pages that are still live: content unpublished since the last reindex is never linked.
+    const doc = await model.findOne({ _id: h.refId, isActive: true }).select('title slug path').lean();
+    if (doc) links.push({ type: 'related_link', label: label(doc.title), url: pagePath(doc, route), contentType });
+    if (links.length === MAX_RELATED_LINKS) break;
+  }
+  return links;
+};
+
+// Link lines go after the answer and before its closing question, so the reply still ends with that question.
+// A link the reply already names is not repeated.
+const withLinkLines = (reply, links) => {
+  const lines = links.filter((l) => !reply.includes(l.url)).map((l) => `Read more: ${l.label} (${l.url})`);
+  if (!lines.length) return reply;
+  const [, answer = reply, question = ''] = reply.match(/^([\s\S]*?)\s*([^.!?\n]*\w[^.!?\n]*\?)$/) || [];
+  return [answer, lines.join('\n'), question.trim()].filter(Boolean).join('\n\n');
+};
+
 // ---------- Team ----------
 
 const COMPANY = 'Rocky Real Estate';
@@ -1897,7 +1944,7 @@ const recommendAreas = async (message, q, near = '') => {
       summary,
       reason: guide ? pickReason(guide, message, summary) : '',
       ...availability,
-      areaGuideUrl: guide ? guide.path || `/area-guides/${guide.slug}` : undefined,
+      areaGuideUrl: guide ? pagePath(guide, LINKED_SOURCES.area.route) : undefined,
     });
     if (recommendations.length === MAX_RECOMMENDATIONS) break;
   }
@@ -2193,6 +2240,7 @@ const chat = async ({ sessionId, message, action }) => {
   let propertyCounts = null;
   let recommendations = [];
   let uiActions = [];
+  let links = []; // website pages behind a knowledge answer (see relatedLinks)
   let alternatives = null;
   let savedName = '';
   let confirmation = '';
@@ -2649,6 +2697,7 @@ const chat = async ({ sessionId, message, action }) => {
           modelReply = false;
           await runSearch();
         }
+        if (modelReply && !onLeadership && !properties.length) links = await relatedLinks(hits, askedArea);
       }
     }
   } catch (error) {
@@ -2660,6 +2709,7 @@ const chat = async ({ sessionId, message, action }) => {
     propertyCounts = null;
     recommendations = [];
     uiActions = [];
+    links = [];
     alternatives = null;
     enforce = false;
   }
@@ -2687,6 +2737,11 @@ const chat = async ({ sessionId, message, action }) => {
     }
   }
   if (confirmation && !/agent will contact|viewing request/i.test(reply)) reply = `${confirmation}\n\n${reply}`;
+  // The chat window shows reply text only, so the links are written into it as well as sent as actions.
+  if (links.length) {
+    reply = withLinkLines(reply, links);
+    uiActions = [...uiActions, ...links];
+  }
   // A reply ending with one of our choice questions waits for the user's answer to it on the next turn.
   if (!state.pendingQuestion) state.pendingQuestion = choiceQuestionIn(reply);
   // Cards shown in this reply replace the remembered ones; a reply without cards keeps them for "the second one".
