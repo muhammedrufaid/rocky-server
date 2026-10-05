@@ -675,13 +675,35 @@ const NAME_STOPWORDS = new Set([
   'ok', 'fine', 'good', 'call', 'me', 'contact', 'reach', 'my', 'number', 'is', 'on', 'at', 'phone', 'mobile', 'whatsapp',
 ]);
 const WORD_NUMBERS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+// Property types as stored in Property.propertyType. Offices, shops, retail units and showrooms are offered as
+// alternatives to each other; a labour camp is only ever matched exactly.
+const RESIDENTIAL_TYPES = ['Apartment', 'Villa', 'Townhouse'];
+const WORKSPACE_TYPES = ['Office', 'Shop', 'Retail', 'Showroom'];
+const COMMERCIAL_TYPES = [...WORKSPACE_TYPES, 'Labour Camp'];
+const isCommercial = (propertyType) => COMMERCIAL_TYPES.includes(propertyType);
+const typeKind = (propertyType) => (isCommercial(propertyType) ? 'commercial' : 'residential');
+// Which kind of property the saved search is for: 'commercial' (a commercial type), 'residential' (a home type or a
+// bedroom requirement) or '' (not known yet).
+const searchKind = (q) => {
+  if (q.propertyType) return typeKind(q.propertyType);
+  return q.bedrooms || q.bedroomsFlexible ? 'residential' : '';
+};
+// Bedrooms don't apply to commercial property, so they are never asked or listed as missing for it.
+const fieldApplies = (q, field) => field !== 'bedrooms' || searchKind(q) !== 'commercial';
+// A commercial word right after one of these is an amenity or the company's own office ("near shops", "your office",
+// "head office"), not the property the user wants.
+const NOT_WANTED_BEFORE = "(?<!\\b(?:near|nearby|to|and|by|your|our|the|head|main|rocky'?s) )";
+const commercialTypeRe = (words) => new RegExp(`${NOT_WANTED_BEFORE}\\b(?:${words})\\b`);
+// Residential types first, so "apartment near shops" stays an apartment search.
 const PROPERTY_TYPES = [
   [/\b(apartments?|flats?)\b/, 'Apartment'],
   [/\bvillas?\b/, 'Villa'],
   [/\btown ?houses?\b/, 'Townhouse'],
-  // Only with property context, so "where is your office?" is not a search.
-  [/\boffice (space|unit)s?\b|\boffices\b|\b(rent|buy|lease)\w* an? office\b/, 'Office'],
-  [/\b(shop|retail) (space|unit)s?\b|\b(rent|buy|lease)\w* an? shop\b/, 'Shop'],
+  [commercialTypeRe('offices?(?! (?:hours?|address|location|timings?))'), 'Office'],
+  [commercialTypeRe('show ?rooms?'), 'Showroom'],
+  [commercialTypeRe('retail'), 'Retail'],
+  [commercialTypeRe('shops?'), 'Shop'],
+  [commercialTypeRe('labou?r camps?'), 'Labour Camp'],
 ];
 // Area recommendation requests ("best areas for families", "areas near metro", "where should a family live?"). Checked
 // before location matching, so these sentences are never typo-corrected into an area name.
@@ -792,6 +814,7 @@ const NOT_PLACE_WORDS = new Set([
   'a', 'an', 'my', 'our', 'your', 'this', 'that', 'for', 'with', 'and', 'or', 'me', 'us', 'family', 'families',
   'rent', 'rental', 'rentals', 'renting', 'buy', 'buying', 'sale',
   'apartment', 'apartments', 'flat', 'flats', 'villa', 'villas', 'townhouse', 'townhouses', 'studio', 'bedroom', 'bedrooms',
+  'office', 'offices', 'shop', 'shops', 'retail', 'showroom', 'showrooms', 'labour', 'labor', 'camp', 'camps', 'commercial',
   'property', 'properties', 'listing', 'listings', 'budget', 'under', 'below', 'furnished', 'unfurnished', 'yes', 'no', 'ok',
   'okay', 'sure', 'thanks', 'please', 'hello', 'hi', 'offplan', 'off', 'plan', 'next', 'month', 'year',
   // Recommendation wording ("best areas for families") is never read as a misspelled area.
@@ -883,6 +906,9 @@ const placeFromAreaAnswer = (text) => {
   return place ? place.replace(/\b[a-z]/g, (c) => c.toUpperCase()) : '';
 };
 
+// The words after "in", up to a price/purpose word or the end of the sentence: "showroom in Al Quoz under 3M" -> "Al Quoz".
+const NAMED_PLACE_RE = /\bin ([a-z][a-z' -]*?)\s*(?:\b(?:under|below|for|with|around|within|up to|budget|max)\b|[.,!?]|$)/i;
+
 const bedroomValue = (word) => (word === 'studio' ? '0' : String(WORD_NUMBERS[word] || word));
 
 // "any bedroom(s)", "bedrooms don't matter", "no bedroom preference": clears the bedroom filter.
@@ -968,6 +994,13 @@ const extractQualification = (text, locations, { fuzzy = true, lastQuestion = ''
 
   const type = PROPERTY_TYPES.find(([re]) => re.test(t));
   if (type) found.propertyType = type[1];
+  // "shops for rent in Deira": a place without listings or an area guide is still the area the user asked for, so the
+  // search reports no results there instead of silently searching all of Dubai.
+  if (found.propertyType && !found.location && !found.locationFlexible && !found.locationSuggestion) {
+    const named = text.match(NAMED_PLACE_RE);
+    const place = named ? placeFromAreaAnswer(named[1]) : '';
+    if (place && place.toLowerCase() !== 'dubai') found.location = place;
+  }
 
   // 'any' clears the furnishing requirement ("furnished doesn't matter", "any furnishing").
   if (/\bany furnishing\b|\bfurnish\w* (doesn'?t|does not|won'?t) matter\b|\bfurnished or (not|unfurnished)\b|\beither furnished or\b/.test(t)) found.furnishing = 'any';
@@ -1132,7 +1165,8 @@ const bedsLabel = (bedrooms, words = false) => {
 // "a 4-bedroom apartment for rent in Dubai Marina within AED 250,000/year" or, with a count, "two-bedroom apartments for rent ..."
 const describeCriteria = (q, { location = q.location, bedrooms = q.bedrooms, maxPrice = q.budget, plural = false, priceWord = 'under' } = {}) => {
   let noun = q.propertyType ? q.propertyType.toLowerCase() : q.purpose === 'rent' ? 'rental' : 'property';
-  if (plural) noun = { property: 'properties', retail: 'retail units' }[noun] || `${noun}s`;
+  if (noun === 'retail') noun = 'retail unit';
+  if (plural) noun = noun === 'property' ? 'properties' : `${noun}s`;
   const forWhat = q.purpose === 'rent' ? ' for rent' : q.purpose === 'buy' ? ' for sale' : '';
   const suffix = noun.startsWith('rental') ? '' : forWhat;
   // location '' means the caller wants no area wording at all.
@@ -1319,8 +1353,6 @@ const describeNearby = async (q) => {
   return { reply: `${alternativeAreasText(q, areas)}\n\n${question}`, cards: groups.map((g) => areaCard(q, g)) };
 };
 
-const RESIDENTIAL_TYPES = ['Apartment', 'Villa', 'Townhouse'];
-const COMMERCIAL_TYPES = ['Office', 'Shop', 'Retail', 'Showroom'];
 const MAX_SAME_AREA_ALTERNATIVES = 5;
 
 // Same area, one requirement changed at a time (bedrooms, property type, furnishing or category), with real counts and
@@ -1330,7 +1362,8 @@ const sameAreaAlternatives = async (q, { relaxBedrooms = true } = {}) => {
   const base = { ...q, budget: undefined };
   const options = (relaxBedrooms ? bedroomAlternatives(q.bedrooms) : []).map((bedrooms) => ({ difference: 'bedrooms', changes: { bedrooms } }));
   if (q.propertyType) {
-    const family = COMMERCIAL_TYPES.includes(q.propertyType) ? COMMERCIAL_TYPES : RESIDENTIAL_TYPES;
+    // Only related types: homes for homes, workspaces for workspaces (never a home for an office, or the reverse).
+    const family = [RESIDENTIAL_TYPES, WORKSPACE_TYPES].find((types) => types.includes(q.propertyType)) || [];
     family.filter((t) => t !== q.propertyType).forEach((propertyType) => options.push({ difference: 'propertyType', changes: { propertyType } }));
   }
   // Other furnishing levels are only reported separately; they never count as matches.
@@ -1465,13 +1498,14 @@ const CATEGORY_WORDS = { rent: 'for rent', buy: 'for sale', 'off-plan': 'off-pla
 const AREA_SCAN_LIMIT = 500;
 
 // What a location has right now in the given categories, grouped by property type with real counts and lowest prices:
-// "• Apartments for sale: 1 listing from AED 1,350,000".
-const areaInventoryLines = async (location, purposes) => {
+// "• Apartments for sale: 1 listing from AED 1,350,000". With a known search kind, only that kind is listed, so an
+// office search never gets apartments and a home search never gets offices.
+const areaInventoryLines = async (location, purposes, kind = '') => {
   const lines = [];
   for (const purpose of purposes) {
     const { items } = await findProperties({ purpose, location }, AREA_SCAN_LIMIT);
     const byType = new Map();
-    items.forEach((p) => byType.set(p.type, [...(byType.get(p.type) || []), p]));
+    items.filter((p) => !kind || typeKind(p.type) === kind).forEach((p) => byType.set(p.type, [...(byType.get(p.type) || []), p]));
     byType.forEach((listings, type) => {
       const label = describeCriteria({ purpose, propertyType: type }, { plural: true, location: '', maxPrice: null });
       lines.push(`• ${capitalize(label)}: ${listingCount(listings.length)} from ${priceText(listings[0].priceAED, purpose, listings[0].rentFrequency)}`);
@@ -1506,7 +1540,7 @@ const describeAvailability = async (q) => {
     const lines = found.map((c) => `• ${listingCount(c.total)} ${CATEGORY_WORDS[c.purpose]}, from ${priceText(c.startingPrice, c.purpose, c.items[0].rentFrequency)}`);
     return { reply: [`Yes, we have ${wanted}:`, lines.join('\n'), categoryQuestion(q.location)].join('\n\n'), properties: found.map((c) => c.items[0]) };
   }
-  const [inArea, nearby] = await Promise.all([areaInventoryLines(q.location, CATEGORIES), nearbyMatches(q, CATEGORIES)]);
+  const [inArea, nearby] = await Promise.all([areaInventoryLines(q.location, CATEGORIES, searchKind(q)), nearbyMatches(q, CATEGORIES)]);
   const reply = [
     `I couldn't find any ${wanted} right now.`,
     inArea.length ? `Other properties available in ${q.location}:\n${inArea.join('\n')}` : '',
@@ -1556,7 +1590,7 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
   const otherFurnishing = sameArea.filter((a) => a.difference === 'furnishing');
   const lines = (alts) => alts.map((a) => `• ${alternativeLine(q, a)}`).join('\n');
   // Without a one-change alternative, the area's real inventory in this category is shown instead.
-  const inArea = matching.length ? [] : await areaInventoryLines(q.location, [q.purpose]);
+  const inArea = matching.length ? [] : await areaInventoryLines(q.location, [q.purpose], searchKind(q));
   const anyAlternative = matching.length || areas.nearby.length || areas.other;
   const elsewhere = result.bedroomsElsewhere;
   let question = anyAlternative ? ALTERNATIVES_QUESTION : refineQuestion(q);
@@ -1766,14 +1800,15 @@ const buildStateContext = (state) => {
   const c = state.contact;
   const contactClosed = state.leadSaved || state.leadOfferDeclined;
   const nextContactField = state.leadSaved ? 'none' : !c.name ? 'name' : !c.phone ? 'phone' : 'none';
+  const fields = QUALIFICATION_FIELDS.filter((field) => fieldApplies(q, field));
   const lines = [
-    ...QUALIFICATION_FIELDS.map((field) => {
+    ...fields.map((field) => {
       if (field === 'budget' && !q.budget && q.budgetFlexible) return 'budget: any (no limit, never ask)';
       if (field === 'location' && !q.location && q.locationFlexible) return 'location: anywhere in Dubai (no preference, never ask)';
       if (field === 'bedrooms' && !q.bedrooms && q.bedroomsFlexible) return 'bedrooms: any (no preference, never ask)';
       return `${field}: ${q[field] || 'unknown'}`;
     }),
-    `propertyType: ${q.propertyType || 'any'}`,
+    `propertyType: ${q.propertyType || 'any'}${searchKind(q) === 'commercial' ? ' (commercial: bedrooms do not apply, never ask about them)' : ''}`,
     `furnishing: ${q.furnishing || 'any'}`,
     `leadOfferShown: ${state.leadOfferShown}`,
     `leadOfferDeclined: ${state.leadOfferDeclined}`,
@@ -1787,7 +1822,7 @@ const buildStateContext = (state) => {
       'If search_properties results are provided in this turn, summarize only those. Without them, do not mention any listing or price. Only call search_properties again if the user asked for something different.'
     );
   }
-  const missing = QUALIFICATION_FIELDS.find((field) => !fieldKnown(q, field));
+  const missing = fields.find((field) => !fieldKnown(q, field));
   steps.push(
     missing
       ? `Ask at most ONE question; if it is a qualifying question ask ONLY ${QUESTION_FOR[missing]}. Never ask about known fields.`
@@ -1826,11 +1861,27 @@ const budgetKnown = (q) => Boolean(q.budget || q.budgetFlexible);
 const locationKnown = (q) => Boolean(q.location || q.locationFlexible);
 const fieldKnown = (q, field) => Boolean(q[field] || q[`${field}Flexible`]);
 
+// Fields that belong to one kind of property search. Moving between residential and commercial drops them, while purpose
+// and area carry over: "2-bedroom villa for sale in Dubai Hills, AED 5M" + "office in Business Bay" -> office for sale in
+// Business Bay, budget asked again (a home budget is not assumed to be an office budget).
+const KIND_FIELDS = ['propertyType', 'bedrooms', 'bedroomsFlexible', 'furnishing', 'budget', 'budgetMin', 'budgetFlexible'];
+// True when the message names the other kind of property: a commercial type during a home search, or a home type or a
+// bedroom count during a commercial search.
+const switchesSearchKind = (q, updates) => {
+  const current = searchKind(q);
+  let next = '';
+  if (updates.propertyType) next = typeKind(updates.propertyType);
+  else if (updates.bedrooms !== undefined) next = 'residential';
+  return Boolean(current && next && current !== next);
+};
+
 // The one place where a message's search updates change the session state:
 //   field not in `updates`      -> kept as it is
 //   new value ("Al Quoz", "1,2,3") -> replaces the old value
 //   <field>Flexible ("any budget")  -> clears that filter (and counts as answered)
+//   other kind of property         -> see switchesSearchKind
 const applySearchUpdates = (q, updates) => {
+  if (switchesSearchKind(q, updates)) KIND_FIELDS.forEach((f) => delete q[f]);
   ['location', 'budget', 'bedrooms'].forEach((field) => {
     if (updates[`${field}Flexible`]) delete q[field];
     if (updates[field] !== undefined) delete q[`${field}Flexible`];
@@ -1905,6 +1956,7 @@ const chat = async ({ sessionId, message, action }) => {
   let confirmation = '';
   let criteriaChanged = false;
   let criteriaGiven = false; // the message states a search field, even one already known (e.g. "rent" again)
+  let startsNewSearch = false; // a new purpose/area/type, or a move between residential and commercial
   let enforce = false; // true when the reply still needs lead/question guardrails
   let propertyTurn = false; // the soft agent offer only follows a property search
   let modelReply = false; // the reply was worded by the model, so repeated qualification questions are removed
@@ -1959,6 +2011,7 @@ const chat = async ({ sessionId, message, action }) => {
       if (extracted.furnishing && extracted.furnishing !== 'any' && !extracted.purpose && !q.purpose) extracted.purpose = 'rent';
       criteriaChanged = SEARCH_FIELDS.some((f) => extracted[f] && extracted[f] !== q[f]);
       criteriaGiven = !message.includes('?') && SEARCH_FIELDS.some((f) => extracted[f]);
+      startsNewSearch = detectNewPropertySearch(extracted, q) || switchesSearchKind(q, extracted);
       if (detectNewPropertySearch(extracted, q)) resetSearchFilters(q);
       applySearchUpdates(q, extracted);
     }
@@ -2054,6 +2107,13 @@ const chat = async ({ sessionId, message, action }) => {
     ) {
       const goal = q.purpose === 'sell' ? 'the right buyer' : describeCriteria(q);
       reply = `Great, let's find you ${goal}. ${NEXT_QUESTION.location}`;
+    } else if (
+      criteriaChanged && searchKind(q) === 'commercial' && CATEGORIES.includes(q.purpose) && locationKnown(q) && !budgetKnown(q) &&
+      (startsNewSearch || !questionFields(lastQuestion).includes('budget'))
+    ) {
+      // Commercial requests are qualified before searching: type, area and purpose are known, so only the budget is asked
+      // (once per search; if the user moves on without one, the search runs).
+      reply = `Sure — you're looking for ${describeCriteria(q)}. ${q.purpose === 'rent' ? "What's your yearly budget in AED?" : NEXT_QUESTION.budget}`;
     } else {
       // 5. Property search: requested area first, then deterministic fallbacks
       const hasCriteria = Boolean(locationKnown(q) || q.budget || q.bedrooms || q.propertyType);
@@ -2306,7 +2366,7 @@ const chat = async ({ sessionId, message, action }) => {
     });
     reply = stripContactAsks(reply);
     if (modelReply) reply = dropKnownQuestions(reply, q);
-    const missing = ['purpose', 'location', 'budget', 'bedrooms'].find((f) => !fieldKnown(q, f));
+    const missing = ['purpose', 'location', 'budget', 'bedrooms'].find((f) => fieldApplies(q, f) && !fieldKnown(q, f));
     if (propertyTurn && q.purpose && locationKnown(q) && budgetKnown(q) && !state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved) {
       reply = withQuestion(reply, OFFER_TEXT);
       state.leadOfferShown = true;
