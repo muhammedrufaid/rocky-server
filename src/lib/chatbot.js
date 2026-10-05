@@ -483,6 +483,39 @@ const toCategory = (value) => {
 const propertyUrl = (p) =>
   p.propertyRefNo ? `${CATEGORY_PATHS[propertyCategory(p)]}/${encodeURIComponent(p.propertyRefNo)}` : null;
 
+// ---------- Metro proximity ----------
+// Listings, buildings and stations have no coordinates, so metro proximity comes only from what a listing's own title or
+// description states, and only when it names the station: "Close to Al Furjan Metro Station", "Metro station (DMCC)".
+// Vague ("excellent metro connectivity") or future ("near upcoming metro") wording never counts.
+const METRO_MENTION_RE = /metro/i;
+const METRO_PROXIMITY_RE = /\b(near|nearby|close|walking|walk|steps|minutes?|mins?|next to|adjacent|opposite|access|ft|feet|meters?|metres?|km)\b/i;
+const FUTURE_METRO_RE = /\b(upcoming|future|planned|proposed|under construction)\b/i;
+// Capitalised words right before "Metro Station" ("Al Jaddaf Metro Station"), or the name in brackets after it.
+const STATION_NAME_RE = /\b((?:[A-Z][\w&'-]*\s+){0,3}[A-Z][\w&'-]*)\s+Metro\s+[Ss]tation\b/;
+const STATION_IN_BRACKETS_RE = /\bMetro\s+station\s*\(\s*([^)]+?)\s*\)/i;
+// Sentence-start or connecting words picked up before a station name ("Near Al Furjan" -> "Al Furjan").
+const NOT_STATION_WORDS_RE = /^(?:(?:near|nearby|close|to|the|access|walking|distance|located|convenient|easy|and|of|from|by|next|steps|with)\s+)+/i;
+const STATED_DISTANCE_RE = /\b\d+(?:\.\d+)?\s*(?:m|meters?|metres?|km|ft|feet|mins?|minutes?)\b(?:\s+walk(?:ing)?)?/i;
+
+const stationName = (segment) => {
+  const bracketed = segment.match(STATION_IN_BRACKETS_RE);
+  if (bracketed) return bracketed[1];
+  const named = segment.match(STATION_NAME_RE);
+  const name = named ? named[1].replace(NOT_STATION_WORDS_RE, '').trim() : '';
+  return name && name.toLowerCase() !== 'dubai' ? name : '';
+};
+
+// The metro station a listing says it is close to, with the distance only when the listing states one; null otherwise.
+const listingMetro = (p) => {
+  const segments = `${p.propertyTitle || ''}\n${p.propertyDescription || ''}`.split(/[\n•|*]+|(?<=[.!?])\s+/);
+  for (const segment of segments) {
+    if (!METRO_MENTION_RE.test(segment) || FUTURE_METRO_RE.test(segment) || !METRO_PROXIMITY_RE.test(segment)) continue;
+    const station = stationName(segment);
+    if (station) return { station: `${station} Metro Station`, distance: segment.match(STATED_DISTANCE_RE)?.[0].toLowerCase() || null };
+  }
+  return null;
+};
+
 const formatProperty = (p) => ({
   propertyRefNo: p.propertyRefNo,
   category: propertyCategory(p),
@@ -499,6 +532,8 @@ const formatProperty = (p) => ({
   community: String(p.locality || '').replace(/\s*\([^)]*\)/, '').trim(),
   image: p.images?.[0] || null,
   url: propertyUrl(p),
+  // { station, distance } as stated in the listing (see listingMetro), or null.
+  metro: listingMetro(p),
 });
 
 // A card needs these real values; a listing missing any of them is dropped, never filled with defaults.
@@ -509,7 +544,7 @@ const isCompleteListing = (p) => p.priceAED > 0 && REQUIRED_LISTING_FIELDS.every
 // Area terms are what the listing page derives from the URL slug ("dubai-marina" -> "dubai marina").
 const FURNISHED_VALUES = { furnished: 'Yes', unfurnished: 'No', 'partly furnished': 'Partly' };
 
-const findProperties = async ({ purpose, location, type, bedrooms, furnishing, amenities, min_price, max_price } = {}, limit = 6) => {
+const findProperties = async ({ purpose, location, type, bedrooms, furnishing, amenities, near_metro, min_price, max_price } = {}, limit = 6) => {
   const search = (Array.isArray(location) ? location : [location]).filter(Boolean).map((l) => areaSlug([l]).replace(/-/g, ' '));
   // One bedroom count uses the listing-page filter; a set ("1,2,3") matches any of its counts.
   const beds = bedroomList(bedrooms);
@@ -527,6 +562,9 @@ const findProperties = async ({ purpose, location, type, bedrooms, furnishing, a
   const amenityMatch = amenities?.length
     ? [{ $match: { $and: amenities.map((word) => ({ features: { $regex: `\\b${escapeRegex(word)}`, $options: 'i' } })) } }]
     : [];
+  // Metro proximity is checked per listing (see listingMetro), so the query only narrows to listings mentioning a metro
+  // and all of them are checked before counting.
+  const metroMatch = near_metro ? [{ $match: { $or: [{ propertyTitle: METRO_MENTION_RE }, { propertyDescription: METRO_MENTION_RE }] } }] : [];
 
   let result;
   try {
@@ -534,11 +572,12 @@ const findProperties = async ({ purpose, location, type, bedrooms, furnishing, a
       ...buildCommonPipeline({ search, filters, forced }),
       ...bedroomSetMatch,
       ...amenityMatch,
+      ...metroMatch,
       { $addFields: { priceNum: toNumber('price') } },
       // A listing without a real price is never shown or counted.
       { $match: { priceNum: { $gt: 0 } } },
       { $sort: { priceNum: 1 } },
-      { $facet: { items: [{ $limit: limit }], meta: [{ $count: 'total' }] } },
+      { $facet: { items: [{ $limit: near_metro ? AREA_SCAN_LIMIT : limit }], meta: [{ $count: 'total' }] } },
     ]);
   } catch (err) {
     err.propertySearchFailed = true;
@@ -546,13 +585,17 @@ const findProperties = async ({ purpose, location, type, bedrooms, furnishing, a
   }
 
   const formatted = result.items.map(formatProperty);
-  const items = formatted.filter(isCompleteListing);
-  const skipped = formatted.length - items.length;
+  const complete = formatted.filter(isCompleteListing);
+  const skipped = formatted.length - complete.length;
   if (skipped) {
     console.warn('[Chatbot] Skipped malformed listings:', formatted.filter((p) => !isCompleteListing(p)).map((p) => p.propertyRefNo || '(no ref)'));
   }
-  const total = items.length ? (result.meta[0]?.total || 0) - skipped : 0;
-  return { items, total, startingPrice: items[0]?.priceAED || null };
+  if (near_metro) {
+    const verified = complete.filter((p) => p.metro);
+    return { items: verified.slice(0, limit), total: verified.length, startingPrice: verified[0]?.priceAED || null };
+  }
+  const total = complete.length ? (result.meta[0]?.total || 0) - skipped : 0;
+  return { items: complete.slice(0, limit), total, startingPrice: complete[0]?.priceAED || null };
 };
 
 const searchProperties = async (args = {}) => (await findProperties(args)).items;
@@ -805,6 +848,8 @@ const CHOICE_QUESTIONS = {
   pickProperty: { text: 'Which property would you like more details about?', re: /(which would you like to explore: [^?\n]+|Which property would you like more details about)\?$/i },
   propertyDetails: { text: 'Would you like more details or to arrange a viewing?' },
   viewing: { text: 'Would you like to arrange a viewing?' },
+  // "Would you like me to relax the metro requirement or the pool requirement?" (see relaxQuestion).
+  relaxRequirement: { re: /Would you like me to relax the [^?\n]+ requirement\?$/ },
 };
 // A card's name as the user sees it: the building, otherwise the district or community.
 const listingName = (card) => card.building || card.district || card.community;
@@ -897,7 +942,7 @@ const AMENITY_WANTED_RE = /\b(with|has|have|having|need|needs|must|want|wants|in
 // Between two amenities of one list: "pool, gym and balcony".
 const AMENITY_LIST_GAP_RE = /^[\s,]*(?:and|or|&|plus)?\s*(?:an?\s+|a\s+swimming\s+)?$/;
 // "pool doesn't matter", "without a swimming pool", "no need for a balcony": the requirement is removed.
-const AMENITY_DROPPED_BEFORE_RE = /\b(no need for|(?:do not|don'?t) need|without|forget(?: about)?|skip)\s+(?:an?\s+|the\s+)?(?:[a-z]+\s+)?$/;
+const AMENITY_DROPPED_BEFORE_RE = /\b(no need for|(?:do not|don'?t) need|without|forget(?: about)?|skip|relax|drop|remove)\s+(?:an?\s+|the\s+)?(?:[a-z]+\s+)?$/;
 const AMENITY_DROPPED_AFTER_RE = /^\s*(?:access\s+)?(?:is\s+)?(?:(?:doesn'?t|does not|don'?t|do not|isn'?t|is not|not)\s+(?:matter|needed|necessary|required|important|a must)|optional)\b/;
 // "security deposit", "water bills": a cost, not an amenity.
 const NOT_AMENITY_AFTER_RE = /^\s*(deposits?|fees?|charges?|costs?|bills?)\b/;
@@ -927,6 +972,23 @@ const amenityUpdates = (text, amenities) => {
     }
   });
   return { wanted, dropped };
+};
+
+// "near a metro station", "close to the metro", "walking distance to metro": the search needs metro proximity.
+const METRO_WANTED_RE = /\b(near(?:by)?|close to|closer to|next to|walking distance (?:to|from|of)|walk(?:able)? to|minutes? from|access to)\s+(?:an?\s+|the\s+)?metro\b|\bmetro\s+(?:access|nearby|close by)\b/;
+// "I don't need to be near the metro": anywhere before the word, not just right before it.
+const METRO_NOT_NEEDED_RE = /\b(?:don'?t|do not|doesn'?t|does not|no longer)\s+(?:need|want|care|mind)\b/;
+
+// { nearMetro: true } when a message asks for metro proximity, { nearMetroDropped: true } when it removes it ("metro
+// doesn't matter", "relax the metro requirement"), {} otherwise. Same question rule as amenityUpdates.
+const metroUpdate = (t) => {
+  const match = t.match(/\bmetro\b/);
+  if (!match) return {};
+  const before = t.slice(0, match.index).split(/[.!?]/).pop();
+  const after = t.slice(match.index + match[0].length).replace(/^\s+stations?\b/, '');
+  if (AMENITY_DROPPED_BEFORE_RE.test(before) || AMENITY_DROPPED_AFTER_RE.test(after) || METRO_NOT_NEEDED_RE.test(before)) return { nearMetroDropped: true };
+  const canAdd = !t.includes('?') || AVAILABILITY_RE.test(t);
+  return canAdd && METRO_WANTED_RE.test(t) ? { nearMetro: true } : {};
 };
 
 // Edit distance where swapping two neighbouring letters counts as one edit ("buisness" -> "business").
@@ -1150,6 +1212,7 @@ const extractQualification = (text, locations, { fuzzy = true, lastQuestion = ''
   const { wanted, dropped } = amenityUpdates(amenityText, amenities);
   if (wanted.length) found.amenities = wanted;
   if (dropped.length) found.amenitiesDropped = dropped;
+  Object.assign(found, metroUpdate(amenityText.toLowerCase()));
 
   const noPhone = t.replace(new RegExp(PHONE_RE.source, 'g'), ' ');
   const noPreference = isNoPreference(t);
@@ -1221,6 +1284,7 @@ const searchArgsFromState = (q) => {
     bedrooms: q.bedrooms,
     furnishing: q.furnishing,
     amenities: q.amenities?.length ? q.amenities : undefined,
+    near_metro: q.nearMetro || undefined,
     min_price: Number(q.budgetMin) || undefined,
     max_price: Number(q.budget) || undefined,
   };
@@ -1331,7 +1395,8 @@ const describeCriteria = (q, { location = q.location, bedrooms = q.bedrooms, max
   const bedsBefore = beds.length > 1 ? '' : bedsLabel(bedrooms, plural);
   const bedsAfter = beds.length > 1 ? ` with ${joinOr(beds.map((b) => (b === '0' ? 'studio' : b)))} bedroom${beds[beds.length - 1] === '1' ? '' : 's'}` : '';
   const amenities = q.amenities?.length ? ` with ${joinPhrases(q.amenities.map(amenityLabel))}` : '';
-  const text = `${[bedsBefore, q.furnishing, offPlan, noun].filter(Boolean).join(' ')}${suffix}${bedsAfter}${where}${price}${amenities}`;
+  const metro = q.nearMetro ? `${amenities ? ',' : ''} near a metro station` : '';
+  const text = `${[bedsBefore, q.furnishing, offPlan, noun].filter(Boolean).join(' ')}${suffix}${bedsAfter}${where}${price}${amenities}${metro}`;
   return plural ? text : `${/^[aeiou]/i.test(text) ? 'an' : 'a'} ${text}`;
 };
 
@@ -1365,8 +1430,8 @@ const areaSlug = (locations) =>
   locations.map((l) => l.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')).filter(Boolean).join('-or-');
 
 // Same query format as the website's PropertySearchBar: ?search=<area-slug>&type=&max=&beds=
-// The listing pages have no furnishing or amenity filter and filter one bedroom count only.
-const listingPageCanFilter = (q) => !q.furnishing && !q.amenities?.length && bedroomList(q.bedrooms).length <= 1;
+// The listing pages have no furnishing, amenity or metro filter and filter one bedroom count only.
+const listingPageCanFilter = (q) => !q.furnishing && !q.amenities?.length && !q.nearMetro && bedroomList(q.bedrooms).length <= 1;
 
 // The listing pages filter one bedroom count only, so a bedroom set is left out of the URL.
 const listingUrl = ({ purpose, locations = [], propertyType, bedrooms, minPrice, maxPrice }) => {
@@ -1480,16 +1545,42 @@ const areaCard = (q, g) => {
 // `wanted` keeps every filter ("two-bedroom villas for sale under AED 3,000,000"), so nothing looks silently relaxed.
 const alternativeAreasText = (q, { nearby, other }) => {
   const wanted = describeCriteria(q, { plural: true, location: '' });
-  const line = (g) => `• ${g.location}: ${listingCount(g.total)} from ${priceText(g.startingPrice, q.purpose, g.items[0]?.rentFrequency)}`;
+  // With a metro requirement, the stations named by the area's matching listings.
+  const stations = (g) => [...new Set(g.items.map((p) => p.metro?.station).filter(Boolean))];
+  const metro = (g) => (q.nearMetro && stations(g).length ? ` (near ${joinPhrases(stations(g))})` : '');
+  const line = (g) => `• ${g.location}: ${listingCount(g.total)} from ${priceText(g.startingPrice, q.purpose, g.items[0]?.rentFrequency)}${metro(g)}`;
   if (nearby.length) return `Nearby ${wanted} matching your requirements:\n${nearby.map(line).join('\n')}`;
   const noNearby = NEARBY_AREAS[q.location] ? `I couldn't find nearby ${wanted} matching your current requirements.` : noNearbyNote(q.location);
   if (other) return `${noNearby} Another community has matching ${wanted}:\n${line(other)}`;
   return `${noNearby} I also couldn't find ${wanted} in any other community right now.`;
 };
 
+// Amenities and metro proximity count only when a listing proves them, so the search never drops them by itself.
+const hasVerifiedRequirements = (q) => Boolean(q.nearMetro || q.amenities?.length);
+
+// "Would you like me to relax the metro requirement or the pool requirement?": the user picks which verified requirement
+// may go (see relaxedRequirements).
+const relaxQuestion = (q) => {
+  const labels = [...(q.nearMetro ? ['the metro requirement'] : []), ...(q.amenities || []).map((a) => `the ${amenityLabel(a)} requirement`)];
+  return `Would you like me to relax ${joinOr(labels)}?`;
+};
+// What a short reply to relaxQuestion drops: "metro" / "the pool one" -> that requirement, "both" -> all of them, "yes"
+// -> the only one asked about. "No" drops nothing.
+const relaxedRequirements = (message, q) => {
+  const t = message.toLowerCase();
+  if (DECLINE_RE.test(t)) return { amenitiesDropped: [], nearMetroDropped: false };
+  const onlyOne = (q.amenities?.length || 0) + (q.nearMetro ? 1 : 0) === 1;
+  const all = /\b(both|all of them)\b/.test(t) || (onlyOne && ACCEPT_RE.test(t));
+  return {
+    amenitiesDropped: (q.amenities || []).filter((a) => all || new RegExp(`\\b${escapeRegex(a)}`).test(t)),
+    nearMetroDropped: Boolean(q.nearMetro && (all || /\bmetro\b/.test(t))),
+  };
+};
+
 // The next step after zero results, offering only changes that can widen the search.
 const refineQuestion = (q, { budgetMatters = false } = {}) => {
   if (budgetMatters) return CHOICE_QUESTIONS.budgetOrArea.text;
+  if (hasVerifiedRequirements(q)) return relaxQuestion(q);
   return bedroomList(q.bedrooms).length ? CHOICE_QUESTIONS.areaTypeOrBedrooms.text : CHOICE_QUESTIONS.areaOrType.text;
 };
 
@@ -1555,14 +1646,17 @@ const nearbyAlternative = (q, g) => ({
 });
 
 // Fallback order with an area:
-//   1. exact match (every filter, amenities verified in the listing's features)
-//   1b. with amenities: the same request with the amenities not verified, labelled as such ('amenityUnverified')
+//   1. exact match (every filter, amenities verified in the listing's features, metro station named in the listing)
+//   1b. with amenities: the same request with the amenities not verified, labelled as such ('amenityUnverified');
+//       a metro requirement is still kept
+// Every later step keeps the amenities and the metro requirement; only the user relaxes them (see relaxQuestion).
 //   2. same request above the budget: only the lowest price is offered
 //   3. closest bedroom count in the same area, every other filter kept ('bedroom')
 //   4. same-area alternatives, one requirement changed at a time and labelled
 //   5. nearby areas with every filter kept, closest first
 //   6. one other area with verified matching listings, only when no nearby area has any
-//   7. only when steps 5 and 6 found nothing: the closest bedroom count in any area (bedroomsElsewhere)
+//   7. only when steps 5 and 6 found nothing: the closest bedroom count in any area (bedroomsElsewhere); skipped with
+//      amenities or a metro requirement, where the user is asked which of those to relax instead (see relaxQuestion)
 // Steps 4-7 are all reported together ('alternatives'); 'none' means none of them found anything.
 // Without an area: exact match, then the closest bedroom count anywhere ('bedroom').
 // relaxBedrooms false (the user declined another bedroom count) skips steps 3 and 7.
@@ -1573,8 +1667,10 @@ const searchWithFallback = async (q, maxPrice = q.budget, { relaxBedrooms = true
   const exact = await findProperties(args, PREVIEW_LIMIT);
   const withoutAmenities = { ...args, amenities: undefined };
   if (exact.total) {
-    // Listings that meet everything else but don't list the amenities are reported as a count, never as matches.
-    const unverifiedCount = args.amenities ? (await findProperties(withoutAmenities, 1)).total - exact.total : 0;
+    // Listings that meet everything else but can't prove the amenities or metro proximity are reported as a count,
+    // never as matches.
+    const unproven = args.amenities || args.near_metro;
+    const unverifiedCount = unproven ? (await findProperties({ ...withoutAmenities, near_metro: undefined }, 1)).total - exact.total : 0;
     return { stage: 'exact', groups: [{ location: q.location, bedrooms: args.bedrooms, ...exact }], unverifiedCount };
   }
   if (args.amenities) {
@@ -1597,7 +1693,7 @@ const searchWithFallback = async (q, maxPrice = q.budget, { relaxBedrooms = true
 
   const [sameArea, areas] = await Promise.all([sameAreaAlternatives(q, { relaxBedrooms }), alternativeAreas({ ...q, budget: maxPrice })]);
   const noAreaMatch = !areas.nearby.length && !areas.other;
-  const bedroomsElsewhere = relaxBedrooms && noAreaMatch ? await closestBedroomMatch({ ...args, location: undefined }) : null;
+  const bedroomsElsewhere = relaxBedrooms && noAreaMatch && !hasVerifiedRequirements(q) ? await closestBedroomMatch({ ...args, location: undefined }) : null;
   const alternatives = {
     sameArea,
     nearby: areas.nearby.map((g) => nearbyAlternative(q, g)),
@@ -1725,7 +1821,8 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
       ? `I found ${describeCriteria(q, { maxPrice })}, priced at ${price}.`
       : `I found ${total} ${describeCriteria(q, { maxPrice, plural: true })}, starting from ${price}.`;
     const n = result.unverifiedCount;
-    const unverified = n ? `${n} more ${n === 1 ? 'listing matches' : 'listings match'} your other requirements, but I couldn't verify ${amenities} for ${n === 1 ? 'it' : 'them'}.` : '';
+    const unproven = q.nearMetro ? joinOr([...(q.amenities || []).map(amenityLabel), 'metro proximity']) : amenities;
+    const unverified = n ? `${n} more ${n === 1 ? 'listing matches' : 'listings match'} your other requirements, but I couldn't verify ${unproven} for ${n === 1 ? 'it' : 'them'}.` : '';
     return [found, unverified].filter(Boolean).join('\n\n');
   }
   if (result.stage === 'amenityUnverified') {
@@ -1757,8 +1854,9 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
   const matching = sameArea.filter((a) => a.difference !== 'furnishing');
   const otherFurnishing = sameArea.filter((a) => a.difference === 'furnishing');
   const lines = (alts) => alts.map((a) => `• ${alternativeLine(q, a)}`).join('\n');
-  // Without a one-change alternative, the area's real inventory in this category is shown instead.
-  const inArea = matching.length ? [] : await areaInventoryLines(q.location, [q.purpose], searchKind(q));
+  // Without a one-change alternative, the area's real inventory in this category is shown instead (not with amenities or
+  // a metro requirement: that inventory ignores them).
+  const inArea = matching.length || hasVerifiedRequirements(q) ? [] : await areaInventoryLines(q.location, [q.purpose], searchKind(q));
   const anyAlternative = matching.length || areas.nearby.length || areas.other;
   const elsewhere = result.bedroomsElsewhere;
   let question = anyAlternative ? ALTERNATIVES_QUESTION : refineQuestion(q);
@@ -1780,11 +1878,13 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
 
 // "• Bloom Towers — JVC District 10: AED 620,000" for each card, in card order, placed after the reply's first paragraph.
 // Built from the cards themselves, so the names and prices in the text are always the ones on the cards.
-const withListingLines = (reply, cards) => {
+// With a metro requirement each line also gives the station and distance exactly as the listing states them.
+const withListingLines = (reply, cards, { metro = false } = {}) => {
   if (!cards.length) return reply;
   const lines = cards.map((p) => {
     const district = p.building && p.district ? ` — ${p.district}` : '';
-    return `• ${listingName(p)}${district}: ${priceText(p.priceAED, p.category, p.rentFrequency)}`;
+    const station = metro && p.metro ? ` (${p.metro.station}, ${p.metro.distance || 'distance not stated in the listing'})` : '';
+    return `• ${listingName(p)}${district}: ${priceText(p.priceAED, p.category, p.rentFrequency)}${station}`;
   });
   const [first, ...rest] = reply.split('\n\n');
   return [first, lines.join('\n'), ...rest].join('\n\n');
@@ -1805,7 +1905,7 @@ const buildPropertyResult = async (q, groups, maxPrice) => {
     total = (await findProperties({ ...searchArgsFromState({ ...q, location: undefined, bedrooms, budget: maxPrice }), location: locations }, 1)).total;
   }
   const filters = Object.fromEntries(
-    Object.entries({ purpose: q.purpose, locations, propertyType: q.propertyType, bedrooms, furnishing: q.furnishing, amenities: q.amenities, maxPrice: Number(maxPrice) || undefined }).filter(
+    Object.entries({ purpose: q.purpose, locations, propertyType: q.propertyType, bedrooms, furnishing: q.furnishing, amenities: q.amenities, nearMetro: q.nearMetro, maxPrice: Number(maxPrice) || undefined }).filter(
       ([, v]) => v !== undefined && v !== '' && !(Array.isArray(v) && !v.length)
     )
   );
@@ -2015,6 +2115,7 @@ const listingDetailsText = ({ card, size }) => {
       `• Price: ${priceText(card.priceAED, card.category, card.rentFrequency)}`,
       `• Location: ${card.location}`,
       size ? `• Size: ${size}` : '',
+      card.metro ? `• Metro: ${card.metro.station}${card.metro.distance ? `, ${card.metro.distance}` : ''} (as stated in the listing)` : '',
       `• Reference: ${card.propertyRefNo}`,
     ].filter(Boolean).join('\n'),
   ].join('\n\n');
@@ -2051,6 +2152,7 @@ const buildStateContext = (state) => {
     `propertyType: ${q.propertyType || 'any'}${searchKind(q) === 'commercial' ? ' (commercial: bedrooms do not apply, never ask about them)' : ''}`,
     `furnishing: ${q.furnishing || 'any'}`,
     `amenities: ${q.amenities?.length ? `${q.amenities.join(', ')} (search results already include only listings whose features list them; never claim an amenity a listing's features don't list)` : 'none required'}`,
+    `nearMetro: ${q.nearMetro ? "required (search results already include only listings whose own text names a nearby metro station; never name a station, distance or walking time the results don't state)" : 'not required'}`,
     `leadOfferShown: ${state.leadOfferShown}`,
     `leadOfferDeclined: ${state.leadOfferDeclined}`,
     `leadSaved: ${state.leadSaved}`,
@@ -2095,7 +2197,7 @@ const stripContactAsks = (reply) => dropQuestions(reply, (s) => CONTACT_ASK_RE.t
 const dropKnownQuestions = (reply, q) => dropQuestions(reply, (s) => questionFields(s).some((f) => fieldKnown(q, f)));
 
 const SEARCH_FIELDS = [
-  'purpose', 'location', 'locationFlexible', 'propertyType', 'budget', 'budgetMin', 'budgetFlexible', 'bedrooms', 'bedroomsFlexible', 'furnishing', 'amenities',
+  'purpose', 'location', 'locationFlexible', 'propertyType', 'budget', 'budgetMin', 'budgetFlexible', 'bedrooms', 'bedroomsFlexible', 'furnishing', 'amenities', 'nearMetro',
 ];
 // "any budget" / "any area" / "any bedroom" count as answers, so those questions are never asked again.
 const budgetKnown = (q) => Boolean(q.budget || q.budgetFlexible);
@@ -2121,9 +2223,11 @@ const switchesSearchKind = (q, updates) => {
 //   new value ("Al Quoz", "1,2,3") -> replaces the old value
 //   <field>Flexible ("any budget")  -> clears that filter (and counts as answered)
 //   amenities / amenitiesDropped    -> added to / removed from the saved amenities; the others are kept
+//   nearMetro / nearMetroDropped    -> sets / clears only the metro requirement
 //   other kind of property         -> see switchesSearchKind
-const applySearchUpdates = (q, { amenities = [], amenitiesDropped = [], ...updates }) => {
+const applySearchUpdates = (q, { amenities = [], amenitiesDropped = [], nearMetroDropped = false, ...updates }) => {
   if (switchesSearchKind(q, updates)) KIND_FIELDS.forEach((f) => delete q[f]);
+  if (nearMetroDropped) delete q.nearMetro;
   const keptAmenities = (q.amenities || []).filter((a) => !amenitiesDropped.includes(a));
   q.amenities = [...new Set([...keptAmenities, ...amenities])];
   if (!q.amenities.length) delete q.amenities;
@@ -2165,7 +2269,7 @@ const LISTING_REQUEST_RE = /\b(show|find|search|list|see|view|display|pull up|br
 // "Show me the listings" / "Okay, show me those again": the saved search runs again.
 const SHOW_SAVED_SEARCH_RE = /^(?:please\s+|can you\s+|could you\s+|let me\s+)?(show|see|display|pull up|bring up|list)\b/i;
 // Details only a property search has. Purpose or type alone ("when buying", "off-plan") is how general questions are phrased.
-const SEARCH_DETAIL_FIELDS = ['location', 'locationFlexible', 'locationSuggestion', 'bedrooms', 'bedroomsFlexible', 'budget', 'budgetMin', 'budgetFlexible', 'amenities', 'amenitiesDropped'];
+const SEARCH_DETAIL_FIELDS = ['location', 'locationFlexible', 'locationSuggestion', 'bedrooms', 'bedroomsFlexible', 'budget', 'budgetMin', 'budgetFlexible', 'amenities', 'amenitiesDropped', 'nearMetro', 'nearMetroDropped'];
 // Asks for listings in any wording: "show me", "is anything available", "nearby areas", "cheaper", "adjust the budget".
 const asksForListings = (message) => [LISTING_REQUEST_RE, AVAILABILITY_RE, NEARBY_RE, CHEAPER_RE, REFINE_RE].some((re) => re.test(message));
 
@@ -2294,6 +2398,7 @@ const chat = async ({ sessionId, message, action }) => {
     let generalQuestion = false; // "Can a foreigner buy property in Dubai?": answered from knowledge, the saved search is untouched
     let askedArea = ''; // the area an area question is about
     let followUp = ''; // 'accept' / 'decline' when the message answers the knowledge offer that ended the last reply
+    let relaxReply = ''; // reply to an answer to relaxQuestion that drops nothing ("no", or "yes" with several requirements)
 
     // 1. Qualification (skipped for button clicks so a property title can't change the criteria)
     let extracted = {};
@@ -2337,13 +2442,33 @@ const chat = async ({ sessionId, message, action }) => {
       }));
       // "buy" in "Can a foreigner buy property?" is not a search update: the saved search stays exactly as it was.
       if (generalQuestion) extracted = {};
+      // Answer to "Would you like me to relax the metro requirement or the pool requirement?": only the requirements it
+      // names are dropped. "Relax the pool" or "metro doesn't matter" are already read by extraction, and a message with
+      // other search details ("1 bedroom in Al Furjan with a pool near the metro") is a new request, not an answer.
+      const answersRelaxQuestion =
+        pendingQuestion === 'relaxRequirement' && !generalQuestion && !message.includes('?') && !extracted.amenitiesDropped &&
+        !extracted.nearMetroDropped && !SEARCH_FIELDS.some((f) => f !== 'amenities' && extracted[f]);
+      if (answersRelaxQuestion) {
+        const relaxed = relaxedRequirements(message, q);
+        if (relaxed.amenitiesDropped.length || relaxed.nearMetroDropped) {
+          delete extracted.amenities;
+          delete extracted.nearMetro;
+          Object.assign(extracted, relaxed);
+        } else if (DECLINE_RE.test(message)) {
+          relaxReply = "No problem, I'll keep your current requirements. Let me know whenever you'd like to change anything.";
+        } else if (ACCEPT_RE.test(message) || CONFIRM_RE.test(message)) {
+          relaxReply = `Sure — ${relaxQuestion(q).replace(/^W/, 'w')}`;
+          state.pendingQuestion = pendingQuestion;
+        }
+      }
       const amenitiesBefore = String(q.amenities || '');
+      const nearMetroBefore = Boolean(q.nearMetro);
       criteriaChanged = SEARCH_FIELDS.some((f) => f !== 'amenities' && extracted[f] && extracted[f] !== q[f]);
       criteriaGiven = !message.includes('?') && SEARCH_FIELDS.some((f) => extracted[f]);
       startsNewSearch = detectNewPropertySearch(extracted, q) || switchesSearchKind(q, extracted);
       if (detectNewPropertySearch(extracted, q)) resetSearchFilters(q);
       applySearchUpdates(q, extracted);
-      if (String(q.amenities || '') !== amenitiesBefore) criteriaChanged = true;
+      if (String(q.amenities || '') !== amenitiesBefore || Boolean(q.nearMetro) !== nearMetroBefore) criteriaChanged = true;
     }
 
     // 2. Property picks, offer acceptance / decline / viewing requests
@@ -2437,6 +2562,8 @@ const chat = async ({ sessionId, message, action }) => {
     } else if (followUp === 'decline') {
       // "No" to a knowledge offer only closes that offer; the saved search stays paused.
       reply = FOLLOW_UP_DECLINE_TEXT;
+    } else if (relaxReply) {
+      reply = relaxReply;
     } else if (locationSuggestion) {
       // Close to a known area but not certain: confirm before storing it; other details from the message are kept.
       state.locationSuggestion = locationSuggestion;
@@ -2450,7 +2577,7 @@ const chat = async ({ sessionId, message, action }) => {
       const groups = found.total ? [{ location: q.location, bedrooms: q.bedrooms, ...found }] : [];
       reply = await describeResults(open, { stage: found.total ? 'exact' : 'none', nearby: [], groups });
       ({ properties, propertyResult, uiActions } = await buildPropertyResult(open, groups));
-      reply = withListingLines(reply, properties);
+      reply = withListingLines(reply, properties, { metro: q.nearMetro });
       enforce = true;
       propertyTurn = true;
     } else if (pickedRef) {
@@ -2616,7 +2743,7 @@ const chat = async ({ sessionId, message, action }) => {
           // Only listing results get the usual next question; fallback replies already end with their own question.
           enforce = result.stage === 'exact' || unverified;
           propertyTurn = enforce;
-          if (enforce) reply = withListingLines(reply, properties);
+          if (enforce) reply = withListingLines(reply, properties, { metro: q.nearMetro });
         }
         // Areas found by the fallback (nearby or another verified area): one card each, plus a few of their real listings.
         const areaGroups = result.areas ? [...result.areas.nearby, result.areas.other].filter(Boolean) : [];

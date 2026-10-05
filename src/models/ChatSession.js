@@ -47,6 +47,8 @@ const chatSessionSchema = new mongoose.Schema(
       furnishing: { type: String, trim: true },
       // Amenity words from the listings' feature names ("pool", "balcony"); a listing must list every one to match.
       amenities: { type: [String], default: undefined },
+      // "near a metro station": a listing must name a nearby metro station in its own title or description to match.
+      nearMetro: { type: Boolean },
       timeline: { type: String, trim: true },
     },
     contact: {
