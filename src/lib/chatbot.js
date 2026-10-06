@@ -253,15 +253,18 @@ const loadChunks = async () => {
   return chunkCache;
 };
 
-const retrieve = async (query, k = 4) => {
+// `mention` (e.g. ["rera"]): chunks naming every one of these words come first, even below MIN_SCORE, because a short
+// term like "RERA" scores low against long texts that are about it.
+const retrieve = async (query, k = 4, { mention = [] } = {}) => {
   await loadChunks();
   if (!chunkCache.length) return [];
 
   const [queryVector] = await embed(query);
+  const mentions = (text) => mention.length > 0 && mention.every((w) => new RegExp(`\\b${escapeRegex(w)}`, 'i').test(text));
   const ranked = chunkCache
-    .map((c) => ({ source: c.source, refId: c.refId, title: c.title, text: c.text, score: cosine(queryVector, c.embedding) }))
-    .filter((c) => c.score >= MIN_SCORE)
-    .sort((a, b) => b.score - a.score);
+    .map((c) => ({ source: c.source, refId: c.refId, title: c.title, text: c.text, score: cosine(queryVector, c.embedding), named: mentions(c.text) }))
+    .filter((c) => c.score >= MIN_SCORE || c.named)
+    .sort((a, b) => b.named - a.named || b.score - a.score);
 
   const perDocument = {};
   const results = [];
@@ -295,7 +298,7 @@ const pagePath = (doc, route) => (doc.path?.startsWith('/') ? doc.path : `${rout
 // Website pages behind the knowledge an answer was given, most relevant first. `askedArea` is the area an area
 // question named: its own guide counts even when the wording scores low ("Tell me about JVC").
 const relatedLinks = async (hits, askedArea = '') => {
-  const best = hits[0]?.score || 0;
+  const best = Math.max(0, ...hits.map((h) => h.score));
   const picked = [];
   hits.forEach((h) => {
     const relevant = (h.score >= MIN_LINK_SCORE && best - h.score <= LINK_SCORE_MARGIN) || (h.source === 'area' && h.title === askedArea);
@@ -318,8 +321,9 @@ const relatedLinks = async (hits, askedArea = '') => {
 const withLinkLines = (reply, links) => {
   const lines = links.filter((l) => !reply.includes(l.url)).map((l) => `Read more: ${l.label} (${l.url})`);
   if (!lines.length) return reply;
-  const [, answer = reply, question = ''] = reply.match(/^([\s\S]*?)\s*([^.!?\n]*\w[^.!?\n]*\?)$/) || [];
-  return [answer, lines.join('\n'), question.trim()].filter(Boolean).join('\n\n');
+  const question = reply.endsWith('?') ? closingOffer(reply) : '';
+  const answer = question ? reply.slice(0, reply.lastIndexOf(question)).trim() : reply;
+  return [answer, lines.join('\n'), question].filter(Boolean).join('\n\n');
 };
 
 // ---------- Team ----------
@@ -2302,16 +2306,88 @@ const followUpAnswer = (message, extracted) => {
   return '';
 };
 
-// Model instructions for a general-question turn: answer it, keep the saved search out of the way. `acceptedOffer` is
-// the knowledge offer the user just said yes to.
-const generalQuestionContext = (q, acceptedOffer = '') =>
+// Words that only introduce what an offer is about ("Would you like a quick overview of how ... affects ...?").
+const OFFER_FILLER_WORDS = new Set(
+  ('a an and the of on in to for or with about from by at into under over how what which why when it its is are be can ' +
+    'do does would you your like ' +
+    'want me i we us my more quick quickly short brief briefly overview note summary summarize summarise explanation ' +
+    'explain detail details general high level main key basic basics might may could should will potential possible ' +
+    'point points particular such as example typical typically usually generally step steps end ' +
+    'breakdown rundown know learn tell walk through specific specifically related affect affects effect effects impact ' +
+    'impacts role work works apply applies rule rules regulation regulations requirement requirements agreement ' +
+    'agreements property properties real estate dubai uae this that these those them they there').split(' ')
+);
+// "fees" -> "fee", "processes" -> "process", "process" unchanged.
+const singular = (word) => word.replace(/(ss|x|ch|sh)es$/, '$1').replace(/(?<=[a-z]{2}[^s])s$/, '');
+// Different words for the same subject, so "tenancy or sales" and "renting and buying" give the same key.
+const OFFER_SAME_SUBJECT = [
+  [/^(rent|rents|renting|rental|rentals|tenancy|tenancies|tenant|tenants|lease|leases|leasing|landlord|landlords)$/, 'renting'],
+  [/^(buy|buys|buying|buyer|buyers|purchase|purchases|purchasing|sale|sales|sell|selling|seller|sellers|transaction|transactions)$/, 'buying'],
+];
+
+// The stable key of a knowledge offer: its subject words, without the wording around them. Rephrasings of one offer
+// get the same key: "Would you like an overview of how RERA affects tenancy or sales?", "Want me to explain RERA's
+// impact on renting and buying?" and "a quick note on RERA and tenancy/sales?" are all ["buying", "rera", "renting"].
+const followUpKey = (text) => {
+  const words = String(text).toLowerCase().replace(/'s\b/g, '').match(/[a-z0-9]+/g) || [];
+  const subjects = words
+    .filter((w) => !OFFER_FILLER_WORDS.has(w))
+    .map((w) => OFFER_SAME_SUBJECT.find(([re]) => re.test(w))?.[1] || singular(w));
+  return [...new Set(subjects)].sort();
+};
+
+// True when the offer adds nothing to one already explained or declined: the same key, or a key of two or more words
+// that all belong to a closed offer ("RERA and sales" after "RERA's effect on tenancy and sales").
+const isClosedFollowUp = (offer, closedFollowUps) => {
+  const key = followUpKey(offer);
+  return key.length > 0 && closedFollowUps.some((closed) => {
+    const closedKey = followUpKey(closed);
+    return key.join(' ') === closedKey.join(' ') || (key.length >= 2 && key.every((w) => closedKey.includes(w)));
+  });
+};
+
+// The offer that ends a reply. "Would you like a quick overview?" names no subject, so the sentence before it is part
+// of the offer: "I can share how RERA affects buying or renting. Would you like a quick overview?"
+const closingOffer = (reply) => {
+  const [question = ''] = reply.match(/[^.!?\n]*\?\s*$/) || [];
+  if (followUpKey(question).length >= 2) return question.trim();
+  const [withLead = question] = reply.match(/[^.!?\n]*[.!]\s+[^.!?\n]*\?\s*$/) || [];
+  return withLead.trim();
+};
+
+// After a "yes", sentences that only restate the previous answer ("RERA is the Real Estate Regulatory Agency..." again)
+// are removed: most of their subject words (see followUpKey) are already in that answer.
+const dropRestated = (reply, previousAnswer) => {
+  const said = followUpKey(previousAnswer);
+  const restates = (s) => {
+    const words = followUpKey(s);
+    return !s.includes('?') && words.length >= 4 && words.filter((w) => said.includes(w)).length / words.length >= 0.75;
+  };
+  return mapSentences(reply, (s) => !restates(s)) || "Happy to help. What else would you like to know?";
+};
+
+// Explained or declined offers are remembered so they are never offered again (oldest dropped first).
+const MAX_CLOSED_FOLLOW_UPS = 10;
+const closeFollowUp = (state, offer) => {
+  if (offer) state.closedFollowUps = [...state.closedFollowUps, offer].slice(-MAX_CLOSED_FOLLOW_UPS);
+};
+
+// Model instructions for a general-question turn: answer it, keep the saved search out of the way. After a "yes",
+// `previousAnswer` is the answer it follows and `acceptedOffer` the offer it accepted, if that answer made one;
+// `closedFollowUps` are offers already explained or declined.
+const generalQuestionContext = (q, { acceptedOffer = '', previousAnswer = '', closedFollowUps = [] } = {}) =>
   [
     'CURRENT TURN: a general question, not a property search. Answer it directly and concisely from KNOWLEDGE; if KNOWLEDGE does not cover it, say an agent can confirm.',
     acceptedOffer &&
-      `- The user said yes to your offer "${acceptedOffer}": give that explanation now without repeating your previous answer. If KNOWLEDGE covers only part of it, explain that part and say the rest isn't available here.`,
+      `- The user said yes to your offer "${acceptedOffer}": deliver exactly that now, starting with the new information (e.g. "Sure. For ..."). KNOWLEDGE is the verified source: use every fact in it that fits the offer and add none of your own; only for a part of the offer KNOWLEDGE says nothing about, say you don't have verified details on it and an agent can confirm.`,
+    !acceptedOffer && previousAnswer &&
+      "- The user said yes to continue this topic: add information from KNOWLEDGE that your previous answer didn't give. If there is none, say so in one sentence and ask what else they'd like to know.",
+    previousAnswer && `- Your previous answer, which must not be restated in any wording:\n"""${previousAnswer}"""`,
     '- Do NOT list or describe listings and do NOT ask for buy/rent, area, budget, bedrooms or property type.',
     q.purpose && locationKnown(q) && '- The saved property search stays paused until the user asks for listings: do not mention or offer it.',
-    '- At most one short follow-up offer to explain a related point from KNOWLEDGE.',
+    '- At most one short follow-up offer to explain a related point from KNOWLEDGE, only one that is genuinely new, written as the closing question ("Would you like ...?").',
+    closedFollowUps.length &&
+      `- Already explained or declined in this chat; never offer these again in any wording:\n${closedFollowUps.map((o) => `  - ${o}`).join('\n')}`,
   ]
     .filter(Boolean)
     .join('\n');
@@ -2349,6 +2425,8 @@ const chat = async ({ sessionId, message, action }) => {
     budgetFallback: { ...(session?.budgetFallback || {}) },
     locationSuggestion: session?.locationSuggestion || '',
     pendingQuestion: session?.pendingQuestion || '',
+    pendingFollowUp: session?.pendingFollowUp?.offer ? { ...session.pendingFollowUp } : null,
+    closedFollowUps: session?.closedFollowUps || [],
     shownPropertyRefs: session?.shownPropertyRefs || [],
     currentTopic: session?.currentTopic || '',
     leadOfferShown: Boolean(session?.leadOfferShown),
@@ -2373,6 +2451,9 @@ const chat = async ({ sessionId, message, action }) => {
   let propertyTurn = false; // the soft agent offer only follows a property search
   let modelReply = false; // the reply was worded by the model, so repeated qualification questions are removed
   let knowledgeAnswer = false; // the model answered a general question from knowledge (its closing offer becomes pending)
+  let knowledgeQuestion = ''; // the user question a knowledge answer is about ("What is RERA?"), stored with its offer
+  let deliveredOffer = ''; // the accepted knowledge offer this reply explains; closed once it is answered
+  let previousAnswer = ''; // after a "yes" to a knowledge answer: that answer, which the reply must not restate
   try {
     const q = state.qualification;
     const isViewingClick = action?.type === 'book_viewing';
@@ -2388,6 +2469,10 @@ const chat = async ({ sessionId, message, action }) => {
     const pastMessages = session?.messages || [];
     const lastAssistant = [...pastMessages].reverse().find((m) => m.role === 'assistant')?.content || '';
     const lastQuestion = lastQuestionOf(lastAssistant);
+    // The knowledge offer that question made, with the user question it followed ("Would you like a quick overview of
+    // how RERA affects tenancy or sales?" after "What is RERA?"). It only applies to this reply.
+    const offered = pendingQuestion === KNOWLEDGE_FOLLOW_UP ? { offer: lastQuestion, question: '', ...state.pendingFollowUp } : null;
+    state.pendingFollowUp = null;
     // Company team questions are answered from the team records only and never touch search or contact state.
     const teamReply = isViewingClick ? null : await teamAnswer(message);
 
@@ -2560,7 +2645,8 @@ const chat = async ({ sessionId, message, action }) => {
     } else if (savedName && !criteriaChanged) {
       // confirmation already set above
     } else if (followUp === 'decline') {
-      // "No" to a knowledge offer only closes that offer; the saved search stays paused.
+      // "No" to a knowledge offer only closes that offer (it is not offered again); the saved search stays paused.
+      closeFollowUp(state, offered?.offer);
       reply = FOLLOW_UP_DECLINE_TEXT;
     } else if (relaxReply) {
       reply = relaxReply;
@@ -2765,13 +2851,18 @@ const chat = async ({ sessionId, message, action }) => {
         // A leadership follow-up is answered on that topic; the stored property state must not steer it back to a search.
         const onLeadership = state.currentTopic === 'leadership';
         const forceRefineSearch = !onLeadership && canSearch && REFINE_RE.test(message);
-        // "Yes" after a knowledge answer: knowledge is looked up for the user's last own question plus the offer, if the
-        // answer made one ("What is DLD?" + "Would you like a brief of how DLD fees work?").
-        const acceptedOffer = followUp === 'accept' && pendingQuestion === KNOWLEDGE_FOLLOW_UP ? lastQuestion.split('\n').pop().trim() : '';
-        const lastOwnQuestion = followUp === 'accept'
-          ? [...pastMessages].reverse().find((m) => m.role === 'user' && !(ACCEPT_RE.test(m.content) && !m.content.includes('?')))?.content || ''
-          : '';
-        const hits = await retrieve(followUp === 'accept' ? `${lastOwnQuestion}\n${acceptedOffer}`.trim() : message, 4);
+        // "Yes" after a knowledge answer stays on the user's earlier question ("What is RERA?"). With an offer ("Would you
+        // like a quick overview of how RERA affects tenancy or sales?"), knowledge is looked up for the offer, and chunks
+        // naming the subject the offer shares with that question ("rera") come first.
+        const acceptedOffer = followUp === 'accept' ? offered?.offer || '' : '';
+        knowledgeQuestion = followUp === 'accept'
+          ? offered?.question ||
+            [...pastMessages].reverse().find((m) => m.role === 'user' && !(ACCEPT_RE.test(m.content) && !m.content.includes('?')))?.content || ''
+          : message;
+        const subject = acceptedOffer ? followUpKey(knowledgeQuestion).filter((w) => followUpKey(acceptedOffer).includes(w)) : [];
+        const hits = await retrieve(`${acceptedOffer}\n${knowledgeQuestion}`.trim(), 4, { mention: subject });
+        deliveredOffer = acceptedOffer;
+        previousAnswer = followUp === 'accept' ? lastAssistant : '';
         let knowledge = hits.length
           ? hits.map((h, i) => `[${i + 1}] (${h.source}) ${h.title}\n${h.text}`).join('\n\n')
           : 'No relevant knowledge found.';
@@ -2781,7 +2872,11 @@ const chat = async ({ sessionId, message, action }) => {
         }
         let stateContext = buildStateContext(state);
         if (onLeadership) stateContext = LEADERSHIP_TOPIC_CONTEXT;
-        else if (generalQuestion) stateContext = generalQuestionContext(state.qualification, acceptedOffer);
+        else if (generalQuestion) stateContext = generalQuestionContext(state.qualification, {
+          acceptedOffer,
+          previousAnswer,
+          closedFollowUps: state.closedFollowUps,
+        });
         const messages = [
           { role: 'system', content: `${RULES}\n\nKNOWLEDGE (use only this for company/area facts):\n${knowledge}` },
           ...history,
@@ -2859,6 +2954,7 @@ const chat = async ({ sessionId, message, action }) => {
         }
         if (modelReply && !onLeadership && !properties.length) links = await relatedLinks(hits, askedArea);
         knowledgeAnswer = modelReply && generalQuestion;
+        if (knowledgeAnswer) closeFollowUp(state, deliveredOffer);
       }
     }
   } catch (error) {
@@ -2884,8 +2980,14 @@ const chat = async ({ sessionId, message, action }) => {
     });
     reply = stripContactAsks(reply);
     if (modelReply) reply = dropKnownQuestions(reply, q);
-    // A knowledge answer never turns into qualification: "buy, rent or off-plan?" is removed from it.
-    if (knowledgeAnswer) reply = dropQuestions(reply, (s) => questionFields(s).includes('purpose'));
+    // A knowledge answer never turns into qualification ("buy, rent or off-plan?") and never offers again what was
+    // already explained or declined, in any wording (see isClosedFollowUp).
+    if (knowledgeAnswer) {
+      reply = dropQuestions(reply, (s) => questionFields(s).includes('purpose'));
+      if (previousAnswer) reply = dropRestated(reply, previousAnswer);
+      const offer = reply.endsWith('?') ? closingOffer(reply) : '';
+      if (offer && isClosedFollowUp(offer, state.closedFollowUps)) reply = reply.slice(0, reply.lastIndexOf(offer)).trim();
+    }
     const missing = ['purpose', 'location', 'budget', 'bedrooms'].find((f) => fieldApplies(q, f) && !fieldKnown(q, f));
     // After results: a still-missing search field first; otherwise the next step for what was shown (see resultsNextStep).
     const resultTotal = propertyResult?.total || properties.length;
@@ -2909,7 +3011,10 @@ const chat = async ({ sessionId, message, action }) => {
   // A reply ending with one of our choice questions waits for the user's answer to it on the next turn.
   if (!state.pendingQuestion) state.pendingQuestion = choiceQuestionIn(reply);
   // A knowledge answer ending with an offer waits for "yes" / "no" to that offer (see followUpAnswer).
-  if (!state.pendingQuestion && knowledgeAnswer && reply.endsWith('?')) state.pendingQuestion = KNOWLEDGE_FOLLOW_UP;
+  if (!state.pendingQuestion && knowledgeAnswer && reply.endsWith('?')) {
+    state.pendingQuestion = KNOWLEDGE_FOLLOW_UP;
+    state.pendingFollowUp = { offer: closingOffer(reply), question: knowledgeQuestion };
+  }
   // Cards shown in this reply replace the remembered ones; a reply without cards keeps them for "the second one".
   if (properties.length) state.shownPropertyRefs = properties.map((p) => p.propertyRefNo);
 
@@ -2924,6 +3029,8 @@ const chat = async ({ sessionId, message, action }) => {
         budgetFallback: state.budgetFallback,
         locationSuggestion: state.locationSuggestion,
         pendingQuestion: state.pendingQuestion,
+        pendingFollowUp: state.pendingFollowUp || {},
+        closedFollowUps: state.closedFollowUps,
         shownPropertyRefs: state.shownPropertyRefs,
         currentTopic: state.currentTopic,
         leadOfferShown: state.leadOfferShown,

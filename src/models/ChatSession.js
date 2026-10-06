@@ -72,6 +72,15 @@ const chatSessionSchema = new mongoose.Schema(
     // Question the assistant just asked (a CHOICE_QUESTIONS key in lib/chatbot.js, or KNOWLEDGE_FOLLOW_UP for the offer
     // that ends a knowledge answer); cleared on the next reply.
     pendingQuestion: { type: String, trim: true, default: '' },
+    // With pendingQuestion KNOWLEDGE_FOLLOW_UP: the offer itself and the user question it followed ("What is RERA?").
+    // Cleared on the next reply.
+    pendingFollowUp: {
+      offer: { type: String, trim: true },
+      question: { type: String, trim: true },
+    },
+    // Knowledge offers already explained or declined in this chat; never offered again in any wording (see followUpKey
+    // in lib/chatbot.js).
+    closedFollowUps: { type: [String], default: [] },
     // Reference numbers of the property cards last shown, in card order, so "the second one" can be resolved.
     shownPropertyRefs: { type: [String], default: [] },
     // Non-property topic the conversation is on (e.g. 'leadership'); cleared when the user returns to a property search.
