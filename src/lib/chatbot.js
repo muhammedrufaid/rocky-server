@@ -760,6 +760,9 @@ const isContactPrompt = (text) => CONTACT_PROMPT_RE.test(text);
 const INVALID_EMAIL_TEXT = "That email address doesn't look valid, so I've left it out. It's optional, but you can send a corrected one anytime.";
 const CONTACT_UPDATED_TEXT = "Thanks — I've updated your contact details for the team.";
 const CONTACT_KNOWN_TEXT = 'Thanks — the team already has these contact details.';
+const CONTACT_DECLINE_TEXT = "No problem, I won't pass on a request. Let me know if there's anything else I can help with.";
+// "No" to a listing's details or viewing question.
+const STEP_DECLINE_TEXT = "No problem. Let me know if you'd like to look at other options or have any questions.";
 // The reply that saved the lead (see completeLead / requestViewing); right after it, "use Ahmed instead" corrects the name.
 const LEAD_SAVED_RE = /I'll pass your viewing request to the team|An agent will contact you shortly/;
 const EMAIL_FIND_RE = /[^\s@,;:<>()]+@[^\s@,;:<>()]+\.[a-z]{2,}/i;
@@ -879,11 +882,26 @@ const pickPropertyQuestion = (cards) => {
 // "this apartment", "this office", "this property" (no type on the card).
 const detailsQuestion = (card) => `Would you like more details about this ${propertyNoun({ propertyType: card.type })}?`;
 const viewingQuestion = (card) => `Would you like to arrange a viewing for this ${propertyNoun({ propertyType: card.type })}?`;
+// Property questions answered for a listing (accepted or declined) are remembered as "propertyDetails:<ref>" /
+// "viewing:<ref>" in state.completedSteps, so the same question is never asked again for that listing.
+const MAX_COMPLETED_STEPS = 30;
+const stepKey = (question, ref) => `${question}:${ref}`;
+const stepDone = (state, question, ref) => state.completedSteps.includes(stepKey(question, ref));
+const completeStep = (state, question, ref) => {
+  if (ref && !stepDone(state, question, ref)) state.completedSteps = [...state.completedSteps, stepKey(question, ref)].slice(-MAX_COMPLETED_STEPS);
+};
+// The next question for one listing: its details first, then a viewing; a step already answered for it is skipped, so
+// '' once both are done.
+const nextPropertyStep = (state, card) => {
+  if (!stepDone(state, 'propertyDetails', card.propertyRefNo)) return detailsQuestion(card);
+  if (!stepDone(state, 'viewing', card.propertyRefNo)) return viewingQuestion(card);
+  return '';
+};
 // The next step after a successful search, chosen from the cards the reply shows: the cards themselves when only a count
-// was given, a pick when several cards are shown, the details of a single card. Never a search field question.
-const resultsNextStep = (cards, total) => {
+// was given, a pick when several cards are shown, the next step for a single card. Never a search field question.
+const resultsNextStep = (cards, total, state) => {
   if (!cards.length) return total === 1 ? 'Would you like to see this listing?' : `Would you like to see these ${total} listings?`;
-  return cards.length > 1 ? pickPropertyQuestion(cards) : detailsQuestion(cards[0]);
+  return cards.length > 1 ? pickPropertyQuestion(cards) : nextPropertyStep(state, cards[0]);
 };
 // Asked after listing other areas with matching listings; the reply is read as an area.
 const AREA_PICK_QUESTION = 'Which of these areas would you like to try?';
@@ -1092,7 +1110,7 @@ const CONFIRM_RE = /^\s*(yes|yeah|yep|sure|ok|okay|fine|it'?s fine|its fine|that
 const FIELD_QUESTION_RES = {
   purpose: /\b(buy(ing)?|rent(ing)?|off[- ]?plan)\b[^?]*\bor\b/i,
   location: /\b(areas?|locations?|communit(y|ies)|neighbou?rhoods?|where)\b/i,
-  budget: /\bbudget\b/i,
+  budget: /\bbudget\b|\bhow much\b[^?]*\b(spend|pay|afford|invest)\b/i,
   bedrooms: /\b(bedrooms?|studio)\b/i,
   furnishing: /\bfurnish/i,
   propertyType: /\b(property type|type of property|apartment or (a )?villa|villa or (an )?apartment)\b/i,
@@ -2412,13 +2430,20 @@ const followUpKey = (text) => {
   return [...new Set(subjects)].sort();
 };
 
-// True when the offer adds nothing to one already explained or declined: the same key, or a key of two or more words
-// that all belong to a closed offer ("RERA and sales" after "RERA's effect on tenancy and sales").
+// True when the offer adds nothing to one already explained or declined: the same key, a key of two or more words that
+// all belong to a closed offer ("RERA and sales" after "RERA's effect on tenancy and sales"), or a key that covers at
+// least two of a closed offer's words and two thirds of them ("components of DLD transfer fees" after "how DLD fees
+// apply to a purchase").
 const isClosedFollowUp = (offer, closedFollowUps) => {
   const key = followUpKey(offer);
   return key.length > 0 && closedFollowUps.some((closed) => {
     const closedKey = followUpKey(closed);
-    return key.join(' ') === closedKey.join(' ') || (key.length >= 2 && key.every((w) => closedKey.includes(w)));
+    const shared = key.filter((w) => closedKey.includes(w)).length;
+    return (
+      key.join(' ') === closedKey.join(' ') ||
+      (key.length >= 2 && shared === key.length) ||
+      (shared >= 2 && shared / closedKey.length >= 2 / 3)
+    );
   });
 };
 
@@ -2503,6 +2528,7 @@ const chat = async ({ sessionId, message, action }) => {
     pendingQuestion: session?.pendingQuestion || '',
     pendingFollowUp: session?.pendingFollowUp?.offer ? { ...session.pendingFollowUp } : null,
     closedFollowUps: session?.closedFollowUps || [],
+    completedSteps: session?.completedSteps || [],
     shownPropertyRefs: session?.shownPropertyRefs || [],
     currentTopic: session?.currentTopic || '',
     searchWelcomed: Boolean(session?.searchWelcomed),
@@ -2653,9 +2679,22 @@ const chat = async ({ sessionId, message, action }) => {
       if (!pickedRef && pendingQuestion === 'propertyDetails' && saysYes) pickedRef = singleShownRef;
       if (!pickedRef && pendingQuestion === 'pickProperty' && saysYes && shownCards.length > 1) pickAgain = pickPropertyQuestion(shownCards);
     }
+    // "No" to a listing's details or viewing question closes that question for the listing; a viewing request answers it
+    // too. Either way it is completed and never asked again for that listing (see nextPropertyStep).
+    const declinedStep =
+      !isViewingClick && Boolean(singleShownRef) && ['propertyDetails', 'viewing'].includes(pendingQuestion) &&
+      DECLINE_RE.test(message) && !criteriaChanged && !generalQuestion;
+    if (declinedStep || viewingAnswer) completeStep(state, pendingQuestion, singleShownRef);
     const offerPending =
       state.leadOfferShown && !state.leadOfferDeclined && !state.leadSaved && OFFER_RE.test(lastAssistant) && pendingQuestion !== 'propertyDetails';
     const awaitingContact = !state.leadSaved && isContactPrompt(lastAssistant);
+    // "No" to the contact request closes the viewing / agent request; "yes" without any details leaves it unanswered,
+    // so the same request is asked again (see wantsContact).
+    const declinedContact = awaitingContact && DECLINE_RE.test(message) && !criteriaGiven;
+    if (declinedContact) {
+      state.viewingInterest = {};
+      state.leadOfferDeclined = true;
+    }
     const typedViewing = !isViewingClick && (VIEWING_RE.test(message) || viewingAnswer);
     if (!isViewingClick && !state.leadSaved && (/just (browsing|looking)/i.test(message) || (offerPending && DECLINE_RE.test(message) && !extracted.budgetFlexible))) {
       state.leadOfferDeclined = true;
@@ -2663,9 +2702,11 @@ const chat = async ({ sessionId, message, action }) => {
     const acceptedOffer =
       !isViewingClick && !state.leadSaved && !awaitingContact &&
       ((offerPending && ACCEPT_RE.test(message)) || AGENT_REQUEST_RE.test(message) || viewingAnswer);
-    // A viewing request while one property is shown (e.g. after its details) is for that property.
+    // A viewing request while one property is shown (e.g. after its details) is for that property. The request (typed or
+    // the Book a Viewing button) completes that listing's viewing question.
     if (isViewingClick) state.viewingInterest = await resolveViewingInterest(action, q);
     else if (typedViewing) state.viewingInterest = await resolveViewingInterest({ propertyRefNo: singleShownRef }, q);
+    if (isViewingClick || typedViewing) completeStep(state, 'viewing', state.viewingInterest.selectedPropertyRefNo);
 
     // 3. Contact details: every valid field in the message is merged into the session's contact state (the latest value
     // wins); known fields are never cleared
@@ -2696,7 +2737,8 @@ const chat = async ({ sessionId, message, action }) => {
 
     // 4. Lead capture: name + valid phone save the lead immediately; email is optional and never blocks it
     const volunteered = Boolean(details.name && (details.phone || phoneError));
-    const wantsContact = acceptedOffer || volunteered || (awaitingContact && Object.keys(found).length > 0);
+    const wantsContact =
+      acceptedOffer || volunteered || (awaitingContact && (Object.keys(found).length > 0 || (ACCEPT_RE.test(message) && !criteriaGiven)));
     if (!state.leadSaved && !isViewingClick && !teamReply && wantsContact) {
       const question = nextContactQuestion(contact, { viewing: hasViewingInterest(state), phoneError: Boolean(phoneError && !contact.phone) });
       if (question) {
@@ -2736,6 +2778,8 @@ const chat = async ({ sessionId, message, action }) => {
       reply = contactReply;
     } else if (savedName && !criteriaChanged) {
       // confirmation already set above
+    } else if (declinedStep || declinedContact) {
+      reply = declinedContact ? CONTACT_DECLINE_TEXT : STEP_DECLINE_TEXT;
     } else if (followUp === 'decline') {
       // "No" to a knowledge offer only closes that offer (it is not offered again); the saved search stays paused.
       closeFollowUp(state, offered?.offer);
@@ -2759,11 +2803,13 @@ const chat = async ({ sessionId, message, action }) => {
       enforce = true;
       propertyTurn = true;
     } else if (pickedRef) {
-      // The chosen card's real details, then one viewing question. Its card is already on screen, so it isn't sent
-      // again; it becomes the only shown property, so a "yes" books the viewing for exactly this listing.
+      // The chosen card's real details (its details question is now completed), then its next unanswered step: a viewing
+      // question unless one was already answered for it. Its card is already on screen, so it isn't sent again; it
+      // becomes the only shown property, so a "yes" books the viewing for exactly this listing.
       const listing = await findListing(pickedRef);
       if (listing) {
-        reply = `${listingDetailsText(listing)}\n\n${viewingQuestion(listing.card)}`;
+        completeStep(state, 'propertyDetails', pickedRef);
+        reply = [listingDetailsText(listing), nextPropertyStep(state, listing.card)].filter(Boolean).join('\n\n');
         state.shownPropertyRefs = [pickedRef];
       } else {
         reply = "That listing is no longer available. Would you like me to search again with your current requirements?";
@@ -3092,7 +3138,7 @@ const chat = async ({ sessionId, message, action }) => {
     // After results: a still-missing search field first; otherwise the next step for what was shown (see resultsNextStep).
     const resultTotal = propertyResult?.total || properties.length;
     if (propertyTurn && resultTotal && !missing) {
-      reply = withQuestion(reply, resultsNextStep(properties, resultTotal));
+      reply = withQuestion(reply, resultsNextStep(properties, resultTotal, state));
     } else if ((criteriaChanged || propertyTurn) && missing) {
       let question = NEXT_QUESTION[missing];
       if (missing === 'purpose' && q.location) question = categoryQuestion(q.location);
@@ -3131,6 +3177,7 @@ const chat = async ({ sessionId, message, action }) => {
         pendingQuestion: state.pendingQuestion,
         pendingFollowUp: state.pendingFollowUp || {},
         closedFollowUps: state.closedFollowUps,
+        completedSteps: state.completedSteps,
         shownPropertyRefs: state.shownPropertyRefs,
         currentTopic: state.currentTopic,
         searchWelcomed: state.searchWelcomed,

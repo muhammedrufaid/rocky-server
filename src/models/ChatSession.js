@@ -83,6 +83,10 @@ const chatSessionSchema = new mongoose.Schema(
     // Knowledge offers already explained or declined in this chat; never offered again in any wording (see followUpKey
     // in lib/chatbot.js).
     closedFollowUps: { type: [String], default: [] },
+    // Property questions already answered (accepted or declined) in this chat, one per listing:
+    // "propertyDetails:RO-R-03958", "viewing:RO-R-03958". They are not asked again for that listing (see nextPropertyStep
+    // in lib/chatbot.js).
+    completedSteps: { type: [String], default: [] },
     // Reference numbers of the property cards last shown, in card order, so "the second one" can be resolved.
     shownPropertyRefs: { type: [String], default: [] },
     // Non-property topic the conversation is on (e.g. 'leadership'); cleared when the user returns to a property search.
