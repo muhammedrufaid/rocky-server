@@ -23,7 +23,7 @@ const propertyTypeSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Villa, Land, Floor and Building exist in both categories.
+// Land, Floor and Building exist in both categories.
 propertyTypeSchema.index({ name: 1, category: 1 }, { unique: true });
 propertyTypeSchema.index({ category: 1, name: 1 });
 
