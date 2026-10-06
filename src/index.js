@@ -20,10 +20,11 @@ const faqRoutes = require('./routes/faqRoutes');
 const serviceRoutes = require('./routes/serviceRoutes');
 const blogRoutes = require('./routes/blogRoutes');
 const teamMemberRoutes = require('./routes/teamMemberRoutes');
-const companyInfoRoutes = require('./routes/companyInfo.routes');
 const googleBusinessProfileAuthRoutes = require('./routes/googleBusinessProfileAuthRoutes');
 const googleReviewRoutes = require('./routes/googleReviewRoutes');
 const chatbotRoutes = require('./routes/chatbotRoutes');
+const propertyTypeRoutes = require('./routes/propertyTypeRoutes');
+const commercialPropertyRoutes = require('./routes/commercialPropertyRoutes');
 const { startSalesforceMigrateScheduler } = require('./jobs/salesforceMigrateScheduler');
 const { startTeamTailorSyncScheduler } = require('./jobs/teamtailorSyncScheduler');
 const { startGoogleReviewsSyncScheduler } = require('./jobs/googleReviewsSyncScheduler');
@@ -77,9 +78,10 @@ app.use('/api/faqs', faqRoutes);
 app.use('/api/services', serviceRoutes);
 app.use('/api/blogs', blogRoutes);
 app.use('/api/team-members', teamMemberRoutes);
-app.use('/api/company-info', companyInfoRoutes);
 app.use('/api/reviews', googleReviewRoutes);
 app.use('/api/chatbot', chatbotRoutes);
+app.use('/api/property-types', propertyTypeRoutes);
+app.use('/api/commercial-properties', commercialPropertyRoutes);
 
 // Google Business Profile OAuth (company integration, not website login).
 // Must stay outside /api so the shared API key middleware does not block Google's redirect.

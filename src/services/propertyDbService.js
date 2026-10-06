@@ -1,4 +1,5 @@
 const Property = require('../models/Property');
+const PropertyType = require('../models/PropertyType');
 
 // Legacy vector fields that may still exist on older Mongo docs — never expose via frontend APIs.
 const INTERNAL_PROPERTY_FIELDS = ['embedding', 'embeddingHash'];
@@ -293,6 +294,27 @@ const fetchRentProperties = async (opts = {}) => {
   return paginateProperties({ page, limit, search, filters, forced: CATEGORY_MATCH.rent, maxLimit: LISTING_WINDOW_LIMIT });
 };
 
+const fetchCommercialPropertyTypeNames = async () => {
+  const types = await PropertyType.find({ categories: 'Commercial' }).select('name').lean();
+  return types.map((type) => (type.name || '').trim()).filter(Boolean);
+};
+
+const fetchCommercialProperties = async (opts = {}) => {
+  const { page, limit, search = '', filters = {}, propertyPurpose } = opts;
+  const propertyTypes = await fetchCommercialPropertyTypeNames();
+  return paginateProperties({
+    page,
+    limit,
+    search,
+    filters,
+    forced: {
+      propertyPurpose,
+      propertyType: { $in: propertyTypes },
+    },
+    maxLimit: LISTING_WINDOW_LIMIT,
+  });
+};
+
 const {
   FEATURED_JEBEL_ALI_VILLAGE_PROPERTY_REF_NOS,
 } = require('../constants/featuredJebelAliVillageProperties');
@@ -569,6 +591,7 @@ module.exports = {
   fetchReadyProperties,
   fetchBuyProperties,
   fetchRentProperties,
+  fetchCommercialProperties,
   fetchFeaturedJebelAliVillageProperties,
   fetchPropertyByRefNo,
   fetchSearchSuggestions,
