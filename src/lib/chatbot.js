@@ -1827,15 +1827,16 @@ const areaIntroLine = async (location) => {
   return sentences.find((s) => names.some((n) => s.toLowerCase().includes(n)) && wordCount(s) <= 20 && !/\d/.test(s)) || '';
 };
 
-// The opening of a new property search, built from the search state: "Let's explore two-bedroom apartments for sale in
-// Dubai South and find an option that suits your needs." plus areaIntroLine when there is one. Counts, prices and
-// listings follow in the result summary, so the intro never repeats them.
-const searchIntro = async (q) => {
-  let goal = 'find an option that suits your needs';
-  if (searchKind(q) === 'commercial') goal = 'narrow them down to your requirements';
-  else if (q.purpose === 'rent') goal = 'see which ones match your needs';
-  const opening = `Let's explore ${describeCriteria(q, { plural: true })} and ${goal}.`;
-  return [opening, q.location ? await areaIntroLine(q.location) : ''].filter(Boolean).join(' ');
+// Fixed first sentence of a new property search; refinements of the same search don't repeat it.
+const NEW_SEARCH_OPENING = "You're in the right place.";
+
+// The opening of a property search, built from the search state: "Let's explore two-bedroom apartments for sale in
+// Dubai South and find an option that suits your needs." plus areaIntroLine when there is one. `welcome`: a new search,
+// so NEW_SEARCH_OPENING comes first. Counts, prices and listings follow in the result summary, so the intro never
+// repeats them.
+const searchIntro = async (q, { welcome = false } = {}) => {
+  const opening = `Let's explore ${describeCriteria(q, { plural: true })} and find an option that suits your needs.`;
+  return [welcome && NEW_SEARCH_OPENING, opening, q.location ? await areaIntroLine(q.location) : ''].filter(Boolean).join(' ');
 };
 
 // Deterministic, precise wording: says exactly which criteria were not met and what changed. `brief`: the reply opens
@@ -2463,6 +2464,7 @@ const chat = async ({ sessionId, message, action }) => {
     closedFollowUps: session?.closedFollowUps || [],
     shownPropertyRefs: session?.shownPropertyRefs || [],
     currentTopic: session?.currentTopic || '',
+    searchWelcomed: Boolean(session?.searchWelcomed),
     leadOfferShown: Boolean(session?.leadOfferShown),
     leadOfferDeclined: Boolean(session?.leadOfferDeclined),
     leadSaved: Boolean(session?.leadSaved),
@@ -2585,6 +2587,7 @@ const chat = async ({ sessionId, message, action }) => {
       criteriaChanged = SEARCH_FIELDS.some((f) => f !== 'amenities' && extracted[f] && extracted[f] !== q[f]);
       criteriaGiven = !message.includes('?') && SEARCH_FIELDS.some((f) => extracted[f]);
       startsNewSearch = detectNewPropertySearch(extracted, q) || switchesSearchKind(q, extracted);
+      if (startsNewSearch) state.searchWelcomed = false;
       if (detectNewPropertySearch(extracted, q)) resetSearchFilters(q);
       applySearchUpdates(q, extracted);
       if (String(q.amenities || '') !== amenitiesBefore || Boolean(q.nearMetro) !== nearMetroBefore) criteriaChanged = true;
@@ -2851,7 +2854,9 @@ const chat = async ({ sessionId, message, action }) => {
           result = await searchWithFallback(q, q.budget, { relaxBedrooms });
         }
         // A new or changed request with matches opens with a short intro; "show me those again" doesn't.
-        const intro = result.stage === 'exact' && criteriaChanged && !cheaper ? await searchIntro(q) : '';
+        // The first intro of a search opens with NEW_SEARCH_OPENING.
+        const intro = result.stage === 'exact' && criteriaChanged && !cheaper ? await searchIntro(q, { welcome: !state.searchWelcomed }) : '';
+        if (intro) state.searchWelcomed = true;
         reply = await describeResults(q, result, maxPrice, { cheaper, brief: Boolean(intro) });
         alternatives = result.alternatives || null;
         if (result.stage === 'overBudget') {
@@ -3070,6 +3075,7 @@ const chat = async ({ sessionId, message, action }) => {
         closedFollowUps: state.closedFollowUps,
         shownPropertyRefs: state.shownPropertyRefs,
         currentTopic: state.currentTopic,
+        searchWelcomed: state.searchWelcomed,
         leadOfferShown: state.leadOfferShown,
         leadOfferDeclined: state.leadOfferDeclined,
         leadSaved: state.leadSaved,

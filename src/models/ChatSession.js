@@ -85,6 +85,8 @@ const chatSessionSchema = new mongoose.Schema(
     shownPropertyRefs: { type: [String], default: [] },
     // Non-property topic the conversation is on (e.g. 'leadership'); cleared when the user returns to a property search.
     currentTopic: { type: String, trim: true, default: '' },
+    // The current property search has already opened with NEW_SEARCH_OPENING (lib/chatbot.js); reset by a new search.
+    searchWelcomed: { type: Boolean, default: false },
     leadOfferShown: {
       type: Boolean,
       default: false,
