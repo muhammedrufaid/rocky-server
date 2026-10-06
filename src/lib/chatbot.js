@@ -619,6 +619,7 @@ const INTEREST_FIELDS = [
   ['selectedPropertyRefNo', 'Property Ref'],
   ['selectedPropertyTitle', 'Property'],
   ['selectedLocation', 'Property Location'],
+  ['selectedPurpose', 'Property Purpose'],
 ];
 
 const fieldLines = (fields, args) =>
@@ -652,8 +653,8 @@ const saveLead = async (args = {}, sessionId) => {
 
   const existing = await ChatbotLead.findOne({ sessionId }).select('_id').lean();
   if (existing) {
-    const { interest, selectedPropertyRefNo, selectedPropertyTitle, selectedLocation, email } = args;
-    await updateLead(sessionId, { email, interest, selectedPropertyRefNo, selectedPropertyTitle, selectedLocation });
+    const { interest, selectedPropertyRefNo, selectedPropertyTitle, selectedLocation, selectedPurpose, email } = args;
+    await updateLead(sessionId, { email, interest, selectedPropertyRefNo, selectedPropertyTitle, selectedLocation, selectedPurpose });
     return { ok: true, alreadySaved: true, leadId: String(existing._id) };
   }
 
@@ -748,11 +749,12 @@ const QUESTION_FOR = {
 };
 const OFFER_TEXT = 'Want me to have an agent send you more options or arrange a viewing?';
 const OFFER_RE = /have an agent|arrange a viewing/i;
-const CONTACT_REQUEST_TEXT = "Please share your name and phone number with country code. You can also include your email if you'd like.";
-const MISSING_NAME_TEXT = "What's your name?";
+const MISSING_NAME_TEXT = "Great. What's your name?";
+const MISSING_PHONE_TEXT = "What's the best phone number to reach you on? Please include your country code.";
+const OPTIONAL_EMAIL_TEXT = "If you'd like, you can also share your email.";
 const INVALID_PHONE_TEXT = 'Please enter a valid phone number, including your country code.';
-const CONTACT_PROMPTS = [CONTACT_REQUEST_TEXT, MISSING_NAME_TEXT, INVALID_PHONE_TEXT];
-const isContactPrompt = (text) => CONTACT_PROMPTS.includes(text);
+const CONTACT_PROMPTS = [MISSING_NAME_TEXT, MISSING_PHONE_TEXT, INVALID_PHONE_TEXT];
+const isContactPrompt = (text) => CONTACT_PROMPTS.some((prompt) => text.startsWith(prompt));
 const EMAIL_FIND_RE = /[^\s@,;:<>()]+@[^\s@,;:<>()]+\.[a-z]{2,}/i;
 // Anything that looks like a typed number ("+" and digits, or 6+ digit characters), checked only when a phone is expected.
 const PHONE_ATTEMPT_RE = /\+[\d\s().-]*\d|\d[\d\s().-]{4,}\d/;
@@ -850,8 +852,10 @@ const CHOICE_QUESTIONS = {
   showListings: { re: /Would you like to see (these \d+ listings|this listing)\?$/ },
   // "Which would you like to explore: Bloom Towers or Luma21?" (see pickPropertyQuestion), or the generic wording.
   pickProperty: { text: 'Which property would you like more details about?', re: /(which would you like to explore: [^?\n]+|Which property would you like more details about)\?$/i },
-  propertyDetails: { text: 'Would you like more details or to arrange a viewing?' },
-  viewing: { text: 'Would you like to arrange a viewing?' },
+  // One action per yes/no question: details for a single result card (see detailsQuestion), then a viewing for the
+  // property whose details were shown (see viewingQuestion).
+  propertyDetails: { re: /Would you like more details about this [^?\n]+\?$/ },
+  viewing: { re: /Would you like to arrange a viewing for this [^?\n]+\?$/ },
   // "Would you like me to relax the metro requirement or the pool requirement?" (see relaxQuestion).
   relaxRequirement: { re: /Would you like me to relax the [^?\n]+ requirement\?$/ },
 };
@@ -863,11 +867,14 @@ const pickPropertyQuestion = (cards) => {
   const distinct = names.every(Boolean) && new Set(names.map((n) => n.toLowerCase())).size === names.length;
   return distinct ? `Which would you like to explore: ${joinOr(names)}?` : CHOICE_QUESTIONS.pickProperty.text;
 };
+// "this apartment", "this office", "this property" (no type on the card).
+const detailsQuestion = (card) => `Would you like more details about this ${propertyNoun({ propertyType: card.type })}?`;
+const viewingQuestion = (card) => `Would you like to arrange a viewing for this ${propertyNoun({ propertyType: card.type })}?`;
 // The next step after a successful search, chosen from the cards the reply shows: the cards themselves when only a count
-// was given, a pick when several cards are shown, details or a viewing for a single card. Never a search field question.
+// was given, a pick when several cards are shown, the details of a single card. Never a search field question.
 const resultsNextStep = (cards, total) => {
   if (!cards.length) return total === 1 ? 'Would you like to see this listing?' : `Would you like to see these ${total} listings?`;
-  return cards.length > 1 ? pickPropertyQuestion(cards) : CHOICE_QUESTIONS.propertyDetails.text;
+  return cards.length > 1 ? pickPropertyQuestion(cards) : detailsQuestion(cards[0]);
 };
 // Asked after listing other areas with matching listings; the reply is read as an area.
 const AREA_PICK_QUESTION = 'Which of these areas would you like to try?';
@@ -1082,7 +1089,8 @@ const FIELD_QUESTION_RES = {
   propertyType: /\b(property type|type of property|apartment or (a )?villa|villa or (an )?apartment)\b/i,
 };
 const questionFields = (question) => Object.keys(FIELD_QUESTION_RES).filter((f) => FIELD_QUESTION_RES[f].test(question));
-const lastQuestionOf = (text) => String(text || '').split(/(?<=[.!?])\s+/).filter((s) => s.includes('?')).pop() || '';
+// Lines are split too, so a details list ("• Location: ...") never becomes part of the question that follows it.
+const lastQuestionOf = (text) => String(text || '').split(/(?<=[.!?])\s+|\n+/).filter((s) => s.includes('?')).pop() || '';
 
 const isAllDubaiPhrase = (text, { areaAsked = false } = {}) =>
   !text.includes('?') && !NEARBY_RE.test(text) && (ANY_LOCATION_RE.test(text) || (areaAsked && NO_PREFERENCE_RE.test(text)));
@@ -1351,11 +1359,11 @@ const extractContact = (text, { expectingName = false, expectingPhone = false } 
   return found;
 };
 
-// One combined request, then only the missing required field. Email is optional and never asked. Null when the lead can be saved.
+// Only the missing required field: name first, then phone. Email is optional, only mentioned with the phone question
+// while none is known. Null when the lead can be saved.
 const nextContactQuestion = (contact) => {
-  if (!contact.name && !contact.phone) return CONTACT_REQUEST_TEXT;
   if (!contact.name) return MISSING_NAME_TEXT;
-  if (!contact.phone) return INVALID_PHONE_TEXT;
+  if (!contact.phone) return contact.email ? MISSING_PHONE_TEXT : `${MISSING_PHONE_TEXT} ${OPTIONAL_EMAIL_TEXT}`;
   return null;
 };
 
@@ -2092,10 +2100,17 @@ const recommendAreas = async (message, q, near = '') => {
 
 const resolveViewingInterest = async (action, q) => {
   const ref = String(action?.propertyRefNo || '').trim();
-  const property = ref ? await Property.findOne({ propertyRefNo: ref }).select('propertyRefNo propertyTitle locality').lean() : null;
+  const property = ref
+    ? await Property.findOne({ propertyRefNo: ref }).select('propertyRefNo propertyTitle locality propertyPurpose offPlan').lean()
+    : null;
   const location = property?.locality?.replace(/\s*\([^)]*\)/, '').trim() || String(action?.location || '').trim() || q.location || '';
   return Object.fromEntries(
-    Object.entries({ selectedPropertyRefNo: property?.propertyRefNo, selectedPropertyTitle: property?.propertyTitle, selectedLocation: location }).filter(([, v]) => v)
+    Object.entries({
+      selectedPropertyRefNo: property?.propertyRefNo,
+      selectedPropertyTitle: property?.propertyTitle,
+      selectedLocation: location,
+      selectedPurpose: property ? propertyCategory(property) : '',
+    }).filter(([, v]) => v)
   );
 };
 
@@ -2105,6 +2120,8 @@ const ORDINAL_NOUN_RE = /\b(first|second|third|last|1st|2nd|3rd)\s+(?:one|proper
 const CARD_NUMBER_RE = /\b(?:number|no\.?|option|property|listing|#)\s*([1-9])\b/;
 const DETAILS_RE = /\b(details?|more info(rmation)?|tell me more)\b/i;
 const VIEWING_WORD_RE = /\b(view(ing)?|visit|see it)\b/i;
+// "book it", "arrange that", "schedule one": a yes to a viewing question.
+const BOOK_IT_RE = /^\s*(book|arrange|schedule)\s+(it|that|this|one)\b/i;
 
 // The cards last shown, in card order. A listing removed since then keeps its place (reference only), so "the second
 // one" still points at the card the user saw.
@@ -2594,13 +2611,15 @@ const chat = async ({ sessionId, message, action }) => {
     }
 
     // 2. Property picks, offer acceptance / decline / viewing requests
-    // "the second one" after cards, or "yes"/"details" after "more details or to arrange a viewing?" for a single card.
-    // "viewing" to that question, or "yes" to "Would you like to arrange a viewing?", is a viewing request.
+    // "the second one" after cards, or "yes"/"details" after "Would you like more details about this villa?".
+    // "yes" / "book it" to "Would you like to arrange a viewing for this villa?" (asked after its details), or "viewing"
+    // to the details question, is a viewing request for the one property on screen.
     const shownRefs = state.shownPropertyRefs;
     const singleShownRef = shownRefs.length === 1 ? shownRefs[0] : '';
     const viewingAnswer =
       !isViewingClick && Boolean(singleShownRef) &&
-      ((pendingQuestion === 'propertyDetails' && VIEWING_WORD_RE.test(message)) || (pendingQuestion === 'viewing' && ACCEPT_RE.test(message)));
+      ((pendingQuestion === 'propertyDetails' && (VIEWING_WORD_RE.test(message) || BOOK_IT_RE.test(message))) ||
+        (pendingQuestion === 'viewing' && (ACCEPT_RE.test(message) || BOOK_IT_RE.test(message))));
     let pickedRef = '';
     let pickAgain = ''; // "yes" to "Which would you like to explore: A or B?" names no card, so the choice is asked again
     if (!isViewingClick && !teamReply && !criteriaChanged && !viewingAnswer && shownRefs.length) {
@@ -2658,6 +2677,8 @@ const chat = async ({ sessionId, message, action }) => {
         if (confirmation) {
           savedName = contact.name;
           reply = confirmation;
+        } else {
+          contactReply = FALLBACK_REPLY; // the lead wasn't saved, so nothing is confirmed
         }
       }
     }
@@ -2704,11 +2725,12 @@ const chat = async ({ sessionId, message, action }) => {
       enforce = true;
       propertyTurn = true;
     } else if (pickedRef) {
-      // The chosen card's real details, then the next step towards a viewing.
+      // The chosen card's real details, then one viewing question. Its card is already on screen, so it isn't sent
+      // again; it becomes the only shown property, so a "yes" books the viewing for exactly this listing.
       const listing = await findListing(pickedRef);
       if (listing) {
-        reply = `${listingDetailsText(listing)}\n\n${CHOICE_QUESTIONS.viewing.text}`;
-        properties = [listing.card];
+        reply = `${listingDetailsText(listing)}\n\n${viewingQuestion(listing.card)}`;
+        state.shownPropertyRefs = [pickedRef];
       } else {
         reply = "That listing is no longer available. Would you like me to search again with your current requirements?";
       }
@@ -2843,6 +2865,8 @@ const chat = async ({ sessionId, message, action }) => {
 
       const runSearch = async ({ relaxBedrooms = true } = {}) => {
         state.currentTopic = '';
+        // New results replace a viewing request the user walked away from, so a later lead never names that property.
+        if (!typedViewing) state.viewingInterest = {};
         let maxPrice = q.budget;
         let result;
         if (cheaper) {

@@ -60,6 +60,8 @@ const chatSessionSchema = new mongoose.Schema(
       selectedPropertyRefNo: { type: String, trim: true },
       selectedPropertyTitle: { type: String, trim: true },
       selectedLocation: { type: String, trim: true },
+      // The listing's own category ('buy', 'rent' or 'off-plan'), which can differ from the saved search's purpose.
+      selectedPurpose: { type: String, trim: true },
     },
     // Set when no listing fit the budget and the lowest real price was offered; cleared on the next reply.
     budgetFallback: {
