@@ -2,35 +2,50 @@ const mongoose = require('mongoose');
 const PropertyType = require('../models/PropertyType');
 const { CATEGORIES } = PropertyType;
 
+const parseCategories = (value) => {
+  if (!Array.isArray(value) || value.length === 0) {
+    return { error: 'Please provide categories as a non-empty array' };
+  }
+
+  const cleaned = value.map((item) => String(item).trim());
+  const invalid = cleaned.filter((item) => !CATEGORIES.includes(item));
+  if (invalid.length) {
+    return { error: `Invalid category. Allowed values: ${CATEGORIES.join(', ')}` };
+  }
+
+  return { categories: CATEGORIES.filter((category) => cleaned.includes(category)) };
+};
+
+const duplicateResponse = (res) =>
+  res.status(409).json({
+    success: false,
+    message: 'Property type already exists',
+  });
+
 // POST /api/property-types
 const createPropertyType = async (req, res) => {
   try {
     const name = (req.body?.name || '').trim();
-    const category = (req.body?.category || '').trim();
+    const parsed = parseCategories(req.body?.categories);
 
-    if (!name || !category) {
+    if (!name) {
       return res.status(400).json({
         success: false,
-        message: 'Please provide name and category',
+        message: 'Please provide name and categories',
       });
     }
 
-    if (!CATEGORIES.includes(category)) {
+    if (parsed.error) {
       return res.status(400).json({
         success: false,
-        message: `Invalid category. Allowed values: ${CATEGORIES.join(', ')}`,
+        message: parsed.error,
       });
     }
 
-    const existing = await PropertyType.findOne({ name, category });
-    if (existing) {
-      return res.status(409).json({
-        success: false,
-        message: 'Property type already exists for this category',
-      });
-    }
+    const existing = await PropertyType.findOne({ name });
+    if (existing) return duplicateResponse(res);
 
-    const propertyType = await PropertyType.create({ name, category });
+    const propertyType = await PropertyType.create({ name, categories: parsed.categories });
 
     return res.status(201).json({
       success: true,
@@ -38,12 +53,7 @@ const createPropertyType = async (req, res) => {
       data: propertyType,
     });
   } catch (error) {
-    if (error.code === 11000) {
-      return res.status(409).json({
-        success: false,
-        message: 'Property type already exists for this category',
-      });
-    }
+    if (error.code === 11000) return duplicateResponse(res);
 
     return res.status(500).json({
       success: false,
@@ -64,12 +74,10 @@ const getAllPropertyTypes = async (req, res) => {
           message: `Invalid category. Allowed values: ${CATEGORIES.join(', ')}`,
         });
       }
-      filter.category = req.query.category;
+      filter.categories = req.query.category;
     }
 
-    const propertyTypes = await PropertyType.find(filter)
-      .sort({ category: 1, name: 1 })
-      .select('name category');
+    const propertyTypes = await PropertyType.find(filter).sort({ name: 1 }).select('name categories');
 
     return res.status(200).json({
       success: true,
@@ -94,7 +102,7 @@ const getPropertyTypeById = async (req, res) => {
       });
     }
 
-    const propertyType = await PropertyType.findById(req.params.id).select('name category');
+    const propertyType = await PropertyType.findById(req.params.id).select('name categories');
     if (!propertyType) {
       return res.status(404).json({
         success: false,
@@ -147,35 +155,32 @@ const updatePropertyType = async (req, res) => {
       updates.name = name;
     }
 
-    if (req.body.category !== undefined) {
-      const category = String(req.body.category).trim();
-      if (!CATEGORIES.includes(category)) {
+    if (req.body.categories !== undefined) {
+      const parsed = parseCategories(req.body.categories);
+      if (parsed.error) {
         return res.status(400).json({
           success: false,
-          message: `Invalid category. Allowed values: ${CATEGORIES.join(', ')}`,
+          message: parsed.error,
         });
       }
-      updates.category = category;
+      updates.categories = parsed.categories;
+    }
+
+    if (!Object.keys(updates).length) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide name or categories to update',
+      });
     }
 
     const nextName = updates.name ?? existing.name;
-    const nextCategory = updates.category ?? existing.category;
-    const duplicate = await PropertyType.findOne({
-      _id: { $ne: id },
-      name: nextName,
-      category: nextCategory,
-    });
-    if (duplicate) {
-      return res.status(409).json({
-        success: false,
-        message: 'Property type already exists for this category',
-      });
-    }
+    const duplicate = await PropertyType.findOne({ _id: { $ne: id }, name: nextName });
+    if (duplicate) return duplicateResponse(res);
 
     const updated = await PropertyType.findByIdAndUpdate(id, updates, {
       new: true,
       runValidators: true,
-    }).select('name category');
+    }).select('name categories');
 
     return res.status(200).json({
       success: true,
@@ -183,12 +188,7 @@ const updatePropertyType = async (req, res) => {
       data: updated,
     });
   } catch (error) {
-    if (error.code === 11000) {
-      return res.status(409).json({
-        success: false,
-        message: 'Property type already exists for this category',
-      });
-    }
+    if (error.code === 11000) return duplicateResponse(res);
 
     return res.status(500).json({
       success: false,
@@ -209,7 +209,7 @@ const deletePropertyType = async (req, res) => {
       });
     }
 
-    const deleted = await PropertyType.findByIdAndDelete(id).select('name category');
+    const deleted = await PropertyType.findByIdAndDelete(id).select('name categories');
     if (!deleted) {
       return res.status(404).json({
         success: false,

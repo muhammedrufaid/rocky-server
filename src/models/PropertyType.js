@@ -9,23 +9,28 @@ const propertyTypeSchema = new mongoose.Schema(
       required: [true, 'Name is required'],
       trim: true,
     },
-    category: {
-      type: String,
-      required: [true, 'Category is required'],
-      enum: {
-        values: CATEGORIES,
-        message: 'Category must be Residential or Commercial',
+    categories: {
+      type: [
+        {
+          type: String,
+          enum: {
+            values: CATEGORIES,
+            message: 'Category must be Residential or Commercial',
+          },
+        },
+      ],
+      required: [true, 'Categories are required'],
+      validate: {
+        validator: (value) => Array.isArray(value) && value.length > 0,
+        message: 'At least one category is required',
       },
-      trim: true,
-      index: true,
     },
   },
   { timestamps: true }
 );
 
-// Land, Floor and Building exist in both categories.
-propertyTypeSchema.index({ name: 1, category: 1 }, { unique: true });
-propertyTypeSchema.index({ category: 1, name: 1 });
+propertyTypeSchema.index({ name: 1 }, { unique: true });
+propertyTypeSchema.index({ categories: 1, name: 1 });
 
 module.exports = mongoose.model('PropertyType', propertyTypeSchema, 'propertytypes');
 module.exports.CATEGORIES = CATEGORIES;
