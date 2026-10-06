@@ -1378,10 +1378,15 @@ const bedsLabel = (bedrooms, words = false) => {
   return `${joinOr(list.map(label))}-bedroom`;
 };
 
+// "apartment", "villa", "retail unit"; "rental" or "property" when no type is known.
+const propertyNoun = (q) => {
+  const noun = q.propertyType ? q.propertyType.toLowerCase() : q.purpose === 'rent' ? 'rental' : 'property';
+  return noun === 'retail' ? 'retail unit' : noun;
+};
+
 // "a 4-bedroom apartment for rent in Dubai Marina within AED 250,000/year" or, with a count, "two-bedroom apartments for rent ..."
 const describeCriteria = (q, { location = q.location, bedrooms = q.bedrooms, maxPrice = q.budget, plural = false, priceWord = 'under' } = {}) => {
-  let noun = q.propertyType ? q.propertyType.toLowerCase() : q.purpose === 'rent' ? 'rental' : 'property';
-  if (noun === 'retail') noun = 'retail unit';
+  let noun = propertyNoun(q);
   if (plural) noun = noun === 'property' ? 'properties' : `${noun}s`;
   const forWhat = q.purpose === 'rent' ? ' for rent' : q.purpose === 'buy' ? ' for sale' : '';
   const suffix = noun.startsWith('rental') ? '' : forWhat;
@@ -1811,8 +1816,31 @@ const describeAvailability = async (q) => {
   return { reply, properties: nearby.flatMap((g) => g.items).slice(0, PREVIEW_LIMIT) };
 };
 
-// Deterministic, precise wording: says exactly which criteria were not met and what changed.
-const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) => {
+// One sentence about the area from its own guide, word for word: the first sentence of `about` that names the area,
+// fits in 20 words (see shortenSentence) and has no figures, so no price, yield or statistic is ever claimed.
+// '' when the area has no guide or no such sentence.
+const areaIntroLine = async (location) => {
+  const guide = await AreaGuide.findOne({ isActive: true, $or: [{ title: location }, { listingsSearch: location }] }).select('title about').lean();
+  if (!guide) return '';
+  const names = [guide.title, location].map((n) => n.toLowerCase());
+  const sentences = String(guide.about).split(/(?<=[.!?])\s+/).map((s) => shortenSentence(s, 6));
+  return sentences.find((s) => names.some((n) => s.toLowerCase().includes(n)) && wordCount(s) <= 20 && !/\d/.test(s)) || '';
+};
+
+// The opening of a new property search, built from the search state: "Let's explore two-bedroom apartments for sale in
+// Dubai South and find an option that suits your needs." plus areaIntroLine when there is one. Counts, prices and
+// listings follow in the result summary, so the intro never repeats them.
+const searchIntro = async (q) => {
+  let goal = 'find an option that suits your needs';
+  if (searchKind(q) === 'commercial') goal = 'narrow them down to your requirements';
+  else if (q.purpose === 'rent') goal = 'see which ones match your needs';
+  const opening = `Let's explore ${describeCriteria(q, { plural: true })} and ${goal}.`;
+  return [opening, q.location ? await areaIntroLine(q.location) : ''].filter(Boolean).join(' ');
+};
+
+// Deterministic, precise wording: says exactly which criteria were not met and what changed. `brief`: the reply opens
+// with searchIntro, which already names the criteria, so exact results only give the count ("I found 3 matching villas").
+const describeResults = async (q, result, maxPrice, { cheaper = false, brief = false } = {}) => {
   const wanted = describeCriteria(q, { maxPrice, priceWord: 'within' });
   const missed = `I couldn't find ${cheaper ? wanted.replace(/^an? /, 'a cheaper ') : wanted}`;
   const [first] = result.groups;
@@ -1821,9 +1849,11 @@ const describeResults = async (q, result, maxPrice, { cheaper = false } = {}) =>
   const amenities = joinPhrases((q.amenities || []).map(amenityLabel));
   if (result.stage === 'exact') {
     const price = priceText(first.startingPrice, q.purpose, first.items[0]?.rentFrequency);
-    const found = total === 1
+    const noun = `${bedsLabel(q.bedrooms) === 'studio' ? 'studio ' : ''}${propertyNoun(q)}`;
+    let found = total === 1
       ? `I found ${describeCriteria(q, { maxPrice })}, priced at ${price}.`
       : `I found ${total} ${describeCriteria(q, { maxPrice, plural: true })}, starting from ${price}.`;
+    if (brief) found = `I found ${total} matching ${pluralize(total, noun)}${total === 1 ? '' : `, starting from ${price}`}:`;
     const n = result.unverifiedCount;
     const unproven = q.nearMetro ? joinOr([...(q.amenities || []).map(amenityLabel), 'metro proximity']) : amenities;
     const unverified = n ? `${n} more ${n === 1 ? 'listing matches' : 'listings match'} your other requirements, but I couldn't verify ${unproven} for ${n === 1 ? 'it' : 'them'}.` : '';
@@ -1891,7 +1921,9 @@ const withListingLines = (reply, cards, { metro = false } = {}) => {
     return `• ${listingName(p)}${district}: ${priceText(p.priceAED, p.category, p.rentFrequency)}${station}`;
   });
   const [first, ...rest] = reply.split('\n\n');
-  return [first, lines.join('\n'), ...rest].join('\n\n');
+  // "I found 3 matching villas:" leads straight into its lines.
+  const summary = first.endsWith(':') ? `${first}\n${lines.join('\n')}` : [first, lines.join('\n')].join('\n\n');
+  return [summary, ...rest].join('\n\n');
 };
 
 // Preview cards + View All metadata for the frontend.
@@ -2003,18 +2035,20 @@ const blogAreaPicks = async (message, hits) => {
   return picks.length >= 2 ? picks : [];
 };
 
-// For an area without a guide: the most relevant short sentence of its blog section intro. A long sentence is cut to its
-// leading clause when that clause stands alone; sentences opening with "It"/"They" need context and are skipped.
+// A sentence over 20 words is cut to its leading clause when that clause stands alone (minLeadWords to 20 words).
+const shortenSentence = (s, minLeadWords = 8) => {
+  if (wordCount(s) <= 20) return s;
+  const lead = s.split(/,\s/)[0];
+  return wordCount(lead) >= minLeadWords && wordCount(lead) <= 20 ? `${lead}.` : s;
+};
+
+// For an area without a guide: the most relevant short sentence of its blog section intro (see shortenSentence);
+// sentences opening with "It"/"They" need context and are skipped.
 const blogSectionSummary = (paragraphs, score) => {
-  const shorten = (s) => {
-    if (wordCount(s) <= 20) return s;
-    const lead = s.split(/,\s/)[0];
-    return wordCount(lead) >= 8 && wordCount(lead) <= 20 ? `${lead}.` : s;
-  };
   const sentences = paragraphs
     .flatMap((p) => p.split(/(?<=[.!?])\s+/))
     .filter((s) => !/^(it|they)\b/i.test(s))
-    .map(shorten)
+    .map((s) => shortenSentence(s))
     .filter((s) => wordCount(s) <= 20);
   const [best] = sentences.map((s) => [s, score(s)]).sort((a, b) => b[1] - a[1]);
   return best ? best[0] : '';
@@ -2816,7 +2850,9 @@ const chat = async ({ sessionId, message, action }) => {
         } else {
           result = await searchWithFallback(q, q.budget, { relaxBedrooms });
         }
-        reply = await describeResults(q, result, maxPrice, { cheaper });
+        // A new or changed request with matches opens with a short intro; "show me those again" doesn't.
+        const intro = result.stage === 'exact' && criteriaChanged && !cheaper ? await searchIntro(q) : '';
+        reply = await describeResults(q, result, maxPrice, { cheaper, brief: Boolean(intro) });
         alternatives = result.alternatives || null;
         if (result.stage === 'overBudget') {
           // Only the price is offered; listings are shown after the user agrees.
@@ -2831,6 +2867,7 @@ const chat = async ({ sessionId, message, action }) => {
           propertyTurn = enforce;
           if (enforce) reply = withListingLines(reply, properties, { metro: q.nearMetro });
         }
+        if (intro) reply = `${intro}\n\n${reply}`;
         // Areas found by the fallback (nearby or another verified area): one card each, plus a few of their real listings.
         const areaGroups = result.areas ? [...result.areas.nearby, result.areas.other].filter(Boolean) : [];
         if (areaGroups.length) {
