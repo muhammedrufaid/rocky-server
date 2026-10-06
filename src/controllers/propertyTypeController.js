@@ -1,0 +1,239 @@
+const mongoose = require('mongoose');
+const PropertyType = require('../models/PropertyType');
+const { CATEGORIES } = PropertyType;
+
+// POST /api/property-types
+const createPropertyType = async (req, res) => {
+  try {
+    const name = (req.body?.name || '').trim();
+    const category = (req.body?.category || '').trim();
+
+    if (!name || !category) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide name and category',
+      });
+    }
+
+    if (!CATEGORIES.includes(category)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid category. Allowed values: ${CATEGORIES.join(', ')}`,
+      });
+    }
+
+    const existing = await PropertyType.findOne({ name, category });
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        message: 'Property type already exists for this category',
+      });
+    }
+
+    const propertyType = await PropertyType.create({ name, category });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Property type created successfully',
+      data: propertyType,
+    });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message: 'Property type already exists for this category',
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error',
+    });
+  }
+};
+
+// GET /api/property-types?category=Residential|Commercial
+const getAllPropertyTypes = async (req, res) => {
+  try {
+    const filter = {};
+
+    if (req.query.category) {
+      if (!CATEGORIES.includes(req.query.category)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid category. Allowed values: ${CATEGORIES.join(', ')}`,
+        });
+      }
+      filter.category = req.query.category;
+    }
+
+    const propertyTypes = await PropertyType.find(filter)
+      .sort({ category: 1, name: 1 })
+      .select('name category');
+
+    return res.status(200).json({
+      success: true,
+      count: propertyTypes.length,
+      data: propertyTypes,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error',
+    });
+  }
+};
+
+// GET /api/property-types/:id
+const getPropertyTypeById = async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid property type id',
+      });
+    }
+
+    const propertyType = await PropertyType.findById(req.params.id).select('name category');
+    if (!propertyType) {
+      return res.status(404).json({
+        success: false,
+        message: 'Property type not found',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: propertyType,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error',
+    });
+  }
+};
+
+// PUT /api/property-types/:id
+const updatePropertyType = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid property type id',
+      });
+    }
+
+    const existing = await PropertyType.findById(id);
+    if (!existing) {
+      return res.status(404).json({
+        success: false,
+        message: 'Property type not found',
+      });
+    }
+
+    const updates = {};
+
+    if (req.body.name !== undefined) {
+      const name = String(req.body.name).trim();
+      if (!name) {
+        return res.status(400).json({
+          success: false,
+          message: 'Name cannot be empty',
+        });
+      }
+      updates.name = name;
+    }
+
+    if (req.body.category !== undefined) {
+      const category = String(req.body.category).trim();
+      if (!CATEGORIES.includes(category)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid category. Allowed values: ${CATEGORIES.join(', ')}`,
+        });
+      }
+      updates.category = category;
+    }
+
+    const nextName = updates.name ?? existing.name;
+    const nextCategory = updates.category ?? existing.category;
+    const duplicate = await PropertyType.findOne({
+      _id: { $ne: id },
+      name: nextName,
+      category: nextCategory,
+    });
+    if (duplicate) {
+      return res.status(409).json({
+        success: false,
+        message: 'Property type already exists for this category',
+      });
+    }
+
+    const updated = await PropertyType.findByIdAndUpdate(id, updates, {
+      new: true,
+      runValidators: true,
+    }).select('name category');
+
+    return res.status(200).json({
+      success: true,
+      message: 'Property type updated successfully',
+      data: updated,
+    });
+  } catch (error) {
+    if (error.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message: 'Property type already exists for this category',
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error',
+    });
+  }
+};
+
+// DELETE /api/property-types/:id
+const deletePropertyType = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid property type id',
+      });
+    }
+
+    const deleted = await PropertyType.findByIdAndDelete(id).select('name category');
+    if (!deleted) {
+      return res.status(404).json({
+        success: false,
+        message: 'Property type not found',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Property type deleted successfully',
+      data: deleted,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error',
+    });
+  }
+};
+
+module.exports = {
+  createPropertyType,
+  getAllPropertyTypes,
+  getPropertyTypeById,
+  updatePropertyType,
+  deletePropertyType,
+};
