@@ -629,11 +629,14 @@ const fieldLines = (fields, args) =>
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i;
 
-// One lead per session: a later viewing request or email is added to the existing lead.
-const updateLead = async (sessionId, { email, ...interest } = {}) => {
+// One lead per session: a later viewing request is added to the existing lead, and a corrected name, phone or email
+// replaces the old one (the latest explicit value wins).
+const updateLead = async (sessionId, { name, phone, email, ...interest } = {}) => {
   const lead = await ChatbotLead.findOne({ sessionId });
   if (!lead) return null;
-  if (email && EMAIL_RE.test(email) && !lead.email) lead.email = email;
+  if (name) lead.fullName = name;
+  if (phone) lead.phone = phone;
+  if (email && EMAIL_RE.test(email)) lead.email = email;
   if (interest.interest || interest.selectedPropertyRefNo || interest.selectedLocation) {
     const lines = fieldLines(INTEREST_FIELDS, { interest: 'Book a Viewing', ...interest });
     const key = interest.selectedPropertyRefNo ? `Property Ref: ${interest.selectedPropertyRefNo}` : lines.join('\n');
@@ -749,13 +752,19 @@ const QUESTION_FOR = {
 };
 const OFFER_TEXT = 'Want me to have an agent send you more options or arrange a viewing?';
 const OFFER_RE = /have an agent|arrange a viewing/i;
-const MISSING_NAME_TEXT = "Great. What's your name?";
-const MISSING_PHONE_TEXT = "What's the best phone number to reach you on? Please include your country code.";
-const OPTIONAL_EMAIL_TEXT = "If you'd like, you can also share your email.";
-const INVALID_PHONE_TEXT = 'Please enter a valid phone number, including your country code.';
-const CONTACT_PROMPTS = [MISSING_NAME_TEXT, MISSING_PHONE_TEXT, INVALID_PHONE_TEXT];
-const isContactPrompt = (text) => CONTACT_PROMPTS.some((prompt) => text.startsWith(prompt));
+// Contact collection asks once for everything, then only for a missing or invalid required field (see
+// nextContactQuestion). CONTACT_PROMPT_RE recognises each of those replies, so the next message is read as contact details.
+const INVALID_PHONE_TEXT = 'Please share a valid phone number including the country code.';
+const CONTACT_PROMPT_RE = /please share your name, phone number|what name should we use|phone number with country code should we use|please share a valid phone number/i;
+const isContactPrompt = (text) => CONTACT_PROMPT_RE.test(text);
+const INVALID_EMAIL_TEXT = "That email address doesn't look valid, so I've left it out. It's optional, but you can send a corrected one anytime.";
+const CONTACT_UPDATED_TEXT = "Thanks — I've updated your contact details for the team.";
+const CONTACT_KNOWN_TEXT = 'Thanks — the team already has these contact details.';
+// The reply that saved the lead (see completeLead / requestViewing); right after it, "use Ahmed instead" corrects the name.
+const LEAD_SAVED_RE = /I'll pass your viewing request to the team|An agent will contact you shortly/;
 const EMAIL_FIND_RE = /[^\s@,;:<>()]+@[^\s@,;:<>()]+\.[a-z]{2,}/i;
+// Something typed as an email that isn't a valid one ("rif@example").
+const EMAIL_ATTEMPT_RE = /[^\s@,;:<>()]+@[^\s,;:<>()]*/;
 // Anything that looks like a typed number ("+" and digits, or 6+ digit characters), checked only when a phone is expected.
 const PHONE_ATTEMPT_RE = /\+[\d\s().-]*\d|\d[\d\s().-]{4,}\d/;
 const NEXT_QUESTION = {
@@ -1335,22 +1344,30 @@ const looseName = (text) => {
 // "+1 (202) 555-0123" -> "+12025550123"
 const normalizePhone = (raw) => `+${raw.replace(/\D/g, '')}`;
 
-// Contact details in one message. A bare name is only accepted when we just asked for it; a typed number that
-// isn't a valid phone sets `phoneError` when a phone is expected or the message is just "name, number".
-const extractContact = (text, { expectingName = false, expectingPhone = false } = {}) => {
+// Contact details in one message, in any order or layout ("Rif, +971..., rif@example.com"). A bare name is only accepted
+// when we just asked for it; a typed number that isn't a valid phone sets `phoneError` when a phone is expected or the
+// message is just "name, number"; a typed email that isn't valid sets `emailError`. `correcting`: "use Ahmed instead"
+// also gives a name (only while contact details are being collected or were just saved).
+const extractContact = (text, { expectingName = false, expectingPhone = false, correcting = false } = {}) => {
   const found = {};
   const email = text.match(EMAIL_FIND_RE);
   if (email) found.email = email[0].toLowerCase();
-  const rest = text.replace(EMAIL_FIND_RE, ' ');
+  else if (EMAIL_ATTEMPT_RE.test(text)) found.emailError = true;
+  const rest = text.replace(EMAIL_FIND_RE, ' ').replace(EMAIL_ATTEMPT_RE, ' ');
 
   const phone = rest.match(PHONE_RE);
   if (phone) found.phone = normalizePhone(phone[0]);
   const nameThenNumber = /^\s*[a-z][a-z' -]{0,40}[\s,;:–-]+[+(]?[\d\s().-]+[\s,;.]*$/i.test(rest);
-  if (!phone && PHONE_ATTEMPT_RE.test(rest) && (expectingPhone || nameThenNumber)) found.phoneError = INVALID_PHONE_TEXT;
+  if (!phone && PHONE_ATTEMPT_RE.test(rest) && (expectingPhone || nameThenNumber)) found.phoneError = true;
 
   const withPhone = detectContact(rest);
-  const introduced = rest.match(/\b(?:my name is|my name's|name is|name:)\s+([a-z][a-z'-]+(?:\s+[a-z][a-z'-]+)?)/i);
-  const name = withPhone?.name || (introduced && !NAME_STOPWORDS.has(introduced[1].split(/\s+/)[0].toLowerCase()) ? introduced[1] : '');
+  const introduced = rest.match(/\b(?:my name is|my name's|name is|name:)\s+(?:actually\s+)?([a-z][a-z'-]+(?:\s+[a-z][a-z'-]+)?)/i);
+  const replacement = correcting ? rest.match(/\buse\s+([a-z][a-z'-]+(?:\s+[a-z][a-z'-]+)?)\s+instead\b/i) : null;
+  // Explicit wording ("use Ahmed instead", "my name is Ahmed") wins over the words before a phone number.
+  const name =
+    (replacement ? looseName(replacement[1]) : '') ||
+    (introduced && !NAME_STOPWORDS.has(introduced[1].split(/\s+/)[0].toLowerCase()) ? introduced[1] : '') ||
+    withPhone?.name;
   if (name) found.name = name;
   else if (expectingName || (nameThenNumber && found.phoneError)) {
     const loose = looseName(rest);
@@ -1359,11 +1376,18 @@ const extractContact = (text, { expectingName = false, expectingPhone = false } 
   return found;
 };
 
-// Only the missing required field: name first, then phone. Email is optional, only mentioned with the phone question
-// while none is known. Null when the lead can be saved.
-const nextContactQuestion = (contact) => {
-  if (!contact.name) return MISSING_NAME_TEXT;
-  if (!contact.phone) return contact.email ? MISSING_PHONE_TEXT : `${MISSING_PHONE_TEXT} ${OPTIONAL_EMAIL_TEXT}`;
+// The one contact message for what is still needed: everything at once while neither required field is known, then
+// only the missing or invalid one (`phoneError`: the number typed has no valid country code or length). Email is optional
+// and never asked on its own. Null when the lead can be saved.
+const nextContactQuestion = (contact, { viewing = false, phoneError = false } = {}) => {
+  const request = viewing ? 'the viewing request' : 'your request';
+  if (!contact.name && !contact.phone && !phoneError) {
+    const goal = viewing ? 'arrange a viewing' : 'have an agent contact you';
+    return `To ${goal}, please share your name, phone number with country code, and email address (optional) in one message.`;
+  }
+  if (!contact.name) return `${phoneError ? `${INVALID_PHONE_TEXT} ` : ''}What name should we use for ${request}?`;
+  if (phoneError) return `Thanks, ${contact.name}. ${INVALID_PHONE_TEXT}`;
+  if (!contact.phone) return 'Thanks. What phone number with country code should we use to contact you?';
   return null;
 };
 
@@ -2464,7 +2488,7 @@ const requestViewing = async (state, sessionId) => {
     state.leadSaved = true;
     return VIEWING_CONFIRM_TEXT;
   }
-  return nextContactQuestion(state.contact) || (await completeLead(state, sessionId)) || FALLBACK_REPLY;
+  return nextContactQuestion(state.contact, { viewing: true }) || (await completeLead(state, sessionId)) || FALLBACK_REPLY;
 };
 
 const chat = async ({ sessionId, message, action }) => {
@@ -2643,35 +2667,40 @@ const chat = async ({ sessionId, message, action }) => {
     if (isViewingClick) state.viewingInterest = await resolveViewingInterest(action, q);
     else if (typedViewing) state.viewingInterest = await resolveViewingInterest({ propertyRefNo: singleShownRef }, q);
 
-    // 3. Contact details: merged into the session's contact state; known fields are never cleared
+    // 3. Contact details: every valid field in the message is merged into the session's contact state (the latest value
+    // wins); known fields are never cleared
     const contact = state.contact;
     let found = {};
+    let contactReply = '';
     if (!isViewingClick && !teamReply) {
       found = extractContact(message, {
         expectingName: awaitingContact && !contact.name,
         expectingPhone: awaitingContact && !contact.phone && !extracted.budget,
+        correcting: awaitingContact || (state.leadSaved && LEAD_SAVED_RE.test(lastAssistant)),
       });
       if (state.leadSaved) {
-        // Once the lead exists, only a volunteered email is still added to it.
-        if (found.email && !contact.email) {
-          contact.email = found.email;
-          await updateLead(sessionId, { email: found.email });
+        // Once the lead exists, a volunteered email or a corrected name or phone updates it; nothing else is collected.
+        const changes = Object.fromEntries(['name', 'phone', 'email'].filter((f) => found[f] && found[f] !== contact[f]).map((f) => [f, found[f]]));
+        if (Object.keys(changes).length) {
+          Object.assign(contact, changes);
+          await updateLead(sessionId, changes);
+          if (!criteriaGiven) contactReply = CONTACT_UPDATED_TEXT;
+        } else if ((found.name || found.phone || found.email) && !criteriaGiven) {
+          contactReply = CONTACT_KNOWN_TEXT; // the same details again: nothing to ask or update
         }
         found = {};
       }
     }
-    const { phoneError, ...details } = found;
+    const { phoneError, emailError, ...details } = found;
     Object.assign(contact, details);
 
-    // 4. Lead capture: name + valid phone save the lead immediately; email is optional and never asked
-    let contactReply = '';
+    // 4. Lead capture: name + valid phone save the lead immediately; email is optional and never blocks it
     const volunteered = Boolean(details.name && (details.phone || phoneError));
     const wantsContact = acceptedOffer || volunteered || (awaitingContact && Object.keys(found).length > 0);
     if (!state.leadSaved && !isViewingClick && !teamReply && wantsContact) {
-      if (phoneError && !contact.phone) {
-        contactReply = phoneError;
-      } else if (nextContactQuestion(contact)) {
-        contactReply = nextContactQuestion(contact);
+      const question = nextContactQuestion(contact, { viewing: hasViewingInterest(state), phoneError: Boolean(phoneError && !contact.phone) });
+      if (question) {
+        contactReply = question;
       } else {
         confirmation = (await completeLead(state, sessionId)) || '';
         if (confirmation) {
@@ -2680,6 +2709,11 @@ const chat = async ({ sessionId, message, action }) => {
         } else {
           contactReply = FALLBACK_REPLY; // the lead wasn't saved, so nothing is confirmed
         }
+      }
+      // An invalid email never blocks the request: the user is told it was left out.
+      if (emailError && contactReply !== FALLBACK_REPLY) {
+        if (contactReply) contactReply = `${INVALID_EMAIL_TEXT}\n\n${contactReply}`;
+        else reply = confirmation = `${confirmation} ${INVALID_EMAIL_TEXT}`;
       }
     }
 
