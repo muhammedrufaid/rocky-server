@@ -292,7 +292,7 @@ const fetchOffPlanProperties = async (opts = {}) => {
     limit,
     search,
     filters,
-    forced: { ...CATEGORY_MATCH['off-plan'], ...(await residentialPropertyTypeMatch()) },
+    forced: CATEGORY_MATCH['off-plan'],
     maxLimit: LISTING_WINDOW_LIMIT,
   });
 };
