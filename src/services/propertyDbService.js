@@ -274,9 +274,27 @@ const propertyCategory = (property) => {
 // The buy/rent/off-plan listing pages request a 500-item window when price/bed filters are active.
 const LISTING_WINDOW_LIMIT = 500;
 
+// Category lives on PropertyType.categories, not on the listing. A type name such as Land can be
+// Residential, Commercial, or both, so listings are matched through that catalog rather than by name.
+const fetchPropertyTypeNamesByCategory = async (category) => {
+  const types = await PropertyType.find({ categories: category }).select('name').lean();
+  return types.map((type) => (type.name || '').trim()).filter(Boolean);
+};
+
+const residentialPropertyTypeMatch = async () => ({
+  propertyType: { $in: await fetchPropertyTypeNamesByCategory('Residential') },
+});
+
 const fetchOffPlanProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {} } = opts;
-  return paginateProperties({ page, limit, search, filters, forced: CATEGORY_MATCH['off-plan'], maxLimit: LISTING_WINDOW_LIMIT });
+  return paginateProperties({
+    page,
+    limit,
+    search,
+    filters,
+    forced: CATEGORY_MATCH['off-plan'],
+    maxLimit: LISTING_WINDOW_LIMIT,
+  });
 };
 
 const fetchReadyProperties = async (opts = {}) => {
@@ -286,18 +304,29 @@ const fetchReadyProperties = async (opts = {}) => {
 
 const fetchBuyProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {} } = opts;
-  return paginateProperties({ page, limit, search, filters, forced: CATEGORY_MATCH.buy, maxLimit: LISTING_WINDOW_LIMIT });
+  return paginateProperties({
+    page,
+    limit,
+    search,
+    filters,
+    forced: { ...CATEGORY_MATCH.buy, ...(await residentialPropertyTypeMatch()) },
+    maxLimit: LISTING_WINDOW_LIMIT,
+  });
 };
 
 const fetchRentProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {} } = opts;
-  return paginateProperties({ page, limit, search, filters, forced: CATEGORY_MATCH.rent, maxLimit: LISTING_WINDOW_LIMIT });
+  return paginateProperties({
+    page,
+    limit,
+    search,
+    filters,
+    forced: { ...CATEGORY_MATCH.rent, ...(await residentialPropertyTypeMatch()) },
+    maxLimit: LISTING_WINDOW_LIMIT,
+  });
 };
 
-const fetchCommercialPropertyTypeNames = async () => {
-  const types = await PropertyType.find({ categories: 'Commercial' }).select('name').lean();
-  return types.map((type) => (type.name || '').trim()).filter(Boolean);
-};
+const fetchCommercialPropertyTypeNames = async () => fetchPropertyTypeNamesByCategory('Commercial');
 
 const fetchCommercialProperties = async (opts = {}) => {
   const { page, limit, search = '', filters = {}, propertyPurpose } = opts;
