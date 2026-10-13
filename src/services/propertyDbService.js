@@ -1,5 +1,6 @@
 const Property = require('../models/Property');
 const PropertyType = require('../models/PropertyType');
+const { isHeadOfficeValue } = require('../utils/headOffice');
 
 // Legacy vector fields that may still exist on older Mongo docs — never expose via frontend APIs.
 const INTERNAL_PROPERTY_FIELDS = ['embedding', 'embeddingHash'];
@@ -9,6 +10,8 @@ const stripInternalPropertyFields = (doc) => {
   INTERNAL_PROPERTY_FIELDS.forEach((field) => {
     delete doc[field];
   });
+  // Derived for the response only. listingAgent remains the stored source of truth.
+  doc.isHeadOffice = isHeadOfficeValue(doc.listingAgent);
   return doc;
 };
 
@@ -362,7 +365,7 @@ const fetchFeaturedJebelAliVillageProperties = async () => {
   for (const refNo of FEATURED_JEBEL_ALI_VILLAGE_PROPERTY_REF_NOS) {
     const doc = byRefNo.get(refNo);
     if (doc) {
-      properties.push(doc);
+      properties.push(stripInternalPropertyFields(doc));
     } else {
       missingRefs.push(refNo);
     }
