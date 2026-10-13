@@ -4,7 +4,7 @@ This document lists the API endpoints currently defined in the server, based on 
 
 ## Total APIs
 
-**26 endpoints**
+**31 endpoints**
 
 ## Health
 
@@ -41,6 +41,16 @@ This document lists the API endpoints currently defined in the server, based on 
 - **GET** `/api/contact/:id` - Get contact by id
 - **PUT** `/api/contact/:id` - Update contact
 - **DELETE** `/api/contact/:id` - Delete contact
+
+## Property Enquiries (`/api/property-enquiries`)
+
+See [PROPERTY_ENQUIRIES.md](./PROPERTY_ENQUIRIES.md) for the request payload, responses, and environment variables.
+
+- **POST** `/api/property-enquiries` - Create a property enquiry (website form; API key only)
+- **GET** `/api/property-enquiries` - List property enquiries with pagination (admin)
+- **GET** `/api/property-enquiries/:id` - Get a property enquiry by id (admin)
+- **PATCH** `/api/property-enquiries/:id` - Update a property enquiry (admin)
+- **DELETE** `/api/property-enquiries/:id` - Delete a property enquiry (admin)
 
 ## Sell Inquiries (`/api/sell`)
 
