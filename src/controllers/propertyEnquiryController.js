@@ -1,17 +1,14 @@
 const mongoose = require('mongoose');
-const Property = require('../models/Property');
 const PropertyEnquiry = require('../models/PropertyEnquiry');
 const {
   MESSAGE_VALIDATION_ERROR,
   isValidPropertyEnquiryEmail,
   isValidPropertyEnquiryMessage,
 } = PropertyEnquiry;
-const { isHeadOfficeValue } = require('../utils/headOffice');
 const { parsePaginationParams } = require('../utils/paginationUtils');
 const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 
-const UPDATABLE_FIELDS = ['propertyRefNo', 'fullName', 'phone', 'email', 'message', 'isHeadOffice'];
-const HEAD_OFFICE_VALUES = ['yes', 'no'];
+const UPDATABLE_FIELDS = ['propertyRefNo', 'fullName', 'phone', 'email', 'message'];
 
 const formatList = (items) => {
   if (items.length <= 1) return items[0] || '';
@@ -77,12 +74,6 @@ const validateEnquiryFields = (fields, { partial = false } = {}) => {
     if (fields.message !== undefined && !fields.message) {
       return 'Message is required';
     }
-    if (
-      fields.isHeadOffice !== undefined &&
-      !HEAD_OFFICE_VALUES.includes(fields.isHeadOffice)
-    ) {
-      return 'isHeadOffice must be yes or no';
-    }
   }
 
   if (fields.email) {
@@ -104,14 +95,8 @@ const zapierPayload = (enquiry) => ({
   phone: enquiry.phone,
   email: enquiry.email || '',
   message: enquiry.message,
-  isHeadOffice: enquiry.isHeadOffice,
   source: ZAPIER_SOURCES.PROPERTY_ENQUIRY,
 });
-
-const resolveIsHeadOffice = async (propertyRefNo) => {
-  const property = await Property.findOne({ propertyRefNo }).select('listingAgent').lean();
-  return isHeadOfficeValue(property?.listingAgent);
-};
 
 // 1. Create property enquiry - POST /api/property-enquiries
 const createPropertyEnquiry = async (req, res) => {
@@ -132,15 +117,12 @@ const createPropertyEnquiry = async (req, res) => {
     });
     if (errorMessage) return validationError(res, errorMessage);
 
-    const isHeadOffice = await resolveIsHeadOffice(propertyRefNo);
-
     const enquiry = await PropertyEnquiry.create({
       propertyRefNo,
       fullName,
       phone,
       ...(email ? { email } : {}),
       message,
-      isHeadOffice,
     });
 
     // MongoDB is source of truth. Zapier runs once after save and never rolls the record back.
@@ -243,15 +225,13 @@ const updatePropertyEnquiry = async (req, res) => {
         return;
       }
 
-      updates[field] = field === 'isHeadOffice'
-        ? asTrimmedString(body[field]).toLowerCase()
-        : asTrimmedString(body[field]);
+      updates[field] = asTrimmedString(body[field]);
     });
 
     if (!Object.keys(updates).length && !Object.keys(unset).length) {
       return validationError(
         res,
-        'Please provide at least one of propertyRefNo, fullName, phone, email, message or isHeadOffice'
+        'Please provide at least one of propertyRefNo, fullName, phone, email or message'
       );
     }
 
@@ -262,7 +242,6 @@ const updatePropertyEnquiry = async (req, res) => {
         phone: updates.phone,
         email: updates.email,
         message: updates.message,
-        isHeadOffice: updates.isHeadOffice,
       },
       { partial: true }
     );
