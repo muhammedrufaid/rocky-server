@@ -42,9 +42,9 @@ const propertyEnquirySchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
-    name: {
+    fullName: {
       type: String,
-      required: [true, 'Name is required'],
+      required: [true, 'Full name is required'],
       trim: true,
     },
     phone: {

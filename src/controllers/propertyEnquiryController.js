@@ -10,7 +10,7 @@ const { isHeadOfficeValue } = require('../utils/headOffice');
 const { parsePaginationParams } = require('../utils/paginationUtils');
 const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 
-const UPDATABLE_FIELDS = ['propertyRefNo', 'name', 'phone', 'email', 'message', 'isHeadOffice'];
+const UPDATABLE_FIELDS = ['propertyRefNo', 'fullName', 'phone', 'email', 'message', 'isHeadOffice'];
 const HEAD_OFFICE_VALUES = ['yes', 'no'];
 
 const formatList = (items) => {
@@ -57,7 +57,7 @@ const validateEnquiryFields = (fields, { partial = false } = {}) => {
   if (!partial) {
     const missing = [];
     if (!fields.propertyRefNo) missing.push('propertyRefNo');
-    if (!fields.name) missing.push('name');
+    if (!fields.fullName) missing.push('fullName');
     if (!fields.phone) missing.push('phone');
     if (!fields.message) missing.push('message');
 
@@ -68,8 +68,8 @@ const validateEnquiryFields = (fields, { partial = false } = {}) => {
     if (fields.propertyRefNo !== undefined && !fields.propertyRefNo) {
       return 'Property reference number is required';
     }
-    if (fields.name !== undefined && !fields.name) {
-      return 'Name is required';
+    if (fields.fullName !== undefined && !fields.fullName) {
+      return 'Full name is required';
     }
     if (fields.phone !== undefined && !fields.phone) {
       return 'Phone is required';
@@ -100,7 +100,7 @@ const validateEnquiryFields = (fields, { partial = false } = {}) => {
 
 const zapierPayload = (enquiry) => ({
   propertyRefNo: enquiry.propertyRefNo,
-  name: enquiry.name,
+  fullName: enquiry.fullName,
   phone: enquiry.phone,
   email: enquiry.email || '',
   message: enquiry.message,
@@ -118,14 +118,14 @@ const createPropertyEnquiry = async (req, res) => {
   try {
     const body = req.body || {};
     const propertyRefNo = asTrimmedString(body.propertyRefNo);
-    const name = asTrimmedString(body.name);
+    const fullName = asTrimmedString(body.fullName);
     const phone = asTrimmedString(body.phone);
     const email = asTrimmedString(body.email).toLowerCase();
     const message = asTrimmedString(body.message);
 
     const errorMessage = validateEnquiryFields({
       propertyRefNo,
-      name,
+      fullName,
       phone,
       email,
       message,
@@ -136,7 +136,7 @@ const createPropertyEnquiry = async (req, res) => {
 
     const enquiry = await PropertyEnquiry.create({
       propertyRefNo,
-      name,
+      fullName,
       phone,
       ...(email ? { email } : {}),
       message,
@@ -251,14 +251,14 @@ const updatePropertyEnquiry = async (req, res) => {
     if (!Object.keys(updates).length && !Object.keys(unset).length) {
       return validationError(
         res,
-        'Please provide at least one of propertyRefNo, name, phone, email, message or isHeadOffice'
+        'Please provide at least one of propertyRefNo, fullName, phone, email, message or isHeadOffice'
       );
     }
 
     const errorMessage = validateEnquiryFields(
       {
         propertyRefNo: updates.propertyRefNo,
-        name: updates.name,
+        fullName: updates.fullName,
         phone: updates.phone,
         email: updates.email,
         message: updates.message,
