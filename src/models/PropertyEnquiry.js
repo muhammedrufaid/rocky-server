@@ -1,5 +1,4 @@
 const mongoose = require('mongoose');
-const { isHeadOfficeValue } = require('../utils/headOffice');
 
 const CONTACT_OPTIONS = ['WhatsApp', 'Callback'];
 const CONTACT_TIMES = ['Morning', 'Afternoon', 'Evening'];
@@ -42,9 +41,9 @@ const propertyEnquirySchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
-    name: {
+    fullName: {
       type: String,
-      required: [true, 'Name is required'],
+      required: [true, 'Full name is required'],
       trim: true,
     },
     phone: {
@@ -75,16 +74,6 @@ const propertyEnquirySchema = new mongoose.Schema(
         message: MESSAGE_VALIDATION_ERROR,
       },
     },
-    isHeadOffice: {
-      type: String,
-      required: [true, 'isHeadOffice is required'],
-      enum: {
-        values: ['yes', 'no'],
-        message: 'isHeadOffice must be yes or no',
-      },
-      lowercase: true,
-      trim: true,
-    },
   },
   { timestamps: true }
 );
@@ -97,4 +86,3 @@ module.exports.MESSAGE_FORMAT_EXAMPLE = MESSAGE_FORMAT_EXAMPLE;
 module.exports.MESSAGE_VALIDATION_ERROR = MESSAGE_VALIDATION_ERROR;
 module.exports.isValidPropertyEnquiryMessage = isValidPropertyEnquiryMessage;
 module.exports.isValidPropertyEnquiryEmail = isValidPropertyEnquiryEmail;
-module.exports.isHeadOfficeValue = isHeadOfficeValue;

@@ -1,17 +1,14 @@
 const mongoose = require('mongoose');
-const Property = require('../models/Property');
 const PropertyEnquiry = require('../models/PropertyEnquiry');
 const {
   MESSAGE_VALIDATION_ERROR,
   isValidPropertyEnquiryEmail,
   isValidPropertyEnquiryMessage,
 } = PropertyEnquiry;
-const { isHeadOfficeValue } = require('../utils/headOffice');
 const { parsePaginationParams } = require('../utils/paginationUtils');
 const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 
-const UPDATABLE_FIELDS = ['propertyRefNo', 'name', 'phone', 'email', 'message', 'isHeadOffice'];
-const HEAD_OFFICE_VALUES = ['yes', 'no'];
+const UPDATABLE_FIELDS = ['propertyRefNo', 'fullName', 'phone', 'email', 'message'];
 
 const formatList = (items) => {
   if (items.length <= 1) return items[0] || '';
@@ -57,7 +54,7 @@ const validateEnquiryFields = (fields, { partial = false } = {}) => {
   if (!partial) {
     const missing = [];
     if (!fields.propertyRefNo) missing.push('propertyRefNo');
-    if (!fields.name) missing.push('name');
+    if (!fields.fullName) missing.push('fullName');
     if (!fields.phone) missing.push('phone');
     if (!fields.message) missing.push('message');
 
@@ -68,20 +65,14 @@ const validateEnquiryFields = (fields, { partial = false } = {}) => {
     if (fields.propertyRefNo !== undefined && !fields.propertyRefNo) {
       return 'Property reference number is required';
     }
-    if (fields.name !== undefined && !fields.name) {
-      return 'Name is required';
+    if (fields.fullName !== undefined && !fields.fullName) {
+      return 'Full name is required';
     }
     if (fields.phone !== undefined && !fields.phone) {
       return 'Phone is required';
     }
     if (fields.message !== undefined && !fields.message) {
       return 'Message is required';
-    }
-    if (
-      fields.isHeadOffice !== undefined &&
-      !HEAD_OFFICE_VALUES.includes(fields.isHeadOffice)
-    ) {
-      return 'isHeadOffice must be yes or no';
     }
   }
 
@@ -100,47 +91,38 @@ const validateEnquiryFields = (fields, { partial = false } = {}) => {
 
 const zapierPayload = (enquiry) => ({
   propertyRefNo: enquiry.propertyRefNo,
-  name: enquiry.name,
+  fullName: enquiry.fullName,
   phone: enquiry.phone,
   email: enquiry.email || '',
   message: enquiry.message,
-  isHeadOffice: enquiry.isHeadOffice,
   source: ZAPIER_SOURCES.PROPERTY_ENQUIRY,
 });
-
-const resolveIsHeadOffice = async (propertyRefNo) => {
-  const property = await Property.findOne({ propertyRefNo }).select('listingAgent').lean();
-  return isHeadOfficeValue(property?.listingAgent);
-};
 
 // 1. Create property enquiry - POST /api/property-enquiries
 const createPropertyEnquiry = async (req, res) => {
   try {
     const body = req.body || {};
     const propertyRefNo = asTrimmedString(body.propertyRefNo);
-    const name = asTrimmedString(body.name);
+    const fullName = asTrimmedString(body.fullName);
     const phone = asTrimmedString(body.phone);
     const email = asTrimmedString(body.email).toLowerCase();
     const message = asTrimmedString(body.message);
 
     const errorMessage = validateEnquiryFields({
       propertyRefNo,
-      name,
+      fullName,
       phone,
       email,
       message,
     });
     if (errorMessage) return validationError(res, errorMessage);
 
-    const isHeadOffice = await resolveIsHeadOffice(propertyRefNo);
-
     const enquiry = await PropertyEnquiry.create({
       propertyRefNo,
-      name,
+      fullName,
       phone,
       ...(email ? { email } : {}),
       message,
-      isHeadOffice,
     });
 
     // MongoDB is source of truth. Zapier runs once after save and never rolls the record back.
@@ -243,26 +225,23 @@ const updatePropertyEnquiry = async (req, res) => {
         return;
       }
 
-      updates[field] = field === 'isHeadOffice'
-        ? asTrimmedString(body[field]).toLowerCase()
-        : asTrimmedString(body[field]);
+      updates[field] = asTrimmedString(body[field]);
     });
 
     if (!Object.keys(updates).length && !Object.keys(unset).length) {
       return validationError(
         res,
-        'Please provide at least one of propertyRefNo, name, phone, email, message or isHeadOffice'
+        'Please provide at least one of propertyRefNo, fullName, phone, email or message'
       );
     }
 
     const errorMessage = validateEnquiryFields(
       {
         propertyRefNo: updates.propertyRefNo,
-        name: updates.name,
+        fullName: updates.fullName,
         phone: updates.phone,
         email: updates.email,
         message: updates.message,
-        isHeadOffice: updates.isHeadOffice,
       },
       { partial: true }
     );
