@@ -18,6 +18,7 @@ const UPDATABLE_FIELDS = [
   'phone',
   'email',
   'message',
+  'listingAgent',
   'isHeadOffice',
 ];
 const HEAD_OFFICE_VALUES = ['yes', 'no'];
@@ -117,13 +118,18 @@ const zapierPayload = (enquiry) => ({
   phone: enquiry.phone,
   email: enquiry.email || '',
   message: enquiry.message,
+  listingAgent: enquiry.listingAgent || '',
   isHeadOffice: enquiry.isHeadOffice,
   source: ZAPIER_SOURCES.PROPERTY_ENQUIRY,
 });
 
-const resolveIsHeadOffice = async (propertyRefNo) => {
+const resolveListing = async (propertyRefNo) => {
   const property = await Property.findOne({ propertyRefNo }).select('listingAgent').lean();
-  return isHeadOfficeValue(property?.listingAgent);
+  const listingAgent = asTrimmedString(property?.listingAgent);
+  return {
+    listingAgent,
+    isHeadOffice: isHeadOfficeValue(listingAgent),
+  };
 };
 
 // 1. Create property enquiry - POST /api/property-enquiries
@@ -145,7 +151,7 @@ const createPropertyEnquiry = async (req, res) => {
     });
     if (errorMessage) return validationError(res, errorMessage);
 
-    const isHeadOffice = await resolveIsHeadOffice(propertyRefNo);
+    const { listingAgent, isHeadOffice } = await resolveListing(propertyRefNo);
 
     const enquiry = await PropertyEnquiry.create({
       subSource: PROPERTY_ENQUIRY_SUB_SOURCE,
@@ -154,6 +160,7 @@ const createPropertyEnquiry = async (req, res) => {
       phone,
       ...(email ? { email } : {}),
       message,
+      listingAgent,
       isHeadOffice,
     });
 
@@ -265,7 +272,7 @@ const updatePropertyEnquiry = async (req, res) => {
     if (!Object.keys(updates).length && !Object.keys(unset).length) {
       return validationError(
         res,
-        'Please provide at least one of subSource, propertyRefNo, fullName, phone, email, message or isHeadOffice'
+        'Please provide at least one of subSource, propertyRefNo, fullName, phone, email, message, listingAgent or isHeadOffice'
       );
     }
 
@@ -277,6 +284,7 @@ const updatePropertyEnquiry = async (req, res) => {
         phone: updates.phone,
         email: updates.email,
         message: updates.message,
+        listingAgent: updates.listingAgent,
         isHeadOffice: updates.isHeadOffice,
       },
       { partial: true }

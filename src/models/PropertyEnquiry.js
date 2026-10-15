@@ -83,6 +83,11 @@ const propertyEnquirySchema = new mongoose.Schema(
         message: MESSAGE_VALIDATION_ERROR,
       },
     },
+    listingAgent: {
+      type: String,
+      trim: true,
+      default: '',
+    },
     isHeadOffice: {
       type: String,
       required: [true, 'isHeadOffice is required'],
