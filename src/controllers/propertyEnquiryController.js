@@ -3,6 +3,7 @@ const Property = require('../models/Property');
 const PropertyEnquiry = require('../models/PropertyEnquiry');
 const {
   MESSAGE_VALIDATION_ERROR,
+  PROPERTY_ENQUIRY_SUB_SOURCE,
   isValidPropertyEnquiryEmail,
   isValidPropertyEnquiryMessage,
 } = PropertyEnquiry;
@@ -10,7 +11,16 @@ const { isHeadOfficeValue } = require('../utils/headOffice');
 const { parsePaginationParams } = require('../utils/paginationUtils');
 const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 
-const UPDATABLE_FIELDS = ['propertyRefNo', 'fullName', 'phone', 'email', 'message', 'isHeadOffice'];
+const UPDATABLE_FIELDS = [
+  'subSource',
+  'propertyRefNo',
+  'fullName',
+  'phone',
+  'email',
+  'message',
+  'listingAgent',
+  'isHeadOffice',
+];
 const HEAD_OFFICE_VALUES = ['yes', 'no'];
 
 const formatList = (items) => {
@@ -65,6 +75,9 @@ const validateEnquiryFields = (fields, { partial = false } = {}) => {
       return `Please provide ${formatList(missing)}`;
     }
   } else {
+    if (fields.subSource !== undefined && !fields.subSource) {
+      return 'Sub source is required';
+    }
     if (fields.propertyRefNo !== undefined && !fields.propertyRefNo) {
       return 'Property reference number is required';
     }
@@ -99,18 +112,24 @@ const validateEnquiryFields = (fields, { partial = false } = {}) => {
 };
 
 const zapierPayload = (enquiry) => ({
+  subSource: enquiry.subSource,
   propertyRefNo: enquiry.propertyRefNo,
   fullName: enquiry.fullName,
   phone: enquiry.phone,
   email: enquiry.email || '',
   message: enquiry.message,
+  listingAgent: enquiry.listingAgent || '',
   isHeadOffice: enquiry.isHeadOffice,
   source: ZAPIER_SOURCES.PROPERTY_ENQUIRY,
 });
 
-const resolveIsHeadOffice = async (propertyRefNo) => {
+const resolveListing = async (propertyRefNo) => {
   const property = await Property.findOne({ propertyRefNo }).select('listingAgent').lean();
-  return isHeadOfficeValue(property?.listingAgent);
+  const listingAgent = asTrimmedString(property?.listingAgent);
+  return {
+    listingAgent,
+    isHeadOffice: isHeadOfficeValue(listingAgent),
+  };
 };
 
 // 1. Create property enquiry - POST /api/property-enquiries
@@ -132,14 +151,16 @@ const createPropertyEnquiry = async (req, res) => {
     });
     if (errorMessage) return validationError(res, errorMessage);
 
-    const isHeadOffice = await resolveIsHeadOffice(propertyRefNo);
+    const { listingAgent, isHeadOffice } = await resolveListing(propertyRefNo);
 
     const enquiry = await PropertyEnquiry.create({
+      subSource: PROPERTY_ENQUIRY_SUB_SOURCE,
       propertyRefNo,
       fullName,
       phone,
       ...(email ? { email } : {}),
       message,
+      listingAgent,
       isHeadOffice,
     });
 
@@ -251,17 +272,19 @@ const updatePropertyEnquiry = async (req, res) => {
     if (!Object.keys(updates).length && !Object.keys(unset).length) {
       return validationError(
         res,
-        'Please provide at least one of propertyRefNo, fullName, phone, email, message or isHeadOffice'
+        'Please provide at least one of subSource, propertyRefNo, fullName, phone, email, message, listingAgent or isHeadOffice'
       );
     }
 
     const errorMessage = validateEnquiryFields(
       {
+        subSource: updates.subSource,
         propertyRefNo: updates.propertyRefNo,
         fullName: updates.fullName,
         phone: updates.phone,
         email: updates.email,
         message: updates.message,
+        listingAgent: updates.listingAgent,
         isHeadOffice: updates.isHeadOffice,
       },
       { partial: true }

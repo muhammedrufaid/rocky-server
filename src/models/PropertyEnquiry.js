@@ -1,6 +1,8 @@
 const mongoose = require('mongoose');
 const { isHeadOfficeValue } = require('../utils/headOffice');
 
+const PROPERTY_ENQUIRY_SUB_SOURCE = 'Listing Page';
+
 const CONTACT_OPTIONS = ['WhatsApp', 'Callback'];
 const CONTACT_TIMES = ['Morning', 'Afternoon', 'Evening'];
 const MARKETING_CONSENT_VALUES = ['Yes', 'No'];
@@ -36,6 +38,12 @@ const isValidPropertyEnquiryEmail = (email) => {
 
 const propertyEnquirySchema = new mongoose.Schema(
   {
+    subSource: {
+      type: String,
+      required: [true, 'Sub source is required'],
+      trim: true,
+      default: PROPERTY_ENQUIRY_SUB_SOURCE,
+    },
     propertyRefNo: {
       type: String,
       required: [true, 'Property reference number is required'],
@@ -75,6 +83,11 @@ const propertyEnquirySchema = new mongoose.Schema(
         message: MESSAGE_VALIDATION_ERROR,
       },
     },
+    listingAgent: {
+      type: String,
+      trim: true,
+      default: '',
+    },
     isHeadOffice: {
       type: String,
       required: [true, 'isHeadOffice is required'],
@@ -90,6 +103,7 @@ const propertyEnquirySchema = new mongoose.Schema(
 );
 
 module.exports = mongoose.model('PropertyEnquiry', propertyEnquirySchema);
+module.exports.PROPERTY_ENQUIRY_SUB_SOURCE = PROPERTY_ENQUIRY_SUB_SOURCE;
 module.exports.CONTACT_OPTIONS = CONTACT_OPTIONS;
 module.exports.CONTACT_TIMES = CONTACT_TIMES;
 module.exports.MARKETING_CONSENT_VALUES = MARKETING_CONSENT_VALUES;
