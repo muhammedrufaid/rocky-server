@@ -6,16 +6,37 @@ const {
 } = require('../services/teamtailorService');
 
 /**
+ * Newest Teamtailor creation date first.
+ * Matches MongoDB `{ teamtailorCreatedAt: -1, teamtailorId: -1 }`:
+ * missing dates sort last, then teamtailorId descending as a string.
+ */
+const compareByTeamtailorCreatedAt = (a, b) => {
+  const aTime = a?.teamtailorCreatedAt ? new Date(a.teamtailorCreatedAt).getTime() : NaN;
+  const bTime = b?.teamtailorCreatedAt ? new Date(b.teamtailorCreatedAt).getTime() : NaN;
+  const aHas = Number.isFinite(aTime);
+  const bHas = Number.isFinite(bTime);
+
+  if (aHas && bHas && aTime !== bTime) return bTime - aTime;
+  if (aHas !== bHas) return aHas ? -1 : 1;
+
+  const aId = String(a?.teamtailorId ?? '');
+  const bId = String(b?.teamtailorId ?? '');
+  if (aId === bId) return 0;
+  return aId < bId ? 1 : -1;
+};
+
+/**
  * GET /api/teamtailor/jobs
  * Returns jobs stored in MongoDB (synced from TeamTailor).
  * Query: ?live=true to fetch directly from TeamTailor API instead.
+ * Order is Teamtailor's created-at (teamtailorCreatedAt), newest first.
  */
 const getJobs = async (req, res) => {
   try {
     const live = String(req.query.live || '').toLowerCase() === 'true';
 
     if (live) {
-      const jobs = await fetchJobsFromApi();
+      const jobs = (await fetchJobsFromApi()).sort(compareByTeamtailorCreatedAt);
       return res.status(200).json({
         success: true,
         source: 'teamtailor',
@@ -28,7 +49,10 @@ const getJobs = async (req, res) => {
     if (req.query.status) filter.status = req.query.status;
     if (req.query.humanStatus) filter.humanStatus = req.query.humanStatus;
 
-    const jobs = await TeamTailorJob.find(filter).sort({ teamtailorUpdatedAt: -1, createdAt: -1 });
+    const jobs = await TeamTailorJob.find(filter).sort({
+      teamtailorCreatedAt: -1,
+      teamtailorId: -1,
+    });
 
     return res.status(200).json({
       success: true,
