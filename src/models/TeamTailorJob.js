@@ -9,6 +9,24 @@ const pictureSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const departmentSchema = new mongoose.Schema(
+  {
+    id: { type: String, trim: true },
+    name: { type: String, trim: true },
+  },
+  { _id: false }
+);
+
+const locationSchema = new mongoose.Schema(
+  {
+    id: { type: String, trim: true },
+    name: { type: String, trim: true },
+    city: { type: String, trim: true },
+    country: { type: String, trim: true },
+  },
+  { _id: false }
+);
+
 const teamTailorJobSchema = new mongoose.Schema(
   {
     teamtailorId: {
@@ -58,6 +76,14 @@ const teamTailorJobSchema = new mongoose.Schema(
     remoteStatus: {
       type: String,
       trim: true,
+    },
+    department: {
+      type: departmentSchema,
+      default: null,
+    },
+    locations: {
+      type: [locationSchema],
+      default: [],
     },
     languageCode: {
       type: String,

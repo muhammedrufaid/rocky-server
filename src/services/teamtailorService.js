@@ -36,10 +36,80 @@ const getHeaders = () => {
   };
 };
 
+const JOB_INCLUDE = 'department,locations';
+
+const cleanText = (value) => {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  return text || null;
+};
+
+const indexIncluded = (included) => {
+  const index = new Map();
+  if (!Array.isArray(included)) return index;
+
+  for (const item of included) {
+    if (!item?.type || item.id == null) continue;
+    index.set(`${item.type}:${String(item.id)}`, item);
+  }
+
+  return index;
+};
+
+const includedRecord = (index, ref) => {
+  if (!ref || Array.isArray(ref) || !ref.type || ref.id == null) return null;
+  return index.get(`${ref.type}:${String(ref.id)}`) || null;
+};
+
+/**
+ * Department comes from relationships.department plus the matching
+ * departments record in the JSON:API included array. Missing → null.
+ */
+const extractDepartment = (job, includedIndex) => {
+  const ref = job?.relationships?.department?.data;
+  if (!ref || Array.isArray(ref) || ref.id == null) return null;
+
+  const record = includedRecord(includedIndex, ref);
+  return {
+    id: String(record?.id ?? ref.id),
+    name: cleanText(record?.attributes?.name),
+  };
+};
+
+/**
+ * Locations come from relationships.locations plus matching location records.
+ * Keeps the existing { id, name, city, country } shape.
+ */
+const extractLocations = (job, includedIndex) => {
+  const refs = job?.relationships?.locations?.data;
+  if (!Array.isArray(refs)) return [];
+
+  return refs
+    .filter((ref) => ref && ref.id != null)
+    .map((ref) => {
+      const record = includedRecord(includedIndex, ref);
+      const attributes = record?.attributes || {};
+      return {
+        id: String(record?.id ?? ref.id),
+        name: cleanText(attributes.name),
+        city: cleanText(attributes.city),
+        country: cleanText(attributes.country),
+      };
+    });
+};
+
+const withJobInclude = (url) => {
+  const parsed = new URL(url);
+  if (!parsed.searchParams.get('include')) {
+    parsed.searchParams.set('include', JOB_INCLUDE);
+  }
+  return parsed.toString();
+};
+
 /**
  * Maps a TeamTailor JSON:API job resource into a flat document for MongoDB.
  */
-const transformJob = (job) => {
+const transformJob = (job, includedIndex = new Map()) => {
   if (!job) return null;
 
   const attributes = job.attributes || {};
@@ -63,6 +133,8 @@ const transformJob = (job) => {
     },
     tags: Array.isArray(attributes.tags) ? attributes.tags : [],
     remoteStatus: attributes['remote-status'] || null,
+    department: extractDepartment(job, includedIndex),
+    locations: extractLocations(job, includedIndex),
     languageCode: attributes['language-code'] || null,
     startDate: attributes['start-date'] ? new Date(attributes['start-date']) : null,
     endDate: attributes['end-date'] ? new Date(attributes['end-date']) : null,
@@ -95,7 +167,7 @@ const fetchJobsFromApi = async () => {
   const { baseUrl } = getConfig();
   const headers = getHeaders();
   const jobs = [];
-  let nextUrl = `${baseUrl}/jobs`;
+  let nextUrl = withJobInclude(`${baseUrl}/jobs`);
 
   while (nextUrl) {
     const response = await fetch(nextUrl, { headers });
@@ -110,13 +182,16 @@ const fetchJobsFromApi = async () => {
     }
 
     const payload = await response.json();
+    const includedIndex = indexIncluded(payload.included);
     const pageJobs = Array.isArray(payload.data) ? payload.data : [];
-    jobs.push(...pageJobs);
+    jobs.push(
+      ...pageJobs.map((job) => transformJob(job, includedIndex)).filter(Boolean)
+    );
 
-    nextUrl = payload.links?.next || null;
+    nextUrl = payload.links?.next ? withJobInclude(payload.links.next) : null;
   }
 
-  return jobs.map(transformJob).filter(Boolean);
+  return jobs;
 };
 
 /**
@@ -125,7 +200,7 @@ const fetchJobsFromApi = async () => {
 const fetchJobByIdFromApi = async (id) => {
   const { baseUrl } = getConfig();
   const headers = getHeaders();
-  const response = await fetch(`${baseUrl}/jobs/${id}`, { headers });
+  const response = await fetch(withJobInclude(`${baseUrl}/jobs/${id}`), { headers });
 
   if (response.status === 404) {
     return null;
@@ -141,7 +216,7 @@ const fetchJobByIdFromApi = async (id) => {
   }
 
   const payload = await response.json();
-  return transformJob(payload.data);
+  return transformJob(payload.data, indexIncluded(payload.included));
 };
 
 /**
