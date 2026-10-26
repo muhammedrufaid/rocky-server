@@ -22,7 +22,9 @@ function normalizeApiToken(rawToken) {
 
 function getApplyConfig() {
   const apiToken = normalizeApiToken(
-    process.env.TEAMTAILOR_API_KEY || process.env.TEAMTAILOR_API_TOKEN
+    process.env.TEAMTAILOR_ADMIN_API_TOKEN ||
+      process.env.TEAMTAILOR_API_KEY ||
+      process.env.TEAMTAILOR_API_TOKEN
   );
   const baseUrl = (
     process.env.TEAMTAILOR_API_URL ||
