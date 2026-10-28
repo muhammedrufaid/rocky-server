@@ -236,7 +236,7 @@ test('valid submission saves the lead, skips Teamtailor, and emails the configur
     assert.equal(harness.calls[0].options.headers['Idempotency-Key'], 'relocation-guide:guide-1');
     assert.equal(harness.calls[0].options.body.from, 'Rocky Real Estate <relocation@rockyrealestate.com>');
     assert.equal(harness.calls[0].options.body.subject, SUBJECT);
-    assert.match(harness.calls[0].options.body.html, /Download Relocation Guide/);
+    assert.match(harness.calls[0].options.body.html, /Download the guide/);
     assert.match(harness.calls[0].options.body.html, /cdn\.example\.com/);
     assert.doesNotMatch(harness.calls[0].options.body.html, /evil\.example/);
     assert.match(harness.calls[0].options.body.text, /cdn\.example\.com/);
@@ -340,14 +340,18 @@ test('email content escapes the name and keeps the plain-text alternative', () =
     firstName: 'Amina <script>',
     guideUrl: GUIDE_URL,
   });
-  assert.equal(content.subject, 'Your Free Dubai Relocation Guide | Rocky Real Estate');
-  assert.match(content.html, /Dear Amina &lt;script&gt;,/);
-  assert.match(content.html, /Your Free Rocky Real Estate Relocation Guide/);
+  assert.equal(content.subject, 'Rocky Real Estate Relocation Guide');
+  assert.match(content.html, /Hi Amina &lt;script&gt;,/);
+  assert.match(content.html, /Rocky Real Estate Relocation Guide/);
+  assert.doesNotMatch(content.html, /Your Free Rocky Real Estate Relocation Guide/);
   assert.match(content.html, /alt="Rocky Real Estate"/);
   assert.match(content.html, /alt="Dubai relocation guide"/);
   assert.match(content.html, /width="240"/);
   assert.match(content.html, /width="600"/);
-  assert.match(content.html, /Download Relocation Guide/);
+  assert.match(content.html, /Download the guide/);
+  assert.match(content.html, /You're receiving this email because you requested the Rocky Real Estate Relocation Guide\./);
+  assert.match(content.html, /© 2026 Rocky Real Estate\. All rights reserved\./);
+  assert.match(content.html, /Al Khaimah 2, Al Barsha 1, Dubai, United Arab Emirates/);
   assert.doesNotMatch(content.html, /Best regards/);
   assert.doesNotMatch(content.html, /If the button does not open/);
   assert.equal((content.html.match(/cdn\.example\.com/g) || []).length, 1);
