@@ -6,6 +6,7 @@ class ApplyError extends Error {
     this.code = options.code || 'apply_error';
     this.retryable = Boolean(options.retryable);
     this.logDetail = options.logDetail;
+    this.publicData = options.publicData;
   }
 }
 
@@ -110,8 +111,10 @@ function isEligibleJob(job) {
   return status === 'open' && humanStatus === 'published' && job.internal !== true;
 }
 
-function redactForLog(value) {
-  return String(value || '')
+function redactForLog(value, secret) {
+  let text = String(value || '');
+  if (secret) text = text.split(secret).join('[redacted]');
+  return text
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[redacted-email]')
     .replace(/\+[1-9]\d{7,14}/g, '[redacted-phone]')
     .slice(0, 300);
@@ -120,6 +123,10 @@ function redactForLog(value) {
 module.exports = {
   ApplyError,
   splitFullName,
+  normalizePersonName,
+  normalizeEmail,
+  isValidEmail,
+  isValidPhone,
   validateApplicant,
   isEligibleJob,
   redactForLog,
