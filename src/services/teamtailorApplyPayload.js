@@ -1,4 +1,4 @@
-function buildCandidateCreateBody({ firstName, lastName, email, phone, resumeUrl }) {
+function buildCandidateCreateBody({ firstName, lastName, email, phone, resumeUrl, pitch }) {
   return {
     data: {
       type: 'candidates',
@@ -8,6 +8,7 @@ function buildCandidateCreateBody({ firstName, lastName, email, phone, resumeUrl
         email,
         phone,
         resume: resumeUrl,
+        ...(pitch ? { pitch } : {}),
         'send-welcome-message': false,
       },
     },

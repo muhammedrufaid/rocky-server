@@ -6,6 +6,7 @@ class ApplyError extends Error {
     this.code = options.code || 'apply_error';
     this.retryable = Boolean(options.retryable);
     this.logDetail = options.logDetail;
+    this.publicData = options.publicData;
   }
 }
 
@@ -41,17 +42,23 @@ function isValidPhone(phone) {
   return /^\+[1-9]\d{7,14}$/.test(phone);
 }
 
+function normalizePersonName(value, label, code) {
+  const name = String(value || '').trim().replace(/\s+/g, ' ');
+  if (!name) {
+    throw new ApplyError(`${label} is required.`, { status: 400, code });
+  }
+  if (name.length > 80) {
+    throw new ApplyError(`${label} is too long.`, { status: 400, code: 'invalid_name' });
+  }
+  return name;
+}
+
 function validateApplicant(body = {}) {
-  const fullName = String(body.fullName || '').trim();
+  const firstName = normalizePersonName(body.firstName, 'First name', 'missing_first_name');
+  const lastName = normalizePersonName(body.lastName, 'Last name', 'missing_last_name');
   const email = normalizeEmail(body.email);
   const phone = String(body.phone || '').trim();
   const teamtailorJobId = String(body.teamtailorJobId || '').trim();
-
-  if (!fullName) {
-    throw new ApplyError('Full name is required.', { status: 400, code: 'missing_name' });
-  }
-
-  const name = splitFullName(fullName);
 
   if (!email) {
     throw new ApplyError('Email is required.', { status: 400, code: 'missing_email' });
@@ -88,7 +95,9 @@ function validateApplicant(body = {}) {
   }
 
   return {
-    ...name,
+    fullName: `${firstName} ${lastName}`,
+    firstName,
+    lastName,
     email,
     phone,
     teamtailorJobId,
@@ -102,8 +111,10 @@ function isEligibleJob(job) {
   return status === 'open' && humanStatus === 'published' && job.internal !== true;
 }
 
-function redactForLog(value) {
-  return String(value || '')
+function redactForLog(value, secret) {
+  let text = String(value || '');
+  if (secret) text = text.split(secret).join('[redacted]');
+  return text
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[redacted-email]')
     .replace(/\+[1-9]\d{7,14}/g, '[redacted-phone]')
     .slice(0, 300);
@@ -112,6 +123,10 @@ function redactForLog(value) {
 module.exports = {
   ApplyError,
   splitFullName,
+  normalizePersonName,
+  normalizeEmail,
+  isValidEmail,
+  isValidPhone,
   validateApplicant,
   isEligibleJob,
   redactForLog,
