@@ -106,7 +106,7 @@ function toPublicSubmission(record) {
 }
 
 function teamtailorFinished(status) {
-  return status === 'skipped' || status === 'synced';
+  return status === 'synced';
 }
 
 function cvRecord(file, uploaded) {

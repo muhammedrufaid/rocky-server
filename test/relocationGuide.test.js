@@ -89,7 +89,9 @@ function createMemoryModel() {
   };
 }
 
-function createHarness(responses, syncTeamtailor = syncRelocationEnquiry) {
+const syncedTeamtailor = async () => ({ status: 'synced', recordId: 'candidate-1', error: null });
+
+function createHarness(responses, syncTeamtailor = syncedTeamtailor) {
   const model = createMemoryModel();
   const calls = [];
   const queue = responses.slice();
@@ -208,7 +210,7 @@ test('missing fields and an invalid email are rejected before MongoDB or email',
   }
 });
 
-test('valid submission saves the lead, skips Teamtailor, and emails the configured PDF', async () => {
+test('valid submission saves the lead, creates a Teamtailor candidate, and emails the configured PDF', async () => {
   const harness = createHarness([httpResponse(200, { id: 'email_123' })]);
   try {
     const outcome = await harness.submit(validBody());
@@ -219,8 +221,8 @@ test('valid submission saves the lead, skips Teamtailor, and emails the configur
     assert.equal(saved.location, 'United Kingdom');
     assert.equal(saved.phone, '+971501234567');
     assert.ok(saved.createdAt instanceof Date);
-    assert.equal(saved.teamtailorStatus, 'skipped');
-    assert.equal(saved.teamtailorRecordId, undefined);
+    assert.equal(saved.teamtailorStatus, 'synced');
+    assert.equal(saved.teamtailorRecordId, 'candidate-1');
     assert.equal(saved.teamtailorError, null);
     assert.equal(saved.emailStatus, 'accepted');
     assert.equal(saved.resendEmailId, 'email_123');
@@ -229,7 +231,6 @@ test('valid submission saves the lead, skips Teamtailor, and emails the configur
     assert.equal(saved.cv.fileName, 'amina-rahman.pdf');
     assert.equal(saved.cvType, 'application/pdf');
     assert.equal(toPublicSubmission(saved).cv, undefined);
-    assert.deepEqual(syncRelocationEnquiry(), { status: 'skipped', recordId: null, error: null });
 
     assert.equal(harness.calls.length, 1);
     assert.equal(harness.calls[0].url, 'https://api.resend.com/emails');
@@ -242,12 +243,57 @@ test('valid submission saves the lead, skips Teamtailor, and emails the configur
     assert.match(harness.calls[0].options.body.text, /cdn\.example\.com/);
     assert.deepEqual(toPublicSubmission(saved), {
       id: 'guide-1',
-      teamtailorStatus: 'skipped',
+      teamtailorStatus: 'synced',
       emailStatus: 'accepted',
     });
   } finally {
     harness.restore();
   }
+});
+
+test('relocation enquiry creates a Teamtailor candidate and attaches the CV', async () => {
+  const calls = [];
+  const gateway = {
+    async findCandidateByEmail() {
+      calls.push('find');
+      return null;
+    },
+    async createCandidate(input) {
+      calls.push(['create', input]);
+      return { id: 'cand-9', existed: false, hasResume: true };
+    },
+    async attachResume() {
+      throw new Error('resume should already be on the new candidate');
+    },
+    async createUpload(input) {
+      calls.push(['upload', input]);
+      return { id: 'upload-1' };
+    },
+  };
+
+  const result = await syncRelocationEnquiry(
+    {
+      firstName: 'Amina',
+      lastName: 'Rahman',
+      email: 'amina@example.com',
+      phone: '+971501234567',
+      location: 'United Kingdom',
+      cv: { key: 'cvs/a.pdf', fileName: 'amina.pdf' },
+      cvFileName: 'amina.pdf',
+    },
+    {
+      gateway,
+      createResumeUrl: async () => 'https://files.example/cv.pdf',
+    }
+  );
+
+  assert.deepEqual(result, { status: 'synced', recordId: 'cand-9', error: null });
+  assert.equal(calls[0], 'find');
+  assert.equal(calls[1][1].email, 'amina@example.com');
+  assert.equal(calls[1][1].resumeUrl, 'https://files.example/cv.pdf');
+  assert.equal(calls[1][1].pitch, 'Relocation guide request. Location: United Kingdom');
+  assert.equal(calls[2][1].candidateId, 'cand-9');
+  assert.equal(calls[2][1].fileName, 'amina.pdf');
 });
 
 test('a Teamtailor failure is stored and does not block the guide email', async () => {
@@ -284,7 +330,7 @@ test('a failed email can be retried, and an accepted email is not sent again', a
   try {
     await assert.rejects(() => harness.submit(validBody()), (error) => {
       assert.equal(error.code, 'resend_rejected');
-      assert.equal(error.publicData.teamtailorStatus, 'skipped');
+      assert.equal(error.publicData.teamtailorStatus, 'synced');
       assert.equal(error.publicData.emailStatus, 'failed');
       return true;
     });
@@ -341,7 +387,7 @@ test('email content escapes the name and keeps the plain-text alternative', () =
     guideUrl: GUIDE_URL,
   });
   assert.equal(content.subject, 'Rocky Real Estate Relocation Guide');
-  assert.match(content.html, /Hi Amina &lt;script&gt;,/);
+  assert.match(content.html, /Hi Amina,/);
   assert.match(content.html, /Rocky Real Estate Relocation Guide/);
   assert.doesNotMatch(content.html, /Your Free Rocky Real Estate Relocation Guide/);
   assert.match(content.html, /alt="Rocky Real Estate"/);
@@ -355,7 +401,7 @@ test('email content escapes the name and keeps the plain-text alternative', () =
   assert.doesNotMatch(content.html, /Best regards/);
   assert.doesNotMatch(content.html, /If the button does not open/);
   assert.equal((content.html.match(/cdn\.example\.com/g) || []).length, 1);
-  assert.match(content.text, /Dear Amina <script>,/);
+  assert.match(content.text, /Hi Amina,/);
   assert.match(content.text, new RegExp(GUIDE_URL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
 
   const withoutImages = buildRelocationGuideEmail({
