@@ -25,18 +25,24 @@ const compareByTeamtailorCreatedAt = (a, b) => {
   return aId < bId ? 1 : -1;
 };
 
+/** Teamtailor job ids currently shown by GET /api/teamtailor/jobs. */
+const VISIBLE_JOB_IDS = ['8498182', '8146655', '8146326', '8130814', '8113253'];
+
 /**
  * GET /api/teamtailor/jobs
  * Returns jobs stored in MongoDB (synced from TeamTailor).
  * Query: ?live=true to fetch directly from TeamTailor API instead.
  * Order is Teamtailor's created-at (teamtailorCreatedAt), newest first.
+ * Only VISIBLE_JOB_IDS are included.
  */
 const getJobs = async (req, res) => {
   try {
     const live = String(req.query.live || '').toLowerCase() === 'true';
 
     if (live) {
-      const jobs = (await fetchJobsFromApi()).sort(compareByTeamtailorCreatedAt);
+      const jobs = (await fetchJobsFromApi())
+        .filter((job) => VISIBLE_JOB_IDS.includes(String(job?.teamtailorId ?? '')))
+        .sort(compareByTeamtailorCreatedAt);
       return res.status(200).json({
         success: true,
         source: 'teamtailor',
@@ -45,7 +51,7 @@ const getJobs = async (req, res) => {
       });
     }
 
-    const filter = {};
+    const filter = { teamtailorId: { $in: VISIBLE_JOB_IDS } };
     if (req.query.status) filter.status = req.query.status;
     if (req.query.humanStatus) filter.humanStatus = req.query.humanStatus;
 
