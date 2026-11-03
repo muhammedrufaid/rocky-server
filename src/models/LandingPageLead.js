@@ -34,7 +34,7 @@ const landingPageLeadSchema = new mongoose.Schema(
     },
     message: {
       type: String,
-      required: [true, 'Message is required'],
+      required: [false, 'Message is required'],
       trim: true,
     },
   },
