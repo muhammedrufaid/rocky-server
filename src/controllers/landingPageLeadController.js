@@ -6,7 +6,7 @@ const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 // 1. Create landing page lead - POST /api/landing-page-lead
 const createLandingPageLead = async (req, res) => {
   try {
-    const { landingPage, subSource, fullName, email, phone, message } = req.body;
+    const { landingPage, subSource, fullName, email, phone, message, language } = req.body;
 
     if (!landingPage || !subSource || !fullName || !email || !phone || !message) {
       return res.status(400).json({
@@ -22,6 +22,7 @@ const createLandingPageLead = async (req, res) => {
       email,
       phone,
       message,
+      language,
     });
 
     try {
@@ -32,6 +33,7 @@ const createLandingPageLead = async (req, res) => {
         email: lead.email,
         phone: lead.phone,
         message: lead.message,
+        language: lead.language,
       });
     } catch (sheetsError) {
       console.error('[Google Sheets] Unexpected error after landing page lead save:', sheetsError.message);
@@ -46,6 +48,7 @@ const createLandingPageLead = async (req, res) => {
         email: lead.email,
         phone: lead.phone,
         message: lead.message,
+        language: lead.language,
         source: ZAPIER_SOURCES.LANDING_PAGE_LEAD,
       });
     } catch (zapierError) {
@@ -133,7 +136,7 @@ const updateLandingPageLead = async (req, res) => {
     }
 
     const updates = {};
-    const allowedFields = ['landingPage', 'subSource', 'fullName', 'email', 'phone', 'message'];
+    const allowedFields = ['landingPage', 'subSource', 'fullName', 'email', 'phone', 'message', 'language'];
     allowedFields.forEach((field) => {
       if (req.body[field] !== undefined) updates[field] = req.body[field];
     });
