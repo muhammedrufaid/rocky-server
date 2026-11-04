@@ -50,6 +50,7 @@ async function sendToZapierWebhook(envVarName, payload, options = {}) {
       return { ok: false, error: `HTTP ${response.status}` };
     }
 
+    console.log(`[${logLabel}] Lead sent via ${envVarName}`);
     return { ok: true };
   } catch (error) {
     console.error(`[${logLabel}] Webhook failed:`, error.message);
@@ -71,8 +72,15 @@ async function sendJewelTowerLeadToZapier(payload) {
   return sendToZapierWebhook('JEWEL_TOWER_ZAPIER_WEBHOOK_URL', payload);
 }
 
+async function sendGoogleAdsLeadToZapier(payload) {
+  return sendToZapierWebhook('GOOGLE_ADS_ZAPIER_WEBHOOK_URL', payload, {
+    logLabel: 'Zapier Google Ads',
+  });
+}
+
 module.exports = {
   sendToZapier,
   sendJewelTowerLeadToZapier,
+  sendGoogleAdsLeadToZapier,
   ZAPIER_SOURCES,
 };

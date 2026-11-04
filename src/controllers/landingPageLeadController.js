@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const LandingPageLead = require('../models/LandingPageLead');
 const { sendLandingPageLeadToGoogleSheet } = require('../services/googleSheetsService');
-const { sendToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
+const { sendToZapier, sendGoogleAdsLeadToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 
 // 1. Create landing page lead - POST /api/landing-page-lead
 const createLandingPageLead = async (req, res) => {
@@ -39,20 +39,28 @@ const createLandingPageLead = async (req, res) => {
       console.error('[Google Sheets] Unexpected error after landing page lead save:', sheetsError.message);
     }
 
+    const zapierPayload = {
+      landingPage: lead.landingPage,
+      subSource: lead.subSource,
+      fullName: lead.fullName,
+      email: lead.email,
+      phone: lead.phone,
+      message: lead.message,
+      language: lead.language,
+      source: ZAPIER_SOURCES.LANDING_PAGE_LEAD,
+    };
+
     // MongoDB is source of truth; Zapier is best-effort (never fails the request)
     try {
-      await sendToZapier({
-        landingPage: lead.landingPage,
-        subSource: lead.subSource,
-        fullName: lead.fullName,
-        email: lead.email,
-        phone: lead.phone,
-        message: lead.message,
-        language: lead.language,
-        source: ZAPIER_SOURCES.LANDING_PAGE_LEAD,
-      });
+      await sendToZapier(zapierPayload);
     } catch (zapierError) {
       console.error('[Zapier] Unexpected error after landing page lead save:', zapierError.message);
+    }
+
+    try {
+      await sendGoogleAdsLeadToZapier(zapierPayload);
+    } catch (zapierError) {
+      console.error('[Zapier Google Ads] Unexpected error after landing page lead save:', zapierError.message);
     }
 
     return res.status(201).json({
