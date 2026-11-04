@@ -37,6 +37,11 @@ const landingPageLeadSchema = new mongoose.Schema(
       required: [false, 'Message is required'],
       trim: true,
     },
+    language: {
+      type: String,
+      required: false,
+      trim: true,
+    },
   },
   { timestamps: true }
 );
