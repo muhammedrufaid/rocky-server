@@ -3,18 +3,25 @@ const LandingPageLead = require('../models/LandingPageLead');
 const { sendLandingPageLeadToGoogleSheet } = require('../services/googleSheetsService');
 const { sendGoogleAdsLeadToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 
-function flattenQuiz(quiz) {
-  if (!quiz || typeof quiz !== 'object') return {};
-  return {
-    quizGoal: quiz.goal || '',
-    quizPropertyType: quiz.propertyType || '',
-    quizBedrooms: quiz.bedrooms || '',
-    quizBudget: quiz.budget || '',
-    quizTimeline: quiz.timeline || '',
-    quizPurchasedBefore: quiz.purchasedBefore || '',
-    quizContactMethod: quiz.contactMethod || '',
-    quizContactTime: quiz.contactTime || '',
-  };
+const QUIZ_FIELDS = [
+  'goal',
+  'propertyType',
+  'bedrooms',
+  'budget',
+  'timeline',
+  'purchasedBefore',
+  'contactMethod',
+  'contactTime',
+];
+
+function quizForIntegrations(quiz) {
+  const source = quiz && typeof quiz.toObject === 'function' ? quiz.toObject() : quiz || {};
+  const fields = {};
+  for (const field of QUIZ_FIELDS) {
+    const value = source[field];
+    fields[field] = value == null ? '' : String(value).trim();
+  }
+  return fields;
 }
 
 // 1. Create landing page lead - POST /api/landing-page-lead
@@ -47,7 +54,7 @@ const createLandingPageLead = async (req, res) => {
       ...(quiz ? { quiz } : {}),
     });
 
-    const quizAnswers = flattenQuiz(lead.quiz);
+    const quizAnswers = quizForIntegrations(lead.quiz);
 
     try {
       await sendLandingPageLeadToGoogleSheet({
@@ -72,7 +79,6 @@ const createLandingPageLead = async (req, res) => {
       phone: lead.phone,
       message: lead.message,
       language: lead.language,
-      ...(lead.quiz ? { quiz: lead.quiz } : {}),
       ...quizAnswers,
       source: ZAPIER_SOURCES.LANDING_PAGE_LEAD,
     };
