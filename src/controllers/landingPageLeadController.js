@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const LandingPageLead = require('../models/LandingPageLead');
 const { sendLandingPageLeadToGoogleSheet } = require('../services/googleSheetsService');
-const { sendGoogleAdsLeadToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
+const { sendToZapier, sendGoogleAdsLeadToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
 
 const QUIZ_FIELDS = [
   'goal',
@@ -14,6 +14,17 @@ const QUIZ_FIELDS = [
   'contactTime',
 ];
 
+const QUIZ_LABELS = {
+  goal: 'Goal',
+  propertyType: 'Property type',
+  bedrooms: 'Bedrooms',
+  budget: 'Budget',
+  timeline: 'Timeline',
+  purchasedBefore: 'Purchased before',
+  contactMethod: 'Contact method',
+  contactTime: 'Contact time',
+};
+
 function quizForIntegrations(quiz) {
   const source = quiz && typeof quiz.toObject === 'function' ? quiz.toObject() : quiz || {};
   const fields = {};
@@ -22,6 +33,13 @@ function quizForIntegrations(quiz) {
     fields[field] = value == null ? '' : String(value).trim();
   }
   return fields;
+}
+
+function quizText(fields) {
+  return QUIZ_FIELDS
+    .filter((field) => fields[field])
+    .map((field) => `${QUIZ_LABELS[field]}: ${fields[field]}`)
+    .join('\n');
 }
 
 // 1. Create landing page lead - POST /api/landing-page-lead
@@ -79,15 +97,25 @@ const createLandingPageLead = async (req, res) => {
       phone: lead.phone,
       message: lead.message,
       language: lead.language,
+      quiz: quizText(quizAnswers),
       ...quizAnswers,
+      quizGoal: quizAnswers.goal,
+      quizPropertyType: quizAnswers.propertyType,
+      quizBedrooms: quizAnswers.bedrooms,
+      quizBudget: quizAnswers.budget,
+      quizTimeline: quizAnswers.timeline,
+      quizPurchasedBefore: quizAnswers.purchasedBefore,
+      quizContactMethod: quizAnswers.contactMethod,
+      quizContactTime: quizAnswers.contactTime,
       source: ZAPIER_SOURCES.LANDING_PAGE_LEAD,
     };
 
     // MongoDB is source of truth; Zapier is best-effort (never fails the request)
     try {
+      await sendToZapier(zapierPayload);
       await sendGoogleAdsLeadToZapier(zapierPayload);
     } catch (zapierError) {
-      console.error('[Zapier Google Ads] Unexpected error after landing page lead save:', zapierError.message);
+      console.error('[Zapier] Unexpected error after landing page lead save:', zapierError.message);
     }
 
     return res.status(201).json({
