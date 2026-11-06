@@ -1,17 +1,38 @@
 const mongoose = require('mongoose');
 const LandingPageLead = require('../models/LandingPageLead');
 const { sendLandingPageLeadToGoogleSheet } = require('../services/googleSheetsService');
-const { sendToZapier, sendGoogleAdsLeadToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
+const { sendGoogleAdsLeadToZapier, ZAPIER_SOURCES } = require('../services/zapierService');
+
+function flattenQuiz(quiz) {
+  if (!quiz || typeof quiz !== 'object') return {};
+  return {
+    quizGoal: quiz.goal || '',
+    quizPropertyType: quiz.propertyType || '',
+    quizBedrooms: quiz.bedrooms || '',
+    quizBudget: quiz.budget || '',
+    quizTimeline: quiz.timeline || '',
+    quizPurchasedBefore: quiz.purchasedBefore || '',
+    quizContactMethod: quiz.contactMethod || '',
+    quizContactTime: quiz.contactTime || '',
+  };
+}
 
 // 1. Create landing page lead - POST /api/landing-page-lead
 const createLandingPageLead = async (req, res) => {
   try {
-    const { landingPage, subSource, fullName, email, phone, message, language } = req.body;
+    const { landingPage, subSource, fullName, email, phone, message, language, quiz } = req.body;
 
     if (!landingPage || !subSource || !fullName || !email || !phone || !message) {
       return res.status(400).json({
         success: false,
         message: 'Please provide landingPage, subSource, fullName, email, phone and message',
+      });
+    }
+
+    if (quiz != null && (typeof quiz !== 'object' || Array.isArray(quiz))) {
+      return res.status(400).json({
+        success: false,
+        message: 'quiz must be an object',
       });
     }
 
@@ -23,7 +44,10 @@ const createLandingPageLead = async (req, res) => {
       phone,
       message,
       language,
+      ...(quiz ? { quiz } : {}),
     });
+
+    const quizAnswers = flattenQuiz(lead.quiz);
 
     try {
       await sendLandingPageLeadToGoogleSheet({
@@ -34,6 +58,7 @@ const createLandingPageLead = async (req, res) => {
         phone: lead.phone,
         message: lead.message,
         language: lead.language,
+        ...quizAnswers,
       });
     } catch (sheetsError) {
       console.error('[Google Sheets] Unexpected error after landing page lead save:', sheetsError.message);
@@ -47,16 +72,12 @@ const createLandingPageLead = async (req, res) => {
       phone: lead.phone,
       message: lead.message,
       language: lead.language,
+      ...(lead.quiz ? { quiz: lead.quiz } : {}),
+      ...quizAnswers,
       source: ZAPIER_SOURCES.LANDING_PAGE_LEAD,
     };
 
     // MongoDB is source of truth; Zapier is best-effort (never fails the request)
-    try {
-      await sendToZapier(zapierPayload);
-    } catch (zapierError) {
-      console.error('[Zapier] Unexpected error after landing page lead save:', zapierError.message);
-    }
-
     try {
       await sendGoogleAdsLeadToZapier(zapierPayload);
     } catch (zapierError) {
@@ -143,8 +164,15 @@ const updateLandingPageLead = async (req, res) => {
       });
     }
 
+    if (req.body.quiz != null && (typeof req.body.quiz !== 'object' || Array.isArray(req.body.quiz))) {
+      return res.status(400).json({
+        success: false,
+        message: 'quiz must be an object',
+      });
+    }
+
     const updates = {};
-    const allowedFields = ['landingPage', 'subSource', 'fullName', 'email', 'phone', 'message', 'language'];
+    const allowedFields = ['landingPage', 'subSource', 'fullName', 'email', 'phone', 'message', 'language', 'quiz'];
     allowedFields.forEach((field) => {
       if (req.body[field] !== undefined) updates[field] = req.body[field];
     });
