@@ -1,5 +1,19 @@
 const mongoose = require('mongoose');
 
+const landingPageLeadQuizSchema = new mongoose.Schema(
+  {
+    goal: { type: String, trim: true },
+    propertyType: { type: String, trim: true },
+    bedrooms: { type: String, trim: true },
+    budget: { type: String, trim: true },
+    timeline: { type: String, trim: true },
+    purchasedBefore: { type: String, trim: true },
+    contactMethod: { type: String, trim: true },
+    contactTime: { type: String, trim: true },
+  },
+  { _id: false }
+);
+
 const landingPageLeadSchema = new mongoose.Schema(
   {
     landingPage: {
@@ -41,6 +55,10 @@ const landingPageLeadSchema = new mongoose.Schema(
       type: String,
       required: false,
       trim: true,
+    },
+    quiz: {
+      type: landingPageLeadQuizSchema,
+      required: false,
     },
   },
   { timestamps: true }
