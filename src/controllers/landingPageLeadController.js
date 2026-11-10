@@ -42,10 +42,26 @@ function quizText(fields) {
     .join('\n');
 }
 
+const LANDING_PAGE_FROM_QUERY = {
+  'dubai-islands': 'dubai islands',
+  'dubai-south': 'dubai south',
+};
+
+function landingPageFromQuery(query) {
+  if (!query || typeof query !== 'object') return null;
+  for (const key of Object.keys(query)) {
+    const page = LANDING_PAGE_FROM_QUERY[String(key).trim().toLowerCase()];
+    if (page) return page;
+  }
+  return null;
+}
+
 // 1. Create landing page lead - POST /api/landing-page-lead
 const createLandingPageLead = async (req, res) => {
   try {
-    const { landingPage, subSource, fullName, email, phone, message, language, quiz } = req.body;
+    const queryLandingPage = landingPageFromQuery(req.query);
+    const { subSource, fullName, email, phone, message, language, quiz } = req.body;
+    const landingPage = queryLandingPage || req.body.landingPage;
 
     if (!landingPage || !subSource || !fullName || !email || !phone || !message) {
       return res.status(400).json({
