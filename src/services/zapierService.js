@@ -72,8 +72,29 @@ async function sendJewelTowerLeadToZapier(payload) {
   return sendToZapierWebhook('JEWEL_TOWER_ZAPIER_WEBHOOK_URL', payload);
 }
 
+const GOOGLE_ADS_LANDING_PAGE_WEBHOOKS = {
+  'dubai-islands': 'DUBAI_ISLANDS_ZAPIER_WEBHOOK_URL',
+  'dubai-south': 'DUBAI_SOUTH_ZAPIER_WEBHOOK_URL',
+};
+
+function googleAdsWebhookEnv(landingPage) {
+  const key = String(landingPage || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, '-');
+  return GOOGLE_ADS_LANDING_PAGE_WEBHOOKS[key] || null;
+}
+
 async function sendGoogleAdsLeadToZapier(payload) {
-  return sendToZapierWebhook('GOOGLE_ADS_ZAPIER_WEBHOOK_URL', payload, {
+  const envVarName = googleAdsWebhookEnv(payload?.landingPage);
+  if (!envVarName) {
+    console.warn(
+      `[Zapier Google Ads] No webhook configured for landing page "${payload?.landingPage}"; skipping`
+    );
+    return { ok: false, skipped: true };
+  }
+
+  return sendToZapierWebhook(envVarName, payload, {
     logLabel: 'Zapier Google Ads',
   });
 }
